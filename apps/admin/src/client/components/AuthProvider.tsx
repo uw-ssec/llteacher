@@ -15,6 +15,8 @@ const NARROWEST_CONSOLE_ROLE: CourseRole = "ta";
 export interface CourseOption {
   id: string;
   title: string;
+  code: string;
+  term: string;
   role: CourseRole;
   canViewSolutions: boolean;
   canViewDrafts: boolean;
@@ -90,6 +92,8 @@ function parseCourse(raw: unknown, fallbackRole: CourseRole | null): CourseOptio
   return {
     id: c.id,
     title: c.title,
+    code: typeof c.code === "string" ? c.code : c.title,
+    term: typeof c.term === "string" ? c.term : "",
     role,
     canViewSolutions: c.canViewSolutions === true,
     canViewDrafts: c.canViewDrafts === true,

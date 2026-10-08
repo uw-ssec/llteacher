@@ -178,25 +178,25 @@ git commit -m "feat(admin): provision instructor course shells atomically"
 - Modify: `apps/admin/src/client/App.tsx`
 - Modify: `apps/admin/src/client/App.test.tsx`
 
-- [ ] **Step 1: Write failing UI and request tests**
+- [x] **Step 1: Write failing UI and request tests**
 
 Cover: a super admin with no institution sees a blocking first-run form; instructors never see it; organization fields validate and submit; after success the regular portal appears; Course Setup appears only for super admins; successful provisioning reports the instructor and course without pretending Canvas is linked; and an API error preserves entered values.
 
-- [ ] **Step 2: Run the focused tests and confirm failure**
+- [x] **Step 2: Run the focused tests and confirm failure**
 
 Run: `npm --workspace apps/admin test -- --run src/client/lib/api-client.test.ts src/client/views/OrganizationSetupView.test.tsx src/client/views/CourseSetupView.test.tsx src/client/components/AdminSidebar.test.tsx src/client/App.test.tsx`
 
-- [ ] **Step 3: Implement the two forms and app gating**
+- [x] **Step 3: Implement the two forms and app gating**
 
 Add typed API-client groups for the singleton organization and course provisioning endpoints. Keep the existing portal design. The organization screen is an explicit first-run gate only for a super admin when no local institution exists; the course form remains a super-admin sidebar tab afterward. Do not add Canvas inputs to Course Setup.
 
-- [ ] **Step 4: Run the focused tests**
+- [x] **Step 4: Run the focused tests**
 
 Run the command from Step 2.
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/admin/src/client/lib/api-client.ts apps/admin/src/client/lib/api-client.test.ts apps/admin/src/client/views/OrganizationSetupView.tsx apps/admin/src/client/views/OrganizationSetupView.test.tsx apps/admin/src/client/views/CourseSetupView.tsx apps/admin/src/client/views/CourseSetupView.test.tsx apps/admin/src/client/components/AdminSidebar.tsx apps/admin/src/client/components/AdminSidebar.test.tsx apps/admin/src/client/App.tsx apps/admin/src/client/App.test.tsx
@@ -218,25 +218,25 @@ git commit -m "feat(admin): add organization and course setup screens"
 - Modify: `apps/admin/src/client/App.tsx`
 - Modify: `apps/admin/src/client/App.test.tsx`
 
-- [ ] **Step 1: Write failing API and UI tests**
+- [x] **Step 1: Write failing API and UI tests**
 
 Require each profile course to expose code and term. Test zero, one, and multiple courses; switching updates the displayed breadcrumb; selection persists by user in localStorage; a stale stored id falls back deterministically; and switching from a nested/detail view returns to that course's safe default rather than leaking old-course ids.
 
-- [ ] **Step 2: Run focused tests and confirm the missing metadata/switcher failures**
+- [x] **Step 2: Run focused tests and confirm the missing metadata/switcher failures**
 
 Run: `npm --workspace apps/web test -- --run src/lib/services/ProfileService.test.ts src/server/routes/profile.test.ts && npm --workspace packages/ui test -- --run src/components/TopNav.test.tsx && npm --workspace apps/admin test -- --run src/client/components/AuthProvider.test.tsx src/client/App.test.tsx`
 
-- [ ] **Step 3: Implement selected-course ownership in the app shell**
+- [x] **Step 3: Implement selected-course ownership in the app shell**
 
 Extend the profile response, render a compact TopNav selector only when multiple courses exist, key persisted selection by authenticated user id, and replace `courses[0]`/hard-coded `STATS 311` and term values. On change, reset course-scoped view state and let every resource refetch through the selected id.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run the command from Step 2.
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/web/src/lib/services/ProfileService.ts apps/web/src/lib/services/ProfileService.test.ts apps/web/src/server/routes/profile.test.ts packages/ui/src/api.ts packages/ui/src/components/TopNav.tsx packages/ui/src/components/TopNav.test.tsx apps/admin/src/client/components/AuthProvider.tsx apps/admin/src/client/components/AuthProvider.test.tsx apps/admin/src/client/App.tsx apps/admin/src/client/App.test.tsx

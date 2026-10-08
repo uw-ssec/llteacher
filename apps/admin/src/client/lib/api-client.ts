@@ -51,6 +51,10 @@ import type {
   MaterialStatus,
   RosterImportPayload,
   RosterListPayload,
+  OrganizationResponse,
+  CreateOrganizationBody,
+  ProvisionCourseBody,
+  ProvisionCourseResponse,
 } from "@llteacher/ui/api";
 
 /** How a request failed, in the terms a view actually branches on.
@@ -220,6 +224,26 @@ const encode = encodeURIComponent;
  *  than by HTTP verb -- a view reaches for `llmConfigs.update`, not for
  *  `patch("/llm-configs/...")`. */
 export const apiClient = {
+  platformOrganization: {
+    get: (opts: RequestOptions) =>
+      request<OrganizationResponse>("/api/platform/organization", { method: "GET" }, opts),
+    create: (body: CreateOrganizationBody, opts: RequestOptions) =>
+      request<OrganizationResponse>(
+        "/api/platform/organization",
+        { method: "POST", body: JSON.stringify(body) },
+        opts,
+      ),
+  },
+
+  platformCourses: {
+    create: (body: ProvisionCourseBody, opts: RequestOptions) =>
+      request<ProvisionCourseResponse>(
+        "/api/platform/courses",
+        { method: "POST", body: JSON.stringify(body) },
+        opts,
+      ),
+  },
+
   llmConfigs: {
     list: (courseId: string, opts: RequestOptions) =>
       request<LlmConfigListPayload>(

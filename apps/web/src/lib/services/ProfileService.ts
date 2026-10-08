@@ -169,6 +169,8 @@ export class ProfileService {
         .map((m) => ({
           id: m.course.id,
           title: m.course.title,
+          code: m.course.code,
+          term: m.course.term,
           role: m.role,
           ...resolveTaCapabilities(m),
         }))

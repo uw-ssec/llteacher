@@ -54,6 +54,8 @@ export interface ProfileResponse extends ProfileWithStats {
 export interface CourseMembershipSummary {
   id: string;
   title: string;
+  code: string;
+  term: string;
   role: CourseRole;
   canViewSolutions: boolean;
   canViewDrafts: boolean;
