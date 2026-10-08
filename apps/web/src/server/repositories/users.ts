@@ -311,6 +311,7 @@ export async function deactivateByWorkosUserId(db: Db, workosUserId: string) {
 
 export type GrantOrgAdminResult =
   | { status: "granted"; userId: string }
+  | { status: "organization_missing"; message: string }
   | { status: "invalid_email" | "disallowed_domain"; message: string };
 
 /** Grants Org Admin in one organization, by email. Same identity path as
@@ -326,9 +327,16 @@ export async function grantOrgAdmin(
   rawEmail: string,
 ): Promise<GrantOrgAdminResult> {
   const email = IdentityCipher.normalizeEmail(rawEmail);
+  const organization = await db.query.organizations.findFirst({
+    where: eq(organizations.id, organizationId),
+    columns: { allowedDomains: true },
+  });
+  if (!organization) {
+    return { status: "organization_missing", message: "Organization not found" };
+  }
   const domainCheck = DomainAllowlistService.validateEmailDomain(
     email,
-    DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS,
+    organization.allowedDomains,
   );
   if (!domainCheck.allowed) {
     const malformed = domainCheck.reason === "Invalid email format";

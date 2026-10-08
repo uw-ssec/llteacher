@@ -7,7 +7,7 @@ import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { DomainAllowlistService } from "../../lib/services/DomainAllowlistService";
 import { UserIdentityService, type WorkOSProfile } from "../../lib/services/UserIdentityService";
-import { getOrgScopeByWorkosOrgId } from "../repositories/organizations";
+import { getAuthenticationOrgScope } from "../repositories/organizations";
 import { getOrgScopesForUser } from "../repositories/users";
 import { AUDIT_ACTIONS, auditBestEffort } from "../utils/audit";
 import {
@@ -166,14 +166,14 @@ export const callbackHandler = effectHandler((c) => Effect.gen(function* () {
     );
 
     // Best-effort (#147): a login/provisioning audit gap must never block
-    // sign-in. Scoped via the WorkOS org the user just authenticated into
-    // (getOrgScopesForUser, the course-membership-derived lookup used
-    // elsewhere in this file, can't be used here -- a brand-new user has no
-    // memberships yet). No-ops if no local org row matches (single-tenant
-    // v0 dev path), same fallback DomainAllowlistService already makes.
+    // sign-in. Prefer the WorkOS org the user authenticated into, then use
+    // the deployment singleton for auth-only installations. The
+    // course-membership-derived lookup used elsewhere cannot be used here:
+    // a brand-new user has no memberships yet. No-ops only when neither a
+    // matching WorkOS org nor a deployment institution exists.
     const orgScope = yield* query(
-      "getOrgScopeByWorkosOrgId",
-      (db) => getOrgScopeByWorkosOrgId(db, workosOrganizationId),
+      "getAuthenticationOrgScope",
+      (db) => getAuthenticationOrgScope(db, workosOrganizationId),
     );
     if (orgScope) {
       yield* query("auditBestEffort", (db) =>

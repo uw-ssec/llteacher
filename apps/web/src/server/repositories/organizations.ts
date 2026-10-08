@@ -16,6 +16,27 @@ export async function getOrgScopeByWorkosOrgId(
   return org ? unsafeOrgScope(org.id) : null;
 }
 
+/** Resolves the local institution that owns an AuthKit login. Deployments
+ * may authenticate without a WorkOS organization, so an absent or unmatched
+ * WorkOS id falls back to the explicitly marked deployment singleton. */
+export async function getAuthenticationOrgScope(
+  db: Db,
+  workosOrganizationId: string | undefined,
+): Promise<OrgScope | null> {
+  let org: { id: string } | undefined;
+  if (workosOrganizationId) {
+    org = await db.query.organizations.findFirst({
+      where: eq(organizations.workosOrganizationId, workosOrganizationId),
+      columns: { id: true },
+    });
+  }
+  org ??= await db.query.organizations.findFirst({
+    where: eq(organizations.deploymentSingleton, true),
+    columns: { id: true },
+  });
+  return org ? unsafeOrgScope(org.id) : null;
+}
+
 export async function getOrgScopeForCourse(db: Db, courseId: string): Promise<OrgScope | null> {
   const course = await db.query.courses.findFirst({
     where: eq(courses.id, courseId),
