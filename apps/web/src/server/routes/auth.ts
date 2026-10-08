@@ -183,7 +183,14 @@ export const callbackHandler = effectHandler((c) => Effect.gen(function* () {
     }
 
     const sessionKey = yield* fromConfig(() => loadSessionKey(c.env));
-    const payload = createSessionPayload(userId, workosUser.id, sessionEpoch, undefined, workosSessionId);
+    const payload = createSessionPayload(
+      userId,
+      workosUser.id,
+      sessionEpoch,
+      undefined,
+      workosSessionId,
+      workosOrganizationId,
+    );
     const sealed = yield* fromConfig(() => sealSession(payload, sessionKey));
 
     setCookie(c, SESSION_COOKIE_NAME, sealed, {

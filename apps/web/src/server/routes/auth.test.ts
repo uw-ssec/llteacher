@@ -5,6 +5,7 @@ import {
   createSessionPayload,
   loadSessionKey,
   sealSession,
+  unsealSession,
 } from "../../lib/session";
 import {
   OAUTH_TRANSACTION_COOKIE,
@@ -242,6 +243,7 @@ describe("GET /callback", () => {
     authenticateWithCode.mockResolvedValue({
       user: { id: "workos_1", email: "cdcore@uw.edu", firstName: "Cordero" },
       accessToken: fakeAccessToken(),
+      organizationId: "workos_org_1",
     });
     const { path, headers } = await loginThenBuildCallbackRequest();
     const res = await auth.request(path, { headers }, TEST_ENV);
@@ -250,6 +252,10 @@ describe("GET /callback", () => {
     const setCookie = res.headers.get("set-cookie") ?? "";
     expect(setCookie).toContain(SESSION_COOKIE_NAME);
     expect(setCookie).toContain("HttpOnly");
+    const sealed = setCookie.match(new RegExp(`${SESSION_COOKIE_NAME}=([^;]+)`))?.[1];
+    expect(sealed).toBeDefined();
+    const session = await unsealSession(sealed!, await loadSessionKey(TEST_ENV));
+    expect(session?.workosOrganizationId).toBe("workos_org_1");
   });
 
   it("returns an admin sign-in flow to /admin", async () => {

@@ -46,25 +46,25 @@ The implementation must explicitly test these easy-to-miss cases:
 - Modify: `apps/web/src/server/routes/auth.test.ts`
 - Modify: `apps/web/src/server/middleware/auth.test.ts`
 
-- [ ] **Step 1: Write failing session tests**
+- [x] **Step 1: Write failing session tests**
 
 Add assertions that an optional `workosOrganizationId` survives sealing/unsealing, that older cookies without it still parse, and that malformed non-string values are rejected.
 
-- [ ] **Step 2: Run the focused tests and confirm the new assertion fails**
+- [x] **Step 2: Run the focused tests and confirm the new assertion fails**
 
 Run: `npm --workspace apps/web test -- --run src/lib/session.test.ts src/server/routes/auth.test.ts src/server/middleware/auth.test.ts`
 
-- [ ] **Step 3: Extend the session contract and callback**
+- [x] **Step 3: Extend the session contract and callback**
 
 Add `workosOrganizationId?: string` to `SessionPayload`, thread the organization id returned by AuthKit into `createSessionPayload`, and leave logout/session-epoch behavior unchanged. This is retained only as provenance for initial local setup; no WorkOS API write is added.
 
-- [ ] **Step 4: Run the focused tests**
+- [x] **Step 4: Run the focused tests**
 
 Run: `npm --workspace apps/web test -- --run src/lib/session.test.ts src/server/routes/auth.test.ts src/server/middleware/auth.test.ts`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/web/src/lib/session.ts apps/web/src/lib/session.test.ts apps/web/src/server/routes/auth.ts apps/web/src/server/routes/auth.test.ts apps/web/src/server/middleware/auth.test.ts
