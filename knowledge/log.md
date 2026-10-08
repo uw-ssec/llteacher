@@ -1,4 +1,21 @@
 ## 2026-10-08
+* **Update**: Linked `project/current-state.md` to `facts/check-for-concurrent-work.md` (Read before picking up open work).
+* **Update**: Linked `facts/code-test-suite-quirks.md` to `decisions/org-admin-role-and-course-scoped-configs.md` (The change that surfaced these quirks).
+* **Update**: Linked `facts/code-test-suite-quirks.md` to `facts/code-typescript-and-install.md` (The other verification trap from the same session).
+* **Update**: Linked `facts/check-for-concurrent-work.md` to `facts/integrating-stale-prs.md` (The same staleness, before and after a PR).
+* **Update**: Linked `facts/integrating-stale-prs.md` to `decisions/retry-after-remaining-window.md` (The one piece of #435 that was integrated).
+* **Update**: Linked `facts/integrating-stale-prs.md` to `decisions/llm-provider-gateway-and-failover.md` (Where the #412 AWS gap is recorded).
+* **Update**: Linked `decisions/retry-after-remaining-window.md` to `architecture/llm-tutor-pipeline.md` (The chat route's 429 path).
+* **Creation**: Documented concept `facts/code-test-suite-quirks.md` (Test-suite quirks that cost time: auth middleware mocks, jsdom fieldsets, a parallel-run flake).
+* **Creation**: Documented concept `facts/check-for-concurrent-work.md` (Several sessions work this repository at once; re-check staging before and during an issue).
+* **Creation**: Documented concept `facts/integrating-stale-prs.md` (Integrating long-open PRs: find what already landed before resolving conflicts).
+* **Creation**: Documented concept `decisions/retry-after-remaining-window.md` (Retry-After reports the time left in the rate-limit window).
+* **Update**: Updated concept `project/milestones.md`.
+* **Update**: Updated concept `project/milestones.md`.
+* **Update**: Updated concept `project/current-state.md`.
+* **Update**: Updated concept `decisions/design-system-lint.md`.
+* **Update**: Updated concept `decisions/llm-provider-gateway-and-failover.md`.
+* **Update**: Updated concept `bugs/overdue-sweep-budget-and-races.md`.
 * **Update**: Updated concept `facts/code-typescript-and-install.md`.
 * **Update**: Updated concept `facts/authority-and-provisioning-gaps.md`.
 * **Update**: Linked `decisions/course-membership-roles.md` to `decisions/org-admin-role-and-course-scoped-configs.md` (Adds the first organization-level role beside course roles).

@@ -1,9 +1,9 @@
 ---
 type: Reference
 title: Milestones M1-M13 and what each delivered
-description: "All 13 GitHub milestones (created 2026-07-30) with state, open/closed counts as of 2026-10-06, due dates, and the PRs that delivered them."
+description: "All 13 GitHub milestones (created 2026-07-30) with state, open/closed counts as of 2026-10-06 (M3, M4, M5 closed 2026-10-08), due dates, and the PRs that delivered them."
 tags: [project, milestones, roadmap]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T22:32:34Z" }
+generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-08T20:53:10Z" }
 status: stable
 governance: context
 code_refs: [docs/superpowers/plans, docs/superpowers/specs]
@@ -30,9 +30,9 @@ All milestones were created on 2026-07-30 from roadmap issue #67. Counts are ope
 |---|---|---|---|---|
 | M1 Auth & Identity (WorkOS) | closed 2026-09-22 | 0/20 | – | PR #110 (AuthKit session, encrypted provisioning, uw.edu allowlist, role guards, profile), PR #127 (WorkOS webhooks #95), PR #209 (TA grader tier) |
 | M2 Runtime Data Layer & Persistence | open | 0/9 | – | PR #127: conversations, messages, submissions, grades, citations, llm_call_logs, student_profiles, audit_events, org-scoped repositories, seed |
-| M3 Homeworks & Submissions Parity | open | 1/23 | – | PRs #154, #173, #247; #165 (self-assessment widgets) remains |
-| M4 Conversations, Chat & R Execution | open | 1/151 | – | PR #212 (PR1), #317 (PR2), #366 (PR3: WebR + transcript viewer), #413/#432 (PR4), #440 (PR5, closed epic #30); #442 remains |
-| M5 Admin Console & LLM Config Parity | open | 1/34 | – | PR #363 (live console, roster, grading, export); #367 Org Admin role remains |
+| M3 Homeworks & Submissions Parity | closed | 0 open | – | PRs #154, #173, #247, #481 (#165 self-assessment prompts and export) |
+| M4 Conversations, Chat & R Execution | closed | 0 open | – | PR #212 (PR1), #317 (PR2), #366 (PR3: WebR + transcript viewer), #413/#432 (PR4), #440 (PR5, closed epic #30), #482 (#442 per-org SQL bound) |
+| M5 Admin Console & LLM Config Parity | closed | 0 open | – | PR #363 (live console, roster, grading, export), #484 (#367 Org Admin role) |
 | M6 Generative UI Expansion | open | 5/0 | – | not started (#35–#39) |
 | M7 RAG & Course Materials | open | 6/0 | 2026-09-17 (past) | issues untouched, but the knowledge base shipped another way: OKF bundle via PRs #445, #459 (inferred overlap, so issues #40–#44 need re-scoping) |
 | M8 Data Analytics & Telemetry | open | 10/0 | – | not started |
