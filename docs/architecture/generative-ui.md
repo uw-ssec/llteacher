@@ -86,9 +86,9 @@ const TOOLS: ToolSet = {
 !!! warning "Why `jsonSchema()` and not Zod"
     Zod's deeply parameterized types collide with `ToolSet` generic inference and trigger `TS2589: Type instantiation is excessively deep and possibly infinite`. The `jsonSchema<T>()` helper provides equivalent type safety with the same runtime validation, without the type-system explosion. Use this pattern for all future tools.
 
-### Display-only tools have no `execute`
+### Display tools return a sentinel from `execute`
 
-`showDefinition` has no server-side `execute` callback — its only purpose is to stream `term` and `body` to the client for rendering. Tools that need server-side work (a DB lookup, an external API call) would add `execute: async ({ args }) => result`.
+Display tools (`showDefinition` and the subject figures) still have a server-side `execute`. It returns a sentinel such as `{ status: "displayed" }`. Without a tool result, the history becomes invalid on the student's next message: the model sees an unanswered tool call. The sentinel also lets the model continue with follow-up text in the same turn (`stopWhen`).
 
 ### System prompt
 
@@ -230,6 +230,21 @@ if (part.type === "tool-showDistribution") {
 ```
 
 That's the entire surface area. No client transport changes, no message-mapping changes, no streaming protocol changes.
+
+## Subject figures (ECON 201, bioinformatics, shared)
+
+Nine more display tools draw figures instead of text. All are listed in [components.md](../design-system/components.md#subject-figures-figureplate-family):
+- `showWorkedSteps` (shared);
+- ECON 201: `showMacroModel`, `showGdpComposition`, `showMultiplier`, `showLaborForce`, `showInflation`;
+- bioinformatics: `showAlignment`, `showTranslation`, `showPhyloTree`.
+
+They follow the same three-file recipe above, with three additions:
+
+- **Computed, not trusted.** The model supplies arguments only. The figure computes everything it asserts, in `packages/ui/src/generative/lib/` (unit-tested in `lib.test.ts`): which way equilibrium moves, GDP, the rates, the amino acids, identity and score. A tool description therefore tells the model to name the shift, not the outcome.
+- **One table, not nine branches.** `render.tsx`'s `FIGURE_TOOLS` maps each part type to a kicker, a deny-by-default parser (`toolInputs.ts`) and a renderer. Input that hasn't validated yet shows a skeleton while streaming, and nothing once streaming has finished.
+- **Per-part error boundary (#38).** `renderToolPart` wraps every tool part, old and new, in `ToolPartErrorBoundary`. `figures.test.tsx` checks lockstep: every figure tool is in `RENDERABLE_TOOL_NAMES` and renders its fixture, across all four tool states.
+
+Every course is offered all nine tools today. The descriptions say which subject each is for, and the generated tool paragraph keeps the model to the list. Gating tools per course would need a course-subject field, which doesn't exist yet.
 
 ## Streaming behavior
 

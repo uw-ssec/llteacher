@@ -38,6 +38,16 @@ export const RENDERABLE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "showDefinition",
   "executeRCode",
   "markSectionComplete",
+  // Subject figures: shared, ECON 201, bioinformatics.
+  "showWorkedSteps",
+  "showMacroModel",
+  "showGdpComposition",
+  "showMultiplier",
+  "showLaborForce",
+  "showInflation",
+  "showAlignment",
+  "showTranslation",
+  "showPhyloTree",
 ]);
 
 /** True when a `tool-<name>` part type names a tool the client can render.

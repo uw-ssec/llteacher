@@ -17,6 +17,28 @@ import { DefinitionCard } from "./DefinitionCard";
 import { CodeExecution, type RCodeResult } from "./renderers/CodeExecution";
 import { SectionCompleteSuggestion } from "./renderers/SectionCompleteSuggestion";
 import { isRenderableToolPartType } from "./renderableTools";
+import { ToolPartErrorBoundary } from "./ToolPartErrorBoundary";
+import { FigureSkeleton } from "./figure/FigurePlate";
+import { WorkedSteps } from "./renderers/WorkedSteps";
+import { MacroModelDiagram } from "./renderers/econ/MacroModelDiagram";
+import { GdpComposition } from "./renderers/econ/GdpComposition";
+import { MultiplierRounds } from "./renderers/econ/MultiplierRounds";
+import { LaborForce } from "./renderers/econ/LaborForce";
+import { PriceIndex } from "./renderers/econ/PriceIndex";
+import { SequenceAlignment } from "./renderers/bio/SequenceAlignment";
+import { Translation } from "./renderers/bio/Translation";
+import { PhyloTree } from "./renderers/bio/PhyloTree";
+import {
+  parseAlignmentInput,
+  parseGdpCompositionInput,
+  parseInflationInput,
+  parseLaborForceInput,
+  parseMacroModelInput,
+  parseMultiplierInput,
+  parsePhyloTreeInput,
+  parseTranslationInput,
+  parseWorkedStepsInput,
+} from "./toolInputs";
 
 /* The minimal shape of a tool part we care about. AI SDK v5 emits parts
    with `type: 'tool-<toolName>'` and a state machine on `state`. */
@@ -102,7 +124,50 @@ export interface ToolPartHandlers {
   onRunRCode?: (code: string) => Promise<RCodeResult>;
 }
 
+/* Subject figures (ECON 201, bioinformatics, shared worked steps): every
+   one is "validate the model's JSON, then draw", so they share one table
+   rather than nine near-identical branches. While the arguments are still
+   streaming and don't yet validate, a skeleton plate holds the space;
+   once streaming has finished, input that still doesn't validate renders
+   nothing (the deny-by-default contract above). */
+interface FigureTool<P> {
+  kicker: string;
+  parse: (input: unknown) => P | null;
+  render: (props: P, isPartial: boolean) => ReactNode;
+}
+
+function figureTool<P>(tool: FigureTool<P>): FigureTool<unknown> {
+  return tool as FigureTool<unknown>;
+}
+
+const FIGURE_TOOLS: Record<string, FigureTool<unknown>> = {
+  "tool-showWorkedSteps": figureTool({ kicker: "Worked steps", parse: parseWorkedStepsInput, render: (p, partial) => <WorkedSteps {...p} isPartial={partial} /> }),
+  "tool-showMacroModel": figureTool({ kicker: "Macro model", parse: parseMacroModelInput, render: (p, partial) => <MacroModelDiagram {...p} isPartial={partial} /> }),
+  "tool-showGdpComposition": figureTool({ kicker: "National income", parse: parseGdpCompositionInput, render: (p, partial) => <GdpComposition {...p} isPartial={partial} /> }),
+  "tool-showMultiplier": figureTool({ kicker: "Fiscal policy", parse: parseMultiplierInput, render: (p, partial) => <MultiplierRounds {...p} isPartial={partial} /> }),
+  "tool-showLaborForce": figureTool({ kicker: "Unemployment", parse: parseLaborForceInput, render: (p, partial) => <LaborForce {...p} isPartial={partial} /> }),
+  "tool-showInflation": figureTool({ kicker: "Inflation", parse: parseInflationInput, render: (p, partial) => <PriceIndex {...p} isPartial={partial} /> }),
+  "tool-showAlignment": figureTool({ kicker: "Sequence alignment", parse: parseAlignmentInput, render: (p, partial) => <SequenceAlignment {...p} isPartial={partial} /> }),
+  "tool-showTranslation": figureTool({ kicker: "Central dogma · translation", parse: parseTranslationInput, render: (p, partial) => <Translation {...p} isPartial={partial} /> }),
+  "tool-showPhyloTree": figureTool({ kicker: "Phylogenetics", parse: parsePhyloTreeInput, render: (p, partial) => <PhyloTree {...p} isPartial={partial} /> }),
+};
+
+/** The figure-tool part types, exported for the registry lockstep test. */
+export const FIGURE_TOOL_PART_TYPES: readonly string[] = Object.keys(FIGURE_TOOLS);
+
+/** #38: every tool part renders inside its own error boundary, so one
+ *  renderer that throws costs one figure, not the whole transcript. */
 export function renderToolPart(part: ToolPart, key: string, handlers?: ToolPartHandlers): ReactNode {
+  const node = renderToolPartInner(part, handlers);
+  if (node === null) return null;
+  return (
+    <ToolPartErrorBoundary key={key} toolName={part.type.slice("tool-".length)}>
+      {node}
+    </ToolPartErrorBoundary>
+  );
+}
+
+function renderToolPartInner(part: ToolPart, handlers?: ToolPartHandlers): ReactNode {
   // Final review of #307/#342: the same set the SERVER's persistence/replay
   // gate consults (chat.ts's hasRenderableContent). Checked here, ahead of
   // the dispatch, so the set cannot claim a name this function silently
@@ -114,7 +179,6 @@ export function renderToolPart(part: ToolPart, key: string, handlers?: ToolPartH
     if (!input) return null;
     return (
       <DefinitionCard
-        key={key}
         term={input.term}
         body={input.body}
         isPartial={part.state === "input-streaming"}
@@ -126,7 +190,6 @@ export function renderToolPart(part: ToolPart, key: string, handlers?: ToolPartH
     if (!input) return null;
     return (
       <CodeExecution
-        key={key}
         code={input.code}
         showSource={input.showSource}
         isPartial={part.state === "input-streaming"}
@@ -143,7 +206,14 @@ export function renderToolPart(part: ToolPart, key: string, handlers?: ToolPartH
   // tool-input-available/tool-output-available writes) still renders the
   // same suggestion card it did live.
   if (part.type === "tool-markSectionComplete") {
-    return <SectionCompleteSuggestion key={key} isPartial={part.state === "input-streaming"} />;
+    return <SectionCompleteSuggestion isPartial={part.state === "input-streaming"} />;
+  }
+  const figure = FIGURE_TOOLS[part.type];
+  if (figure) {
+    const isPartial = part.state === "input-streaming";
+    const input = figure.parse(part.input);
+    if (!input) return isPartial ? <FigureSkeleton kicker={figure.kicker} /> : null;
+    return figure.render(input, isPartial);
   }
   return null;
 }

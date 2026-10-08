@@ -10,3 +10,15 @@ export { CodeExecution, renderTextWithCode, splitRCodeSegments } from "./rendere
 export type { CodeExecutionProps, RCodeResult, RenderTextWithCodeOptions, RCodeSegment } from "./renderers/CodeExecution";
 export { SectionCompleteSuggestion } from "./renderers/SectionCompleteSuggestion";
 export type { SectionCompleteSuggestionProps } from "./renderers/SectionCompleteSuggestion";
+export { FIGURE_TOOL_PART_TYPES } from "./render";
+export { ToolPartErrorBoundary } from "./ToolPartErrorBoundary";
+export { FigurePlate } from "./figure/FigurePlate";
+export { WorkedSteps } from "./renderers/WorkedSteps";
+export { MacroModelDiagram } from "./renderers/econ/MacroModelDiagram";
+export { GdpComposition } from "./renderers/econ/GdpComposition";
+export { MultiplierRounds } from "./renderers/econ/MultiplierRounds";
+export { LaborForce } from "./renderers/econ/LaborForce";
+export { PriceIndex } from "./renderers/econ/PriceIndex";
+export { SequenceAlignment } from "./renderers/bio/SequenceAlignment";
+export { Translation } from "./renderers/bio/Translation";
+export { PhyloTree } from "./renderers/bio/PhyloTree";

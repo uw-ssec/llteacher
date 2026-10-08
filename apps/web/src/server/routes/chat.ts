@@ -216,8 +216,8 @@ export const SHOW_BODY_MAX_CHARS = 12_000;
 export const TOOLS: ToolSet = {
   showDefinition: {
     description:
-      "Render a formal definition card for a named statistical concept. " +
-      "Use when introducing a term by name (e.g., 'p-value', 'standard error'). " +
+      "Render a formal definition card for a named concept in the course's subject. " +
+      "Use when introducing a term by name (e.g., 'p-value', 'GDP deflator', 'open reading frame'). " +
       "Keep body to 1-2 sentences in plain language. " +
       "Args: term (the concept name); body (the plain-language definition).",
     inputSchema: jsonSchema<{ term: string; body: string }>({
@@ -436,6 +436,222 @@ export const TOOLS: ToolSet = {
       additionalProperties: false,
     }),
     execute: async (_input: Record<string, never>) => ({ status: "suggested" as const }),
+  },
+  /* Subject figures: a shared worked-steps layout, ECON 201 (intro macro)
+     and bioinformatics. All DISPLAY tools, same contract as showDefinition:
+     the model supplies arguments, the sentinel below keeps the tool-call
+     history valid, and packages/ui draws the figure -- COMPUTING every
+     number it shows (equilibrium movement, GDP, rates, the translation,
+     identity) from those arguments rather than trusting the model's own
+     arithmetic. Input that doesn't validate renders nothing. */
+  showWorkedSteps: {
+    description:
+      "Lay out a multi-step calculation or derivation as numbered steps, any subject. Use when walking the student " +
+      "through a computation they should be able to repeat (a GDP deflator, an inflation rate, a Hardy-Weinberg " +
+      "frequency). Args: title; steps (1-12 of { label?, expression?, explanation? }); result? { label, value }.",
+    inputSchema: jsonSchema<{ title: string; steps: Array<{ label?: string; expression?: string; explanation?: string }>; result?: { label: string; value: string } }>({
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        steps: {
+          type: "array",
+          minItems: 1,
+          maxItems: 12,
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string", description: "Short step name, e.g. 'Rearrange for real GDP'" },
+              expression: { type: "string", description: "The math for this step, plain text, e.g. 'real GDP = 27,360 / 1.223'" },
+              explanation: { type: "string", description: "One sentence on why this step" },
+            },
+            additionalProperties: false,
+          },
+        },
+        result: {
+          type: "object",
+          properties: { label: { type: "string" }, value: { type: "string" } },
+          required: ["label", "value"],
+          additionalProperties: false,
+        },
+      },
+      required: ["title", "steps"],
+      additionalProperties: false,
+    }),
+    execute: async ({ title }: { title: string }) => ({ status: "displayed" as const, title }),
+  },
+  showMacroModel: {
+    description:
+      "ECON / macroeconomics: draw a textbook curve-shift diagram -- AD-AS ('ad-as'; curves AD, SRAS, LRAS), the " +
+      "loanable funds market ('loanable-funds'; curves D, S) or the money market ('money-market'; curves MD, MS). " +
+      "Use when explaining what a shock or a policy does to equilibrium. Name only which curves shift and which way; " +
+      "the figure computes and states the outcome, so do not assert one that contradicts it. Args: model; shifts " +
+      "(0-3 of { curve, direction: 'left'|'right', reason? }); title?.",
+    inputSchema: jsonSchema<{ model: "ad-as" | "loanable-funds" | "money-market"; shifts: Array<{ curve: string; direction: "left" | "right"; reason?: string }>; title?: string }>({
+      type: "object",
+      properties: {
+        model: { type: "string", enum: ["ad-as", "loanable-funds", "money-market"] },
+        shifts: {
+          type: "array",
+          maxItems: 3,
+          items: {
+            type: "object",
+            properties: {
+              curve: { type: "string", description: "Curve id: AD, SRAS, LRAS / D, S / MD, MS" },
+              direction: { type: "string", enum: ["left", "right"] },
+              reason: { type: "string", description: "Why it shifts, in a few words, e.g. 'Consumer confidence falls'" },
+            },
+            required: ["curve", "direction"],
+            additionalProperties: false,
+          },
+        },
+        title: { type: "string" },
+      },
+      required: ["model", "shifts"],
+      additionalProperties: false,
+    }),
+    execute: async ({ model }: { model: string }) => ({ status: "displayed" as const, model }),
+  },
+  showGdpComposition: {
+    description:
+      "ECON / macroeconomics: show GDP by the expenditure approach, GDP = C + I + G + NX, as one stacked bar " +
+      "(net exports to the left of zero when negative). Supply the four components; the figure computes GDP " +
+      "and each share. Args: consumption, investment, government, netExports; label? (e.g. 'United States, 2023'); " +
+      "unit? (prose, e.g. 'trillion dollars').",
+    inputSchema: jsonSchema<{ consumption: number; investment: number; government: number; netExports: number; label?: string; unit?: string }>({
+      type: "object",
+      properties: {
+        consumption: { type: "number", minimum: 0 },
+        investment: { type: "number", minimum: 0 },
+        government: { type: "number", minimum: 0 },
+        netExports: { type: "number", description: "Exports minus imports; negative for a trade deficit" },
+        label: { type: "string" },
+        unit: { type: "string", description: "Prose unit, e.g. 'trillion dollars'" },
+      },
+      required: ["consumption", "investment", "government", "netExports"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showMultiplier: {
+    description:
+      "ECON / macroeconomics: show the spending multiplier round by round for a change in spending, with the " +
+      "computed multiplier 1/(1-MPC) and total change in GDP. Args: mpc (0 < mpc < 1); initialChange (negative " +
+      "for a cut); rounds? (3-12, default 8); label? (what changed, e.g. 'Government spending'); unit? (prose).",
+    inputSchema: jsonSchema<{ mpc: number; initialChange: number; rounds?: number; label?: string; unit?: string }>({
+      type: "object",
+      properties: {
+        mpc: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1 },
+        initialChange: { type: "number" },
+        rounds: { type: "integer", minimum: 3, maximum: 12 },
+        label: { type: "string" },
+        unit: { type: "string" },
+      },
+      required: ["mpc", "initialChange"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showLaborForce: {
+    description:
+      "ECON / macroeconomics: split the adult population into employed, unemployed and not in the labor force, " +
+      "with the unemployment, participation and employment-population rates computed from the counts. Use when " +
+      "teaching how unemployment is measured. Args: employed, unemployed, notInLaborForce; label?; unit? (e.g. 'millions').",
+    inputSchema: jsonSchema<{ employed: number; unemployed: number; notInLaborForce: number; label?: string; unit?: string }>({
+      type: "object",
+      properties: {
+        employed: { type: "number", minimum: 0 },
+        unemployed: { type: "number", minimum: 0 },
+        notInLaborForce: { type: "number", minimum: 0 },
+        label: { type: "string" },
+        unit: { type: "string" },
+      },
+      required: ["employed", "unemployed", "notInLaborForce"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showInflation: {
+    description:
+      "ECON / macroeconomics: plot a price index (e.g. CPI) over 2-24 periods; the figure computes each period's " +
+      "inflation rate from the index values. Args: series (array of { period, value }); indexName? (e.g. 'CPI-U').",
+    inputSchema: jsonSchema<{ series: Array<{ period: string; value: number }>; indexName?: string }>({
+      type: "object",
+      properties: {
+        series: {
+          type: "array",
+          minItems: 2,
+          maxItems: 24,
+          items: {
+            type: "object",
+            properties: { period: { type: "string" }, value: { type: "number", exclusiveMinimum: 0 } },
+            required: ["period", "value"],
+            additionalProperties: false,
+          },
+        },
+        indexName: { type: "string" },
+      },
+      required: ["series"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showAlignment: {
+    description:
+      "Bioinformatics: display a pairwise sequence alignment (DNA or protein) with a match line; the figure " +
+      "computes identity, mismatches, gaps and the score. Both sequences must already be aligned to the same " +
+      "length with '-' for gaps. Args: kind ('dna'|'protein'); seqA, seqB; nameA?, nameB?; scheme? { match, " +
+      "mismatch, gap } (default +1/-1/-2).",
+    inputSchema: jsonSchema<{ kind: "dna" | "protein"; seqA: string; seqB: string; nameA?: string; nameB?: string; scheme?: { match: number; mismatch: number; gap: number } }>({
+      type: "object",
+      properties: {
+        kind: { type: "string", enum: ["dna", "protein"] },
+        seqA: { type: "string", description: "Aligned sequence with '-' for gaps" },
+        seqB: { type: "string", description: "Aligned sequence, same length as seqA" },
+        nameA: { type: "string" },
+        nameB: { type: "string" },
+        scheme: {
+          type: "object",
+          properties: { match: { type: "number" }, mismatch: { type: "number" }, gap: { type: "number" } },
+          required: ["match", "mismatch", "gap"],
+          additionalProperties: false,
+        },
+      },
+      required: ["kind", "seqA", "seqB"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showTranslation: {
+    description:
+      "Bioinformatics: translate a DNA coding-strand sequence (up to 360 nt) codon by codon -- DNA, mRNA and " +
+      "amino acid, using the standard genetic code, with start and stop codons marked. The figure does the " +
+      "translation; supply only the sequence. Args: dna; frame? (0, 1 or 2); label?.",
+    inputSchema: jsonSchema<{ dna: string; frame?: 0 | 1 | 2; label?: string }>({
+      type: "object",
+      properties: {
+        dna: { type: "string", description: "Coding-strand DNA (A/C/G/T; U is read as T)" },
+        frame: { type: "integer", enum: [0, 1, 2] },
+        label: { type: "string", description: "What the sequence is, e.g. 'the start of human HBB'" },
+      },
+      required: ["dna"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showPhyloTree: {
+    description:
+      "Bioinformatics: draw a phylogenetic tree from a Newick string (2-40 taxa). With branch lengths it is drawn " +
+      "to scale with a scale bar; without them it is drawn as a cladogram and says so. Args: newick; title?.",
+    inputSchema: jsonSchema<{ newick: string; title?: string }>({
+      type: "object",
+      properties: {
+        newick: { type: "string", description: "e.g. '((Human:0.1,Chimp:0.1):0.3,Mouse:0.6);'" },
+        title: { type: "string" },
+      },
+      required: ["newick"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
   },
   searchKnowledge: {
     description:
