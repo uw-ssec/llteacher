@@ -109,7 +109,12 @@ import {
   finalizeAssistantTurn,
   pinConversationPromptTemplate,
 } from "../repositories/conversations";
-import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
+import {
+  reserveRateLimitSlot,
+  retryAfterSeconds,
+  RATE_LIMIT_MAX_PER_MINUTE,
+  RATE_LIMIT_WINDOW_MS,
+} from "../repositories/rateLimits";
 import {
   startSectionConversation,
   getActiveSectionConversation,
@@ -1578,7 +1583,11 @@ export async function chatHandler(c: Context<AppEnv>) {
         code: "rate_limited",
       },
       429,
-      { "Retry-After": String(Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)) },
+      /* #310: the time REMAINING in this fixed window, not its length -- a
+         request refused at 12:00:59.5 is free again at 12:01:00.0. The
+         client disables Retry for this long (#286), so an overstatement
+         locks a control that would actually work. */
+      { "Retry-After": String(retryAfterSeconds(new Date(), RATE_LIMIT_WINDOW_MS)) },
     );
   }
 

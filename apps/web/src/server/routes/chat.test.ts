@@ -68,6 +68,9 @@ vi.mock("../repositories/conversations", () => ({
 const reserveRateLimitSlotMock = vi.fn();
 vi.mock("../repositories/rateLimits", () => ({
   reserveRateLimitSlot: (...args: unknown[]) => reserveRateLimitSlotMock(...args),
+  // #310: the 429 handler derives Retry-After from this; fixed so the
+  // assertions can name an exact header value.
+  retryAfterSeconds: () => 42,
   // #308: RATE_LIMIT_MAX_PER_MINUTE/RATE_LIMIT_WINDOW_MS moved into this
   // module so routes/conversations.ts's createConversationHandler can share
   // them -- chat.ts imports both as real values (not just the mocked
@@ -759,7 +762,7 @@ describe("POST /api/chat", () => {
       const res = await postChat(buildApp(fakeAuthContext()), { messages: [userUiMessage] });
 
       expect(res.status).toBe(429);
-      expect(res.headers.get("Retry-After")).toBeTruthy();
+      expect(res.headers.get("Retry-After")).toBe("42");
       expect(createConversationMock).not.toHaveBeenCalled();
       expect(streamTextMock).not.toHaveBeenCalled();
     });
@@ -945,7 +948,7 @@ describe("POST /api/chat", () => {
       });
 
       expect(res.status).toBe(429);
-      expect(res.headers.get("Retry-After")).toBeTruthy();
+      expect(res.headers.get("Retry-After")).toBe("42");
       // Reads that live below the gate: not reached.
       expect(getLastMessagesMock).not.toHaveBeenCalled();
       expect(streamTextMock).not.toHaveBeenCalled();
