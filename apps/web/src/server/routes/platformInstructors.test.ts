@@ -103,9 +103,12 @@ describe("POST /api/platform/instructors (#316)", () => {
     expect(auditBestEffortMock).not.toHaveBeenCalled();
   });
 
-  it("keeps a pre-institution grant successful when there is no org scope to audit yet", async () => {
+  it("requires the deployment institution before granting access", async () => {
     getDeploymentOrganizationMock.mockResolvedValue(null);
-    expect((await post(superAdmin(), { email: "early@example.edu" })).status).toBe(200);
+    const response = await post(superAdmin(), { email: "early@example.edu" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "Create the institution first" });
+    expect(grantPlatformInstructorMock).not.toHaveBeenCalled();
     expect(auditBestEffortMock).not.toHaveBeenCalled();
   });
 

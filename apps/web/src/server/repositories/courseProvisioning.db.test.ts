@@ -6,6 +6,7 @@ import { courseMemberships, courses, organizations, users } from "../../db/schem
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { provisionInstructorCourse } from "./courseProvisioning";
+import { grantPlatformInstructor } from "./users";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -86,6 +87,32 @@ describe.skipIf(!DATABASE_URL)("provisionInstructorCourse atomicity (real DB)", 
       grantedBy: users.platformInstructorGrantedBy,
     }).from(users).where(eq(users.id, result.instructor.userId));
     expect(secondGrant).toEqual(firstGrant);
+  });
+
+  it("reports exactly one grant creator when course provisioning races a direct grant", async () => {
+    const email = `prof-cross-flow-race-${suffix}@uw.edu`;
+    await db.insert(users).values({
+      email: await cipher.encryptString(email),
+      emailBlindIndex: await cipher.computeBlindIndex(email),
+    });
+
+    const [courseResult, directResult] = await Promise.all([
+      provisionInstructorCourse(db, cipher, actorUserId, {
+        instructorEmail: email,
+        title: "Cross-flow Race",
+        code: `RACE-${suffix}`,
+        term: "Autumn 2026",
+      }),
+      grantPlatformInstructor(db, cipher, actorUserId, email),
+    ]);
+
+    expect(courseResult.status).toBe("created");
+    expect(directResult.status).toBe("granted");
+    if (courseResult.status !== "created" || directResult.status !== "granted") return;
+    expect([
+      courseResult.platformInstructorGrantCreated,
+      directResult.grantCreated,
+    ].filter(Boolean)).toHaveLength(1);
   });
 
   it("rolls back user, grant, course, and membership when the final membership write fails", async () => {

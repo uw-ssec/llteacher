@@ -8,7 +8,7 @@ import { unsafeOrgScope } from "../repositories/scope";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 import type { AuthContext } from "../middleware/roles";
 import type { GrantPlatformInstructorBody, GrantPlatformInstructorResponse } from "../../shared/types";
-import { BadRequest, Forbidden } from "../effect/errors";
+import { BadRequest, Conflict, Forbidden } from "../effect/errors";
 import { effectHandler } from "../effect/http";
 import { query } from "../effect/services";
 import type { PlatformInstructorListResponse } from "@llteacher/ui/api";
@@ -46,6 +46,14 @@ export const grantPlatformInstructorHandler = effectHandler((c) => Effect.gen(fu
     return yield* new BadRequest({ message: "email is required" });
   }
 
+  // Resolve the audit scope before the durable grant. If institution setup is
+  // incomplete (or this lookup fails), no access change has happened for the
+  // client to retry without an audit trail.
+  const organization = yield* query("getDeploymentOrganization", (db) => getDeploymentOrganization(db));
+  if (!organization) {
+    return yield* new Conflict({ message: "Create the institution first" });
+  }
+
   // The cipher keys are process configuration, not request input: a missing
   // key is a deployment fault, answered as a logged 503 defect.
   const cipher = new IdentityCipher(yield* Effect.promise(() => loadIdentityCipherKeys(c.env)));
@@ -65,17 +73,14 @@ export const grantPlatformInstructorHandler = effectHandler((c) => Effect.gen(fu
   }
 
   if (result.grantCreated) {
-    const organization = yield* query("getDeploymentOrganization", (db) => getDeploymentOrganization(db));
-    if (organization) {
-      yield* query("auditBestEffort", (db) =>
-        auditBestEffort(db, [unsafeOrgScope(organization.id)], {
-          actorUserId: authContext.session.userId,
-          action: AUDIT_ACTIONS.PLATFORM_INSTRUCTOR_GRANTED,
-          targetType: AUDIT_TARGET_TYPES.USER,
-          targetId: result.userId,
-        }),
-      );
-    }
+    yield* query("auditBestEffort", (db) =>
+      auditBestEffort(db, [unsafeOrgScope(organization.id)], {
+        actorUserId: authContext.session.userId,
+        action: AUDIT_ACTIONS.PLATFORM_INSTRUCTOR_GRANTED,
+        targetType: AUDIT_TARGET_TYPES.USER,
+        targetId: result.userId,
+      }),
+    );
   }
 
   const responseBody: GrantPlatformInstructorResponse = {

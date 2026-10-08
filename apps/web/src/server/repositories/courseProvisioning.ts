@@ -88,12 +88,13 @@ export async function provisionInstructorCourse(
         }
       }
       if (!platformInstructorGrantCreated && user.platformInstructorGrantedAt === null) {
-        await tx.update(users).set({
+        const [createdGrant] = await tx.update(users).set({
           platformInstructorGrantedAt: grantedAt,
           platformInstructorGrantedBy: actorUserId,
           updatedAt: grantedAt,
-        }).where(and(eq(users.id, user.id), isNull(users.platformInstructorGrantedAt)));
-        platformInstructorGrantCreated = true;
+        }).where(and(eq(users.id, user.id), isNull(users.platformInstructorGrantedAt)))
+          .returning({ id: users.id });
+        platformInstructorGrantCreated = createdGrant !== undefined;
       }
 
       const [course] = await tx.insert(courses).values({
