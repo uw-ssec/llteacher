@@ -3,7 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { users, chatRateLimitWindows, organizations, courses, conversations, messages } from "../../db/schema";
-import { reserveRateLimitSlot } from "./rateLimits";
+import { reserveRateLimitSlot, retryAfterSeconds } from "./rateLimits";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -222,5 +222,33 @@ describe.skipIf(!DATABASE_URL)("reserveRateLimitSlot (#265, real DB)", () => {
 
     const count = await reserveRateLimitSlot(db, userId, testWindow(8), windowMs);
     expect(count).toBe(1);
+  });
+});
+
+/* #310: the header the client gates its Retry button on (#286's countdown in
+   ConversationView). Needs no database -- it is pure arithmetic over the same
+   bucketing reserveRateLimitSlot uses, and the point is that the two agree. */
+describe("retryAfterSeconds (#310)", () => {
+  const WINDOW = 60_000;
+
+  it("reports the time left in THIS window, not the window's length", () => {
+    // Refused half a second before the boundary: the old constant header said
+    // 60, locking a Retry button that would have worked ~59s earlier.
+    expect(retryAfterSeconds(new Date(120_000 + 59_500), WINDOW)).toBe(1);
+    // Refused at the very start of a window: nearly the whole window left.
+    expect(retryAfterSeconds(new Date(120_000), WINDOW)).toBe(60);
+    // Halfway through.
+    expect(retryAfterSeconds(new Date(120_000 + 30_000), WINDOW)).toBe(30);
+  });
+
+  it("never reports zero for a request that was just refused", () => {
+    expect(retryAfterSeconds(new Date(120_000 + 59_999), WINDOW)).toBe(1);
+  });
+
+  it("agrees with reserveRateLimitSlot's own bucketing", () => {
+    // Two timestamps in the same bucket count down to the same instant.
+    const a = retryAfterSeconds(new Date(180_000 + 10_000), WINDOW);
+    const b = retryAfterSeconds(new Date(180_000 + 40_000), WINDOW);
+    expect(a - b).toBe(30);
   });
 });

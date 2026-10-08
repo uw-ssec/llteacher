@@ -43,7 +43,12 @@ import {
 } from "../repositories/conversations";
 import type { ConversationKind } from "../../db/schema";
 import { courseScopeFromAuthContext, unsafeCourseScope } from "../repositories/scope";
-import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
+import {
+  reserveRateLimitSlot,
+  retryAfterSeconds,
+  RATE_LIMIT_MAX_PER_MINUTE,
+  RATE_LIMIT_WINDOW_MS,
+} from "../repositories/rateLimits";
 // #287: the canonical "untouched default title" sentinel, shared with
 // chat.ts's (effectively dead, see its own doc comment) auto-title branch
 // and App.tsx's client-side auto-title-on-first-message fix -- so every
@@ -242,7 +247,11 @@ export async function createConversationHandler(c: Context<AppEnv>) {
     return c.json(
       { error: "You're sending requests too quickly. Please wait a moment and try again." },
       429,
-      { "Retry-After": String(Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)) },
+      /* #310: the time REMAINING in this fixed window, not its length -- a
+         request refused at 12:00:59.5 is free again at 12:01:00.0. The
+         client disables Retry for this long (#286), so an overstatement
+         locks a control that would actually work. */
+      { "Retry-After": String(retryAfterSeconds(new Date(), RATE_LIMIT_WINDOW_MS)) },
     );
   }
 
