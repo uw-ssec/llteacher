@@ -49,6 +49,7 @@ import { organizations, courses, courseMemberships, users, conversations, submis
 import { eq as eq2 } from "drizzle-orm";
 import { createHomework, updateHomework, updateHomeworkPublishState, updateHomeworkHideState, getHomeworkById } from "./homeworks";
 import { upsertSectionAnswer } from "./sectionAnswers";
+import { submitWidgetResponse } from "./progressWidgets";
 import { unsafeOrgScope } from "./scope";
 
 describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)", () => {
@@ -264,6 +265,9 @@ describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)
           { title: "Sec 2", content: "c2", order: 2 },
           { title: "Sec 3", content: "c3", order: 3 },
         ],
+        // #165: widgets on every homework, so both widget queries execute
+        // and the count below can't pass by short-circuiting either one.
+        widgets: [{ prePrompt: "pre", postPrompt: "post", order: 1 }],
       });
       if (i === 0) {
         const withSections = await getHomeworkById(db, scope, hw!.id);
@@ -291,9 +295,10 @@ describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)
     // db.query.*.findMany are Drizzle's relational query builder, db.select
     // is the plain query builder -- getStudentHomeworksForUser calls
     // db.query.courseMemberships.findMany once, db.query.homeworks.findMany
-    // once, and db.select() three times (conversations, submissions,
-    // #164's sectionAnswers) = 5 total, fixed regardless of how many
-    // homeworks/sections exist above.
+    // once, and db.select() five times (conversations, submissions,
+    // #164's sectionAnswers, #165's progress widgets and the student's own
+    // widget responses) = 7 total, fixed regardless of how many
+    // homeworks/sections/widgets exist above.
     let queryCount = 0;
     const targets: Array<[object, string]> = [
       [db.query.courseMemberships, "findMany"],
@@ -318,7 +323,63 @@ describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)
       targets.forEach(([obj, key], i) => { (obj as Record<string, unknown>)[key] = originals[i]; });
       (db as unknown as Record<string, unknown>).select = originalSelect;
     }
-    expect(queryCount).toBe(5);
+    expect(queryCount).toBe(7);
+
+    await db.delete(organizations).where(eq2(organizations.id, org!.id));
+  });
+
+  // #165: each widget carries the REQUESTING student's own pre/post values
+  // and nobody else's, in widget order; an unanswered half is null.
+  it("returns each progress widget with only the requesting student's own values (#165)", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const [org] = await db.insert(organizations).values({
+      slug: `m3-test-165-${crypto.randomUUID()}`, name: "M3 Test Org 165", workosOrganizationId: `wo-165-${crypto.randomUUID()}`,
+    }).returning();
+    const [course] = await db.insert(courses).values({
+      organizationId: org!.id, code: "TEST-165", term: "Test", title: "Course 165",
+    }).returning();
+    const newUser = async () =>
+      (await db.insert(users).values({
+        email: crypto.getRandomValues(new Uint8Array(32)) as never,
+        emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+      }).returning())[0]!;
+    const student = await newUser();
+    const classmate = await newUser();
+    const instructorUser = await newUser();
+    await db.insert(courseMemberships).values({ userId: student.id, courseId: course!.id, role: "student" });
+    await db.insert(courseMemberships).values({ userId: classmate.id, courseId: course!.id, role: "student" });
+    const [instructorMembership] = await db.insert(courseMemberships).values({
+      userId: instructorUser.id, courseId: course!.id, role: "instructor",
+    }).returning();
+
+    const scope = unsafeCourseScope(course!.id);
+    const hw = await createHomework(db, scope, {
+      createdById: instructorMembership!.id, title: "HW 165", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    await updateHomeworkPublishState(db, scope, hw!.id, { publish: true, releasedAt: new Date("2020-01-01") });
+    await updateHomework(db, scope, hw!.id, {
+      sections: [{ title: "Sec 1", content: "c1", order: 1 }],
+      widgets: [
+        { prePrompt: "second pre", postPrompt: "second post", order: 2 },
+        { prePrompt: "first pre", postPrompt: "first post", order: 1 },
+      ],
+    });
+    const { widgets } = (await getHomeworkById(db, scope, hw!.id))!;
+    const first = widgets.find((w) => w.order === 1)!;
+    const second = widgets.find((w) => w.order === 2)!;
+
+    const orgScope = unsafeOrgScope(org!.id);
+    await submitWidgetResponse(db, orgScope, first.id, student.id, { which: "pre", value: 3 });
+    await submitWidgetResponse(db, orgScope, first.id, student.id, { which: "post", value: 9 });
+    // A classmate's answers must never appear in this student's payload.
+    await submitWidgetResponse(db, orgScope, first.id, classmate.id, { which: "pre", value: 10 });
+    await submitWidgetResponse(db, orgScope, second.id, classmate.id, { which: "pre", value: 10 });
+
+    const [summary] = await getStudentHomeworksForUser(db, student.id);
+    expect(summary!.progressWidgets).toEqual([
+      { id: first.id, prePrompt: "first pre", postPrompt: "first post", order: 1, preValue: 3, postValue: 9 },
+      { id: second.id, prePrompt: "second pre", postPrompt: "second post", order: 2, preValue: null, postValue: null },
+    ]);
 
     await db.delete(organizations).where(eq2(organizations.id, org!.id));
   });

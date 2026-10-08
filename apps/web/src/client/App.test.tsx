@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { renderHook, render, screen, waitFor, cleanup, within } from "@testing-library/react";
+import { renderHook, render, screen, waitFor, cleanup, within, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import App, { useStudentHomework } from "./App";
@@ -208,6 +208,7 @@ function homeworkFixture(
     courseId?: string;
     courseName?: string;
     title?: string;
+    progressWidgets?: unknown[];
   } = {},
 ) {
   return {
@@ -224,6 +225,7 @@ function homeworkFixture(
         sections: overrides.sections ?? [
           { id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null },
         ],
+        progressWidgets: overrides.progressWidgets ?? [],
       },
     ],
   };
@@ -3967,3 +3969,143 @@ describe("App markdown render cost does not scale with hydrated history per stre
     expect(markdownRenderTracker.count).toBeLessThan(10);
   });
 });
+
+/* #165: the student side of the pre/post self-assessment widgets. The pre
+   prompt must come BEFORE the first section is opened -- so while it is
+   pending, App must not create the first section conversation (the eager
+   #318 POST) -- and the post prompt comes once every section is submitted. */
+describe("App self-assessment prompts (#165)", () => {
+  const WIDGET = {
+    id: "11111111-1111-4111-8111-111111111111",
+    prePrompt: "How confident are you with means?",
+    postPrompt: "How confident are you now?",
+    order: 1,
+    preValue: null,
+    postValue: null,
+  };
+  const SECTION_START_URL = "/api/courses/course-a/sections/s1/conversations";
+  const sectionStartResponse = () =>
+    new Response(
+      JSON.stringify({
+        id: "sec-conv-new",
+        title: "Section 1: Sec 1",
+        greetingMessageId: "g1",
+        greetingParts: [{ type: "text", text: "Where would you like to start?" }],
+        promptTemplateId: null,
+      }),
+      { status: 201 },
+    );
+
+  it("asks the pre prompt before opening the first section, and opens it once answered", async () => {
+    const calls: Array<{ url: string; method?: string; body?: string }> = [];
+    renderApp({
+      homeworks: homeworkFixture({ progressWidgets: [WIDGET] }),
+      routes: (url, init) => {
+        if (url === SECTION_START_URL && init?.method === "POST") {
+          calls.push({ url, method: "POST" });
+          return sectionStartResponse();
+        }
+        if (url === `/api/widgets/${WIDGET.id}/response` && init?.method === "PATCH") {
+          calls.push({ url, method: "PATCH", body: String(init.body) });
+          return new Response(
+            JSON.stringify({
+              id: "r1",
+              widgetId: WIDGET.id,
+              userId: "u1",
+              preValue: 7,
+              preSubmittedAt: "2026-10-08T00:00:00.000Z",
+              postValue: null,
+              postSubmittedAt: null,
+            }),
+            { status: 200 },
+          );
+        }
+        return undefined;
+      },
+    });
+
+    const slider = await screen.findByLabelText(WIDGET.prePrompt);
+    // Held: no section conversation exists while the pre prompt is pending.
+    expect(calls.filter((c) => c.method === "POST")).toHaveLength(0);
+
+    fireEvent.change(slider, { target: { value: "7" } });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
+    const patch = calls.find((c) => c.method === "PATCH");
+    expect(JSON.parse(patch!.body!)).toEqual({ which: "pre", value: 7 });
+    // The answer came first, then the section opened.
+    expect(calls.findIndex((c) => c.method === "PATCH")).toBeLessThan(calls.findIndex((c) => c.method === "POST"));
+    expect(screen.queryByLabelText(WIDGET.prePrompt)).toBeNull();
+    expect(await screen.findByText("Where would you like to start?")).toBeTruthy();
+  });
+
+  it("lets the student skip: nothing is recorded and the first section opens", async () => {
+    let posts = 0;
+    let patches = 0;
+    renderApp({
+      homeworks: homeworkFixture({ progressWidgets: [WIDGET] }),
+      routes: (url, init) => {
+        if (url === SECTION_START_URL && init?.method === "POST") {
+          posts += 1;
+          return sectionStartResponse();
+        }
+        if (url.startsWith("/api/widgets/")) {
+          patches += 1;
+          return new Response("{}", { status: 500 });
+        }
+        return undefined;
+      },
+    });
+
+    await screen.findByLabelText(WIDGET.prePrompt);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Skip for now" }));
+
+    await waitFor(() => expect(posts).toBe(1));
+    expect(patches).toBe(0);
+    expect(screen.queryByLabelText(WIDGET.prePrompt)).toBeNull();
+  });
+
+  it("does not ask the pre prompt once the homework has been started", async () => {
+    renderApp({
+      homeworks: homeworkFixture({
+        sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
+        progressWidgets: [WIDGET],
+      }),
+      routes: (url) => {
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          return new Response(JSON.stringify([]), { status: 200 });
+        }
+        return undefined;
+      },
+    });
+
+    await screen.findByRole("button", { name: /Sec 1/ });
+    expect(screen.queryByLabelText(WIDGET.prePrompt)).toBeNull();
+  });
+
+  it("asks the post prompt once every section is submitted, and not when already answered", async () => {
+    const submitted = [
+      { id: "s1", title: "Sec 1", order: 1, status: "submitted", conversationId: "sec-conv-1", submissionSource: "student" },
+    ];
+    const routes = (url: string) =>
+      url.startsWith("/api/conversations/sec-conv-1/messages") ? new Response(JSON.stringify([]), { status: 200 }) : undefined;
+
+    const { unmount } = renderApp({
+      homeworks: homeworkFixture({ sections: submitted, progressWidgets: [{ ...WIDGET, preValue: 4 }] }),
+      routes,
+    });
+    expect(await screen.findByLabelText(WIDGET.postPrompt)).toBeTruthy();
+    unmount();
+
+    renderApp({
+      homeworks: homeworkFixture({ sections: submitted, progressWidgets: [{ ...WIDGET, preValue: 4, postValue: 8 }] }),
+      routes,
+    });
+    await screen.findByRole("button", { name: /Sec 1/ });
+    expect(screen.queryByLabelText(WIDGET.postPrompt)).toBeNull();
+  });
+});
+

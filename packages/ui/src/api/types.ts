@@ -239,7 +239,9 @@ export interface GradeDraftPayload {
 /* -- Export (#91) ---------------------------------------------------------- */
 
 export type ExportFormat = "csv" | "json";
-export type ExportSubject = "submissions" | "grades" | "transcripts";
+/** #165: `self_assessments` is the pre/post self-assessment widget
+ *  responses, exported alongside the other research data. */
+export type ExportSubject = "submissions" | "grades" | "transcripts" | "self_assessments";
 
 export interface ExportRequestBody {
   subject: ExportSubject;

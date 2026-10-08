@@ -1,6 +1,14 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { conversations, submissions, courseMemberships, sectionAnswers, type SubmissionSource } from "../../db/schema";
+import {
+  conversations,
+  submissions,
+  courseMemberships,
+  sectionAnswers,
+  homeworkProgressWidgets,
+  homeworkProgressWidgetResponses,
+  type SubmissionSource,
+} from "../../db/schema";
 import { deriveHomeworkStatus, isUnreleased } from "./homeworks";
 
 export type SectionStatusType = "not_started" | "in_progress" | "in_progress_overdue" | "submitted" | "overdue";
@@ -43,6 +51,20 @@ export interface StudentSectionProgress {
   submissionSource: SubmissionSource | null;
 }
 
+/** #165: one self-assessment widget on a homework, with this student's own
+ *  recorded values. `null` means "not answered yet" -- answering pre and
+ *  never post is a valid, complete state (partial completion). Only the
+ *  requesting student's row is ever joined in; no other student's values
+ *  reach this payload. */
+export interface StudentProgressWidget {
+  id: string;
+  prePrompt: string;
+  postPrompt: string;
+  order: number;
+  preValue: number | null;
+  postValue: number | null;
+}
+
 export interface StudentHomeworkSummary {
   id: string;
   /** #4: the tutor-conversations list surface (apps/web/src/client/hooks/
@@ -61,6 +83,8 @@ export interface StudentHomeworkSummary {
   completedPercentage: number;
   inProgressPercentage: number;
   sections: StudentSectionProgress[];
+  /** #165: ordered by `order`; empty when the homework has none. */
+  progressWidgets: StudentProgressWidget[];
 }
 
 /** Enrollment-scoped: only homeworks belonging to courses the user has a
@@ -146,6 +170,41 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
     : [];
   const answeredSectionIds = new Set(answerRows.map((a) => a.sectionId));
 
+  // #165: same fixed-query-count shape -- every visible homework's widgets in
+  // one query, and this student's own responses to them in a second.
+  const visibleHomeworkIds = visibleHomeworks.map((hw) => hw.id);
+  const widgetRows = visibleHomeworkIds.length
+    ? await db
+        .select({
+          id: homeworkProgressWidgets.id,
+          homeworkId: homeworkProgressWidgets.homeworkId,
+          prePrompt: homeworkProgressWidgets.prePrompt,
+          postPrompt: homeworkProgressWidgets.postPrompt,
+          order: homeworkProgressWidgets.order,
+        })
+        .from(homeworkProgressWidgets)
+        .where(inArray(homeworkProgressWidgets.homeworkId, visibleHomeworkIds))
+    : [];
+  const widgetResponseRows = widgetRows.length
+    ? await db
+        .select({
+          widgetId: homeworkProgressWidgetResponses.widgetId,
+          preValue: homeworkProgressWidgetResponses.preValue,
+          postValue: homeworkProgressWidgetResponses.postValue,
+        })
+        .from(homeworkProgressWidgetResponses)
+        .where(
+          and(
+            inArray(
+              homeworkProgressWidgetResponses.widgetId,
+              widgetRows.map((w) => w.id),
+            ),
+            eq(homeworkProgressWidgetResponses.userId, userId),
+          ),
+        )
+    : [];
+  const widgetResponseById = new Map(widgetResponseRows.map((r) => [r.widgetId, r]));
+
   const results: StudentHomeworkSummary[] = [];
   for (const hw of visibleHomeworks) {
     const sectionSummaries: StudentSectionProgress[] = [];
@@ -187,6 +246,17 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
       completedPercentage: Math.round((completed / total) * 100),
       inProgressPercentage: Math.round((inProgress / total) * 100),
       sections: sectionSummaries,
+      progressWidgets: widgetRows
+        .filter((w) => w.homeworkId === hw.id)
+        .sort((a, b) => a.order - b.order)
+        .map((w) => ({
+          id: w.id,
+          prePrompt: w.prePrompt,
+          postPrompt: w.postPrompt,
+          order: w.order,
+          preValue: widgetResponseById.get(w.id)?.preValue ?? null,
+          postValue: widgetResponseById.get(w.id)?.postValue ?? null,
+        })),
     });
   }
   return results;

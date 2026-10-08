@@ -186,10 +186,10 @@ export type LlmConfigTestResponse =
   | { ok: false; modelName: string; error: string };
 
 import type { HomeworkStatus } from "../server/repositories/homeworks";
-import type { SectionStatusType, StudentHomeworkSummary } from "../server/repositories/studentHomeworks";
+import type { SectionStatusType, StudentHomeworkSummary, StudentProgressWidget } from "../server/repositories/studentHomeworks";
 
 export type { HomeworkStatus };
-export type { SectionStatusType, StudentHomeworkSummary };
+export type { SectionStatusType, StudentHomeworkSummary, StudentProgressWidget };
 
 export interface StudentHomeworkListResponse {
   homeworks: StudentHomeworkSummary[];

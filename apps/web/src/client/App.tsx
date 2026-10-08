@@ -8,13 +8,14 @@ import { useAuth } from "./components/AuthProvider";
 import { AccountShell, StaffHome } from "./components/AccountShell";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 import { ResponseFeedback } from "./components/ResponseFeedback";
+import { SelfAssessmentPanel, type SelfAssessmentPhase } from "./components/SelfAssessmentPanel";
 import { TutorConversationsList } from "./views/TutorConversationsList";
 import { useTutorConversations } from "./hooks/useTutorConversations";
 import { useStudentHomework } from "./hooks/useStudentHomework";
 import { useLocalStoragePreference } from "./hooks/useLocalStoragePreference";
 import { useConversationSurface, toChatResponseError } from "./hooks/useConversationSurface";
 import { trackTutorTurnCompletion } from "./hooks/trackTutorTurnCompletion";
-import type { ConversationMessageResponse, HintCountResponse } from "../shared/types";
+import type { ConversationMessageResponse, HintCountResponse, WidgetResponseResponse } from "../shared/types";
 import { MAX_HISTORY_MESSAGES } from "../shared/chat-limits";
 import { deriveTutorConversationTitle, DEFAULT_TUTOR_CONVERSATION_TITLE } from "../shared/tutorConversationTitle";
 
@@ -186,6 +187,8 @@ function StudentApp() {
     hwTitle,
     courseId,
     courseName,
+    progressWidgets,
+    setProgressWidgets,
     loading: homeworkLoading,
     loadError,
   } = useStudentHomework();
@@ -818,7 +821,42 @@ function StudentApp() {
     })();
   }, [sectionSurface.status, conversationId]);
 
+  /* #165: the pre/post self-assessment prompts. The pre prompt shows before
+     the student opens the first section -- so while it is pending it holds
+     the auto-select below, which would otherwise create the first section
+     conversation on load. The post prompt shows once every section is
+     submitted. "Started" means any section already has a conversation or a
+     non-pending status; a student who skips, or who clicks straight into a
+     section from the sidebar, is not asked again this visit. Skipping
+     records nothing (partial completion is valid), so a later visit asks
+     again only while the prompt still applies. */
+  const [skippedSelfAssessment, setSkippedSelfAssessment] = useState<ReadonlySet<SelfAssessmentPhase>>(new Set());
+  const homeworkStarted =
+    sections.some((s) => s.status !== "pending") ||
+    [...sectionMetaByOrder.values()].some((m) => m.conversationId !== null);
+  const pendingPreWidgets = progressWidgets.filter((w) => w.preValue === null);
+  const pendingPostWidgets = progressWidgets.filter((w) => w.postValue === null);
+  const showPreSelfAssessment =
+    !homeworkLoading && pendingPreWidgets.length > 0 && !homeworkStarted && !skippedSelfAssessment.has("pre");
+  const showPostSelfAssessment =
+    sections.length > 0 &&
+    sections.every((s) => s.status === "submitted") &&
+    pendingPostWidgets.length > 0 &&
+    !skippedSelfAssessment.has("post");
+  const recordSelfAssessment = (recorded: WidgetResponseResponse[]) => {
+    const byWidget = new Map(recorded.map((r) => [r.widgetId, r]));
+    setProgressWidgets((prev) =>
+      prev.map((w) => {
+        const r = byWidget.get(w.id);
+        return r ? { ...w, preValue: r.preValue, postValue: r.postValue } : w;
+      }),
+    );
+  };
+  const skipSelfAssessment = (phase: SelfAssessmentPhase) =>
+    setSkippedSelfAssessment((prev) => new Set([...prev, phase]));
+
   useEffect(() => {
+    if (showPreSelfAssessment) return; // #165: hold the first section until the pre prompt is answered or skipped
     if (!hasAutoSelectedSection.current && sections.length > 0) {
       const first = sections[0]!.number;
       // #214/#252: resume the section's own conversation if it already has
@@ -830,7 +868,7 @@ function StudentApp() {
       );
       hasAutoSelectedSection.current = true;
     }
-  }, [sections, sectionMetaByOrder]);
+  }, [sections, sectionMetaByOrder, showPreSelfAssessment]);
 
   /* #80: real hint usage. Fetched from GET .../hints for the active section
      whenever it changes, and again once an in-flight hint request settles.
@@ -1195,7 +1233,23 @@ function StudentApp() {
                  so `ConversationView`'s feedback slot never renders here. */
             />
           </ErrorBoundary>
+        ) : showPreSelfAssessment ? (
+          <SelfAssessmentPanel
+            phase="pre"
+            widgets={pendingPreWidgets}
+            onSubmitted={recordSelfAssessment}
+            onSkip={() => skipSelfAssessment("pre")}
+          />
         ) : (
+          <>
+          {showPostSelfAssessment && (
+            <SelfAssessmentPanel
+              phase="post"
+              widgets={pendingPostWidgets}
+              onSubmitted={recordSelfAssessment}
+              onSkip={() => skipSelfAssessment("post")}
+            />
+          )}
           <ErrorBoundary key="section">
             <ConversationView
               key={currentSection}
@@ -1237,6 +1291,7 @@ function StudentApp() {
               }
             />
           </ErrorBoundary>
+          </>
         )}
         </main>
       </div>

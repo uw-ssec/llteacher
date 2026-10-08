@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { SidebarSection } from "@llteacher/ui";
-import type { StudentHomeworkListResponse } from "../../shared/types";
+import type { StudentHomeworkListResponse, StudentProgressWidget } from "../../shared/types";
 
 /** #214: a section's real database id + its pre-existing conversation id
  *  (if the student has already started it) -- SidebarSection drops both,
@@ -33,6 +33,9 @@ export function useStudentHomework() {
   // code) -- previously the TopNav/breadcrumb had "STATS 311" hardcoded as
   // a literal stand-in instead of deriving it from any server data at all.
   const [courseName, setCourseName] = useState<string>("");
+  // #165: this homework's self-assessment widgets with the student's own
+  // pre/post values; App.tsx decides when to prompt for them.
+  const [progressWidgets, setProgressWidgets] = useState<StudentProgressWidget[]>([]);
   const [loading, setLoading] = useState(true);
   // #160: distinct from "loaded, zero homeworks" -- a 401/403/503 must not
   // render as an indistinguishable empty sidebar. r.ok was never checked
@@ -56,6 +59,7 @@ export function useStudentHomework() {
         setHwTitle(hw.title);
         setCourseId(hw.courseId);
         setCourseName(hw.courseName);
+        setProgressWidgets(hw.progressWidgets ?? []);
         setSections(
           hw.sections.map((s) => ({
             number: s.order,
@@ -91,5 +95,17 @@ export function useStudentHomework() {
   // above is gone; previously this setter existed only inside this hook,
   // which made it structurally impossible for anything outside the hook to
   // keep the map current after the initial fetch.
-  return { sections, setSections, sectionMetaByOrder, setSectionMetaByOrder, hwTitle, courseId, courseName, loading, loadError };
+  return {
+    sections,
+    setSections,
+    sectionMetaByOrder,
+    setSectionMetaByOrder,
+    hwTitle,
+    courseId,
+    courseName,
+    progressWidgets,
+    setProgressWidgets,
+    loading,
+    loadError,
+  };
 }

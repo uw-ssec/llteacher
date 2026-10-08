@@ -8201,6 +8201,71 @@ tr:focus-within .admin-knowledge__row-tools {
   gap: var(--space-3);
 }
 
+/* --------------------------------------------------------------------------
+   .self-assessment — #165's pre/post self-assessment prompts
+   (apps/web SelfAssessmentPanel). The pre prompt stands in for the chat
+   before the first section; the post prompt sits above it once every
+   section is submitted. Paper card on the page ground, same rhythm as the
+   conversation column.
+   -------------------------------------------------------------------------- */
+.self-assessment {
+  margin: var(--space-6) auto;
+  max-width: 40rem;
+  padding: var(--space-6);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+}
+.self-assessment__title {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-lg);
+  line-height: var(--leading-tight);
+}
+.self-assessment__title:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.self-assessment__intro {
+  margin: 0 0 var(--space-5);
+  color: var(--color-text-secondary);
+}
+.self-assessment__item + .self-assessment__item {
+  margin-top: var(--space-5);
+}
+.self-assessment__prompt {
+  display: block;
+  margin-bottom: var(--space-2);
+  font-weight: 500;
+  line-height: var(--leading-normal);
+}
+.self-assessment__scale {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+.self-assessment__scale input[type="range"] {
+  flex: 1;
+  accent-color: var(--color-accent);
+}
+.self-assessment__value {
+  min-width: 2ch;
+  text-align: right;
+  color: var(--color-text);
+  font-weight: 600;
+}
+.self-assessment__error {
+  margin: var(--space-4) 0 0;
+  color: var(--color-error);
+}
+.self-assessment__actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+}
+
 /* -------------------------------------------------------------------------
    .response-feedback — the student "flag this response" affordance (#90).
 

@@ -21,6 +21,8 @@ import {
   courseMemberships,
   courses,
   grades,
+  homeworkProgressWidgetResponses,
+  homeworkProgressWidgets,
   homeworks,
   messages,
   organizations,
@@ -386,6 +388,48 @@ describe.skipIf(!DATABASE_URL)("POST /exports (#91, real DB)", () => {
     expect(event.action).toBe("export.created");
     expect(JSON.stringify(event.requestMetadata)).not.toContain("Strong reasoning");
     expect(JSON.stringify(event.requestMetadata)).toContain("grades");
+  });
+
+  // #165: the self-assessment responses go out with the other research
+  // data -- pre and post paired on one row, a never-answered half blank.
+  it("exports self-assessments with each student's pre/post pair on one row (#165)", async () => {
+    const [hw] = await db.select({ id: homeworks.id }).from(homeworks).where(eq(homeworks.courseId, courseId));
+    const [widget] = await db
+      .insert(homeworkProgressWidgets)
+      .values({ homeworkId: hw!.id, prePrompt: "Confident before?", postPrompt: "Confident after?", order: 1 })
+      .returning({ id: homeworkProgressWidgets.id });
+    await db.insert(homeworkProgressWidgetResponses).values([
+      {
+        widgetId: widget!.id,
+        userId: graceUserId,
+        organizationId: orgId,
+        preValue: 3,
+        preSubmittedAt: new Date("2026-10-01T10:00:00Z"),
+        postValue: 8,
+        postSubmittedAt: new Date("2026-10-03T10:00:00Z"),
+      },
+      // Answered pre and never post: a valid state, exported with a blank half.
+      { widgetId: widget!.id, userId: adaUserId, organizationId: orgId, preValue: 6, preSubmittedAt: new Date("2026-10-01T11:00:00Z") },
+    ]);
+
+    const json = await post({ subject: "self_assessments", format: "json" }, instructorOfCourse());
+    expect(json.status).toBe(200);
+    const parsed = JSON.parse(((await json.json()) as { body: string }).body) as {
+      selfAssessments: { student: string; preValue: number | null; postValue: number | null; postSubmittedAt: string | null }[];
+    };
+    const grace = parsed.selfAssessments.find((r) => r.student === "Grace Hopper")!;
+    expect(grace).toMatchObject({ preValue: 3, postValue: 8, postSubmittedAt: "2026-10-03T10:00:00.000Z" });
+    const ada = parsed.selfAssessments.find((r) => r.student !== "Grace Hopper")!;
+    expect(ada).toMatchObject({ preValue: 6, postValue: null, postSubmittedAt: null });
+
+    const csv = await post({ subject: "self_assessments", format: "csv" }, instructorOfCourse());
+    const csvBody = ((await csv.json()) as { body: string }).body;
+    expect(csvBody).toContain('"Before (0-10)"');
+    expect(csvBody).toContain('"Grace Hopper"');
+
+    const one = await post({ subject: "self_assessments", format: "json", studentId: graceUserId }, instructorOfCourse());
+    const onlyGrace = JSON.parse(((await one.json()) as { body: string }).body) as { selfAssessments: { student: string }[] };
+    expect(onlyGrace.selfAssessments.map((r) => r.student)).toEqual(["Grace Hopper"]);
   });
 
   it("never includes another course's work", async () => {
