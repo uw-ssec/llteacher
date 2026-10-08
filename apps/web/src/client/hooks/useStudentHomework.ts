@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { SidebarSection } from "@llteacher/ui";
-import type { StudentHomeworkListResponse } from "../../shared/types";
+import type { StudentHomeworkListResponse, StudentProgressWidget } from "../../shared/types";
 
 /** #214: a section's real database id + its pre-existing conversation id
  *  (if the student has already started it) -- SidebarSection drops both,
@@ -33,6 +33,9 @@ export function useStudentHomework() {
   // code) -- previously the TopNav/breadcrumb had "STATS 311" hardcoded as
   // a literal stand-in instead of deriving it from any server data at all.
   const [courseName, setCourseName] = useState<string>("");
+  // #165: the homework's self-assessment widgets with the student's own
+  // recorded values -- App.tsx decides from these when to ask.
+  const [widgets, setWidgets] = useState<StudentProgressWidget[]>([]);
   const [loading, setLoading] = useState(true);
   // #160: distinct from "loaded, zero homeworks" -- a 401/403/503 must not
   // render as an indistinguishable empty sidebar. r.ok was never checked
@@ -76,6 +79,9 @@ export function useStudentHomework() {
         setSectionMetaByOrder(
           new Map(hw.sections.map((s) => [s.order, { id: s.id, conversationId: s.conversationId }])),
         );
+        // Absent from a response built before #165 (a client briefly ahead of
+        // its server during a deploy): no widgets means nothing to ask.
+        setWidgets(hw.widgets ?? []);
         setLoading(false);
       })
       .catch(() => {
@@ -91,5 +97,17 @@ export function useStudentHomework() {
   // above is gone; previously this setter existed only inside this hook,
   // which made it structurally impossible for anything outside the hook to
   // keep the map current after the initial fetch.
-  return { sections, setSections, sectionMetaByOrder, setSectionMetaByOrder, hwTitle, courseId, courseName, loading, loadError };
+  return {
+    sections,
+    setSections,
+    sectionMetaByOrder,
+    setSectionMetaByOrder,
+    widgets,
+    setWidgets,
+    hwTitle,
+    courseId,
+    courseName,
+    loading,
+    loadError,
+  };
 }

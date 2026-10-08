@@ -50,6 +50,7 @@ import { eq as eq2 } from "drizzle-orm";
 import { createHomework, updateHomework, updateHomeworkPublishState, updateHomeworkHideState, getHomeworkById } from "./homeworks";
 import { upsertSectionAnswer } from "./sectionAnswers";
 import { unsafeOrgScope } from "./scope";
+import { submitWidgetResponse } from "./progressWidgets";
 
 describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)", () => {
   it("only returns homeworks for courses the student is enrolled in, excludes drafts, ignores soft-deleted conversations", async () => {
@@ -130,6 +131,62 @@ describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)
     expect(result[0]!.courseName).toBe("TEST-A");
     const sec1Status = result[0]!.sections.find((s) => s.title === "Sec 1")!;
     expect(sec1Status.status).toBe("not_started");
+
+    await db.delete(organizations).where(eq2(organizations.id, org!.id));
+  });
+
+  // #165: the student client decides when to ask the before/after check
+  // from these values, so they must be the caller's OWN, never a classmate's,
+  // and in authored order.
+  it("returns the homework's widgets in order with only the caller's own pre/post values", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const [org] = await db.insert(organizations).values({
+      slug: `w165-${crypto.randomUUID()}`, name: "Widget Org", workosOrganizationId: `wo-165-${crypto.randomUUID()}`,
+    }).returning();
+    const [course] = await db.insert(courses).values({
+      organizationId: org!.id, code: "W-165", term: "Test", title: "Widgets",
+    }).returning();
+    const newUser = async () => (await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning())[0]!;
+    const [me, classmate, teacher] = [await newUser(), await newUser(), await newUser()];
+    await db.insert(courseMemberships).values([
+      { userId: me.id, courseId: course!.id, role: "student" },
+      { userId: classmate.id, courseId: course!.id, role: "student" },
+    ]);
+    const [teacherMembership] = await db.insert(courseMemberships).values({
+      userId: teacher.id, courseId: course!.id, role: "instructor",
+    }).returning();
+
+    const scope = unsafeCourseScope(course!.id);
+    const hw = await createHomework(db, scope, {
+      createdById: teacherMembership!.id, title: "HW with widgets", description: "d", dueDate: new Date("2099-01-01"),
+    });
+    await updateHomeworkPublishState(db, scope, hw!.id, { publish: true, releasedAt: new Date("2020-01-01") });
+    // Authored out of order on purpose: the summary must sort by `order`.
+    await updateHomework(db, scope, hw!.id, {
+      sections: [{ title: "Only", content: "c", order: 1 }],
+      widgets: [
+        { prePrompt: "Second before", postPrompt: "Second after", order: 2 },
+        { prePrompt: "First before", postPrompt: "First after", order: 1 },
+      ],
+    });
+    const authored = (await getHomeworkById(db, scope, hw!.id))!.widgets;
+    const first = authored.find((w) => w.order === 1)!;
+    const second = authored.find((w) => w.order === 2)!;
+
+    const orgScope = unsafeOrgScope(org!.id);
+    await submitWidgetResponse(db, orgScope, first.id, me.id, { which: "pre", value: 4 });
+    await submitWidgetResponse(db, orgScope, first.id, classmate.id, { which: "pre", value: 9 });
+    await submitWidgetResponse(db, orgScope, first.id, classmate.id, { which: "post", value: 10 });
+    await submitWidgetResponse(db, orgScope, second.id, classmate.id, { which: "pre", value: 7 });
+
+    const [summary] = await getStudentHomeworksForUser(db, me.id);
+    expect(summary!.widgets).toEqual([
+      { id: first.id, prePrompt: "First before", postPrompt: "First after", order: 1, preValue: 4, postValue: null },
+      { id: second.id, prePrompt: "Second before", postPrompt: "Second after", order: 2, preValue: null, postValue: null },
+    ]);
 
     await db.delete(organizations).where(eq2(organizations.id, org!.id));
   });

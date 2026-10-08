@@ -1,5 +1,6 @@
 /* --------------------------------------------------------------------------
-   Instructor export of submissions, grades and transcripts (#91).
+   Instructor export of submissions, grades, transcripts (#91) and
+   self-assessment responses (#165).
 
    SCOPE DECISION, recorded here because #91 asks for it to be:
 
@@ -36,6 +37,8 @@ import {
   conversations,
   courseMemberships,
   grades,
+  homeworkProgressWidgetResponses,
+  homeworkProgressWidgets,
   homeworks,
   messages,
   sections,
@@ -60,7 +63,7 @@ import { AppConfig, query } from "../effect/services";
  *  on every row, and to be far above a real course. */
 const MAX_ROWS = 5_000;
 
-const SUBJECTS: ExportSubject[] = ["submissions", "grades", "transcripts"];
+const SUBJECTS: ExportSubject[] = ["submissions", "grades", "transcripts", "self_assessments"];
 const FORMATS: ExportFormat[] = ["csv", "json"];
 
 function instructorContext(
@@ -159,7 +162,9 @@ export const createExportHandler = effectHandler((c) => Effect.gen(function* () 
       ? exportTranscripts(db, ctx.scope, cipher, studentId, ctx.authContext.session.userId)
       : subject === "grades"
         ? exportGrades(db, ctx.scope, cipher, studentId, format)
-        : exportSubmissions(db, ctx.scope, cipher, studentId, format),
+        : subject === "self_assessments"
+          ? exportSelfAssessments(db, ctx.scope, cipher, studentId, format)
+          : exportSubmissions(db, ctx.scope, cipher, studentId, format),
   ).pipe(
     Effect.map((artifact) => ({ artifact })),
     // A build failure keeps its own 503 body ("Could not build that
@@ -362,6 +367,95 @@ async function exportGrades(
         d.graderType,
         d.feedback,
         d.gradedAt,
+      ]),
+    ),
+  };
+}
+
+/** #165: self-assessment responses -- one row per (student, widget), the
+ *  pre and post values on the same row with their own timestamps, which is
+ *  the pairing the schema keeps on purpose. A side the student never
+ *  answered is empty, not zero: partial completion is a real state and a
+ *  researcher must be able to tell "rated 0" from "never asked again".
+ *
+ *  Same authority, scope and audit as every other subject here. Whether
+ *  instructors should see these per student at all is #78's open question;
+ *  it governs this export together with the per-student subjects above. */
+async function exportSelfAssessments(
+  db: Db,
+  scope: CourseScope,
+  cipher: IdentityCipher,
+  studentId: string | null,
+  format: ExportFormat,
+): Promise<Artifact | null> {
+  const rows = await db
+    .select({
+      responseId: homeworkProgressWidgetResponses.id,
+      homeworkTitle: homeworks.title,
+      widgetOrder: homeworkProgressWidgets.order,
+      prePrompt: homeworkProgressWidgets.prePrompt,
+      postPrompt: homeworkProgressWidgets.postPrompt,
+      preValue: homeworkProgressWidgetResponses.preValue,
+      preSubmittedAt: homeworkProgressWidgetResponses.preSubmittedAt,
+      postValue: homeworkProgressWidgetResponses.postValue,
+      postSubmittedAt: homeworkProgressWidgetResponses.postSubmittedAt,
+      displayName: users.displayName,
+      email: users.email,
+    })
+    .from(homeworkProgressWidgetResponses)
+    .innerJoin(homeworkProgressWidgets, eq(homeworkProgressWidgetResponses.widgetId, homeworkProgressWidgets.id))
+    .innerJoin(homeworks, eq(homeworkProgressWidgets.homeworkId, homeworks.id))
+    .innerJoin(users, eq(homeworkProgressWidgetResponses.userId, users.id))
+    .where(
+      studentId
+        ? and(eq(homeworks.courseId, scope), eq(homeworkProgressWidgetResponses.userId, studentId))
+        : eq(homeworks.courseId, scope),
+    )
+    .orderBy(asc(homeworks.title), asc(homeworkProgressWidgets.order), asc(homeworkProgressWidgetResponses.preSubmittedAt))
+    .limit(MAX_ROWS + 1);
+  if (rows.length > MAX_ROWS) return null;
+
+  const decrypted = [];
+  for (const r of rows) {
+    decrypted.push({
+      responseId: r.responseId,
+      student: r.displayName ? await cipher.decryptString(r.displayName) : "",
+      email: await cipher.decryptString(r.email),
+      homework: r.homeworkTitle,
+      widgetNumber: r.widgetOrder,
+      prePrompt: r.prePrompt,
+      preValue: r.preValue,
+      preSubmittedAt: r.preSubmittedAt?.toISOString() ?? null,
+      postPrompt: r.postPrompt,
+      postValue: r.postValue,
+      postSubmittedAt: r.postSubmittedAt?.toISOString() ?? null,
+    });
+  }
+
+  if (format === "json") {
+    return {
+      filename: "self-assessments.json",
+      contentType: "application/json",
+      body: JSON.stringify({ selfAssessments: decrypted }, null, 2),
+    };
+  }
+  return {
+    filename: "self-assessments.csv",
+    contentType: "text/csv",
+    body: toCsv(
+      ["Response ID", "Student", "Email", "Homework", "Prompt #", "Before prompt", "Before (0-10)", "Before at", "After prompt", "After (0-10)", "After at"],
+      decrypted.map((d) => [
+        d.responseId,
+        d.student,
+        d.email,
+        d.homework,
+        d.widgetNumber,
+        d.prePrompt,
+        d.preValue,
+        d.preSubmittedAt,
+        d.postPrompt,
+        d.postValue,
+        d.postSubmittedAt,
       ]),
     ),
   };

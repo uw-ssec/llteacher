@@ -41,6 +41,11 @@ const SUBJECTS = {
     // cell is expressible and unreadable. The server refuses it too.
     formats: ["json"],
   },
+  self_assessments: {
+    label: "Self-assessments",
+    help: "Each student's before and after ratings (0-10) on the homework's self-assessment prompts.",
+    formats: ["csv", "json"],
+  },
 } satisfies Record<ExportSubject, { label: string; help: string; formats: readonly ExportFormat[] }>;
 
 export function ExportView({ courseId, courseTitle }: { courseId: string; courseTitle: string }) {
