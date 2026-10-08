@@ -1,11 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq, sql } from "drizzle-orm";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { courseMemberships, courses, organizations, users } from "../../db/schema";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
-import { provisionInstructorCourse } from "./courseProvisioning";
+import { addInstructorToCourse, provisionInstructorCourse } from "./courseProvisioning";
 import { grantPlatformInstructor } from "./users";
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -44,9 +44,12 @@ describe.skipIf(!DATABASE_URL)("provisionInstructorCourse atomicity (real DB)", 
     deploymentOrgId = deployment!.id;
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
     await db.execute(sql`DROP TRIGGER IF EXISTS test_fail_instructor_membership ON course_memberships`);
     await db.execute(sql`DROP FUNCTION IF EXISTS test_fail_instructor_membership()`);
+  });
+
+  afterAll(async () => {
     await db.delete(courses).where(eq(courses.organizationId, deploymentOrgId));
     await db.delete(organizations).where(eq(organizations.id, deploymentOrgId));
     await db.delete(organizations).where(eq(organizations.id, ordinaryOrgId));
@@ -154,5 +157,151 @@ describe.skipIf(!DATABASE_URL)("provisionInstructorCourse atomicity (real DB)", 
     expect(createdUsers).toEqual([]);
     expect(createdCourses).toEqual([]);
     expect(createdMemberships).toEqual([]);
+  });
+
+  it("adds a second instructor without changing the existing instructor", async () => {
+    const first = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-primary-${suffix}@uw.edu`,
+      title: "Co-taught Statistics",
+      code: `COTEACH-${suffix}`,
+      term: "Autumn 2026",
+    });
+    expect(first.status).toBe("created");
+    if (first.status !== "created") return;
+
+    const second = await addInstructorToCourse(
+      db,
+      cipher,
+      actorUserId,
+      first.course.id,
+      `prof-second-${suffix}@uw.edu`,
+    );
+
+    expect(second).toMatchObject({
+      status: "assigned",
+      membershipAdded: true,
+      platformInstructorGrantCreated: true,
+      instructor: { email: `prof-second-${suffix}@uw.edu` },
+    });
+    const activeInstructors = await db.select({ userId: courseMemberships.userId })
+      .from(courseMemberships)
+      .where(and(
+        eq(courseMemberships.courseId, first.course.id),
+        eq(courseMemberships.role, "instructor"),
+        isNull(courseMemberships.droppedAt),
+      ));
+    expect(activeInstructors.map(({ userId }) => userId).sort()).toEqual([
+      first.instructor.userId,
+      second.status === "assigned" ? second.instructor.userId : "",
+    ].sort());
+  });
+
+  it("is idempotent for an active instructor and restores a dropped membership", async () => {
+    const provisioned = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-owner-${suffix}@uw.edu`,
+      title: "Membership Recovery",
+      code: `RESTORE-${suffix}`,
+      term: "Winter 2027",
+    });
+    expect(provisioned.status).toBe("created");
+    if (provisioned.status !== "created") return;
+    const email = `prof-restored-${suffix}@uw.edu`;
+
+    const added = await addInstructorToCourse(db, cipher, actorUserId, provisioned.course.id, email);
+    expect(added).toMatchObject({ status: "assigned", membershipAdded: true });
+    if (added.status !== "assigned") return;
+    const repeated = await addInstructorToCourse(db, cipher, actorUserId, provisioned.course.id, email);
+    expect(repeated).toMatchObject({
+      status: "assigned",
+      membershipAdded: false,
+      platformInstructorGrantCreated: false,
+      membershipId: added.membershipId,
+    });
+
+    await db.update(courseMemberships).set({
+      droppedAt: new Date("2026-10-01T00:00:00Z"),
+      droppedReason: "roster_removal",
+    }).where(eq(courseMemberships.id, added.membershipId));
+    const restored = await addInstructorToCourse(db, cipher, actorUserId, provisioned.course.id, email);
+    expect(restored).toMatchObject({
+      status: "assigned",
+      membershipAdded: true,
+      platformInstructorGrantCreated: false,
+      membershipId: added.membershipId,
+    });
+    const [membership] = await db.select({
+      role: courseMemberships.role,
+      droppedAt: courseMemberships.droppedAt,
+      droppedReason: courseMemberships.droppedReason,
+    }).from(courseMemberships).where(eq(courseMemberships.id, added.membershipId));
+    expect(membership).toEqual({ role: "instructor", droppedAt: null, droppedReason: null });
+  });
+
+  it("rejects an unknown or other-organization course without creating the instructor", async () => {
+    const [ordinaryCourse] = await db.insert(courses).values({
+      organizationId: ordinaryOrgId,
+      title: "Other institution course",
+      code: `OTHER-${suffix}`,
+      term: "Autumn 2026",
+    }).returning({ id: courses.id });
+    const email = `prof-wrong-org-${suffix}@uw.edu`;
+    const blindIndex = await cipher.computeBlindIndex(email);
+
+    await expect(addInstructorToCourse(db, cipher, actorUserId, crypto.randomUUID(), email))
+      .resolves.toEqual({ status: "course_missing" });
+    await expect(addInstructorToCourse(db, cipher, actorUserId, ordinaryCourse!.id, email))
+      .resolves.toEqual({ status: "course_missing" });
+    expect(await db.select({ id: users.id }).from(users).where(eq(users.emailBlindIndex, blindIndex))).toEqual([]);
+    await db.delete(courses).where(eq(courses.id, ordinaryCourse!.id));
+  });
+
+  it("rejects a disallowed email without creating a user or membership", async () => {
+    const provisioned = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-domain-owner-${suffix}@uw.edu`,
+      title: "Domain Policy",
+      code: `DOMAIN-${suffix}`,
+      term: "Spring 2027",
+    });
+    expect(provisioned.status).toBe("created");
+    if (provisioned.status !== "created") return;
+    const email = `outsider-${suffix}@example.com`;
+    const blindIndex = await cipher.computeBlindIndex(email);
+
+    const result = await addInstructorToCourse(db, cipher, actorUserId, provisioned.course.id, email);
+
+    expect(result).toMatchObject({ status: "invalid_email" });
+    expect(await db.select({ id: users.id }).from(users).where(eq(users.emailBlindIndex, blindIndex))).toEqual([]);
+  });
+
+  it("rolls back a new user and platform grant when membership insertion fails", async () => {
+    const provisioned = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-rollback-owner-${suffix}@uw.edu`,
+      title: "Add Instructor Rollback",
+      code: `ADD-ROLLBACK-${suffix}`,
+      term: "Spring 2027",
+    });
+    expect(provisioned.status).toBe("created");
+    if (provisioned.status !== "created") return;
+    const email = `prof-add-rollback-${suffix}@uw.edu`;
+    const blindIndex = await cipher.computeBlindIndex(email);
+    await db.execute(sql.raw(`
+      CREATE OR REPLACE FUNCTION test_fail_instructor_membership() RETURNS trigger AS $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM courses WHERE id = NEW.course_id AND code LIKE 'ADD-ROLLBACK-%') THEN
+          RAISE EXCEPTION 'intentional add-instructor membership failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `));
+    await db.execute(sql`
+      CREATE TRIGGER test_fail_instructor_membership
+      BEFORE INSERT ON course_memberships
+      FOR EACH ROW EXECUTE FUNCTION test_fail_instructor_membership()
+    `);
+
+    await expect(addInstructorToCourse(db, cipher, actorUserId, provisioned.course.id, email))
+      .rejects.toThrow("intentional add-instructor membership failure");
+    expect(await db.select({ id: users.id }).from(users).where(eq(users.emailBlindIndex, blindIndex))).toEqual([]);
   });
 });

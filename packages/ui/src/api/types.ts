@@ -66,6 +66,15 @@ export interface ProvisionCourseResponse {
   instructor: { userId: string; email: string };
 }
 
+export interface AddCourseInstructorBody {
+  instructorEmail: string;
+}
+
+export interface AddCourseInstructorResponse {
+  instructor: { userId: string; email: string };
+  membershipAdded: boolean;
+}
+
 export interface PlatformCourseListItem extends ProvisionedCoursePayload {
   status: "active" | "inactive";
   instructors: Array<{ userId: string; email: string }>;

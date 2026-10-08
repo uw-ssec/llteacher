@@ -2,12 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { fakeAuthContext } from "../testing/authContext";
-import { listPlatformCoursesHandler, provisionCourseHandler } from "./courseProvisioning";
+import { addCourseInstructorHandler, listPlatformCoursesHandler, provisionCourseHandler } from "./courseProvisioning";
 
 const provisionMock = vi.fn();
+const addInstructorMock = vi.fn();
 const auditBestEffortMock = vi.fn();
 const listPlatformCoursesMock = vi.fn();
-vi.mock("../repositories/courseProvisioning", () => ({ provisionInstructorCourse: (...a: unknown[]) => provisionMock(...a) }));
+vi.mock("../repositories/courseProvisioning", () => ({
+  addInstructorToCourse: (...a: unknown[]) => addInstructorMock(...a),
+  provisionInstructorCourse: (...a: unknown[]) => provisionMock(...a),
+}));
 vi.mock("../repositories/platformListings", () => ({ listPlatformCourses: (...a: unknown[]) => listPlatformCoursesMock(...a) }));
 vi.mock("../utils/audit", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../utils/audit")>();
@@ -31,6 +35,15 @@ function get(superAdmin: boolean) {
   app.use("*", async (c, next) => { c.set("authContext", fakeAuthContext({ isSuperAdmin: superAdmin })); await next(); });
   app.get("/api/platform/courses", listPlatformCoursesHandler);
   return app.request("/api/platform/courses", {}, { DATABASE_URL: "ignored" } as Env);
+}
+
+function postInstructor(superAdmin: boolean, courseId: string, body: unknown) {
+  const app = new Hono<AppEnv>();
+  app.use("*", async (c, next) => { c.set("authContext", fakeAuthContext({ isSuperAdmin: superAdmin })); await next(); });
+  app.post("/api/platform/courses/:courseId/instructors", addCourseInstructorHandler);
+  return app.request(`/api/platform/courses/${courseId}/instructors`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }, { DATABASE_URL: "ignored" } as Env);
 }
 
 beforeEach(() => {
@@ -129,5 +142,113 @@ describe("POST /api/platform/courses", () => {
   it("maps a disallowed instructor email to validation failure", async () => {
     provisionMock.mockResolvedValue({ status: "invalid_email", message: "Domain is not allowed" });
     expect((await post(true, { instructorEmail: "prof@gmail.com", title: "Statistics", code: "STAT 311", term: "Autumn 2026" })).status).toBe(400);
+  });
+});
+
+describe("POST /api/platform/courses/:courseId/instructors", () => {
+  beforeEach(() => {
+    addInstructorMock.mockReset().mockResolvedValue({
+      status: "assigned",
+      instructor: { userId: "user-3", email: "second@uw.edu" },
+      organizationId: "org-1",
+      membershipId: "membership-3",
+      membershipAdded: true,
+      platformInstructorGrantCreated: true,
+    });
+    auditBestEffortMock.mockReset().mockResolvedValue(undefined);
+  });
+
+  it("is super-admin only", async () => {
+    expect((await postInstructor(false, "course-1", { instructorEmail: "second@uw.edu" })).status).toBe(403);
+    expect(addInstructorMock).not.toHaveBeenCalled();
+  });
+
+  it("normalizes the email and audits a new grant and course membership", async () => {
+    const response = await postInstructor(true, "course-1", { instructorEmail: " Second@UW.edu " });
+
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({
+      instructor: { userId: "user-3", email: "second@uw.edu" },
+      membershipAdded: true,
+    });
+    expect(addInstructorMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "u1",
+      "course-1",
+      "second@uw.edu",
+    );
+    expect(auditBestEffortMock).toHaveBeenCalledTimes(2);
+    expect(auditBestEffortMock.mock.calls.map((call) => call[2])).toEqual([
+      {
+        actorUserId: "u1",
+        action: "user.platform_instructor_granted",
+        targetType: "user",
+        targetId: "user-3",
+      },
+      {
+        actorUserId: "u1",
+        action: "membership.course_instructor_added",
+        targetType: "membership",
+        targetId: "membership-3",
+        requestMetadata: { courseId: "course-1", instructorUserId: "user-3" },
+      },
+    ]);
+  });
+
+  it("returns idempotent success and writes no misleading audits", async () => {
+    addInstructorMock.mockResolvedValueOnce({
+      status: "assigned",
+      instructor: { userId: "user-3", email: "second@uw.edu" },
+      organizationId: "org-1",
+      membershipId: "membership-3",
+      membershipAdded: false,
+      platformInstructorGrantCreated: false,
+    });
+
+    const response = await postInstructor(true, "course-1", { instructorEmail: "second@uw.edu" });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      instructor: { userId: "user-3", email: "second@uw.edu" },
+      membershipAdded: false,
+    });
+    expect(auditBestEffortMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    null,
+    {},
+    { instructorEmail: "" },
+    { instructorEmail: "bad" },
+  ])("rejects an invalid request body", async (body) => {
+    expect((await postInstructor(true, "course-1", body)).status).toBe(400);
+    expect(addInstructorMock).not.toHaveBeenCalled();
+  });
+
+  it("maps an unknown course to not found", async () => {
+    addInstructorMock.mockResolvedValueOnce({ status: "course_missing" });
+    expect((await postInstructor(true, "missing", { instructorEmail: "second@uw.edu" })).status).toBe(404);
+  });
+
+  it("maps a disallowed email to validation failure", async () => {
+    addInstructorMock.mockResolvedValueOnce({ status: "invalid_email", message: "Domain is not allowed" });
+    const response = await postInstructor(true, "course-1", { instructorEmail: "second@gmail.com" });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "Domain is not allowed" });
+  });
+
+  it("audits only the membership when the platform grant already existed", async () => {
+    addInstructorMock.mockResolvedValueOnce({
+      status: "assigned",
+      instructor: { userId: "user-3", email: "second@uw.edu" },
+      organizationId: "org-1",
+      membershipId: "membership-3",
+      membershipAdded: true,
+      platformInstructorGrantCreated: false,
+    });
+    expect((await postInstructor(true, "course-1", { instructorEmail: "second@uw.edu" })).status).toBe(201);
+    expect(auditBestEffortMock).toHaveBeenCalledTimes(1);
+    expect(auditBestEffortMock.mock.calls[0]![2].action).toBe("membership.course_instructor_added");
   });
 });
