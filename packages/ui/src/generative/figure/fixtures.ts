@@ -1,9 +1,13 @@
 /* One realistic, valid input per subject-figure tool -- the same JSON a
    model would send. Shared by the registry tests, the screenshot showcase
-   (scripts/generative-ui-showcase.tsx) and the end-to-end fake model, so
-   all three exercise exactly the same figures. Not shipped to students. */
+   (scripts/generative-ui-screenshots.mjs) and the end-to-end fake model, so
+   all three exercise exactly the same figures. Not shipped to students.
+   The clinical informatics pack's fixtures live in fixtures.clinical.ts. */
+
+import { CLINICAL_FIXTURES } from "./fixtures.clinical";
 
 export const FIGURE_FIXTURES: Record<string, unknown> = {
+  ...CLINICAL_FIXTURES,
   showWorkedSteps: {
     title: "Real GDP from nominal GDP and the deflator",
     steps: [
@@ -38,16 +42,9 @@ export const FIGURE_FIXTURES: Record<string, unknown> = {
       { period: "2024", value: 313.7 },
     ],
   },
-  showAlignment: {
-    kind: "dna",
-    nameA: "Human",
-    nameB: "Mouse",
-    seqA: "ATGGTGCACCTGACTCCTGAGGAGAAGTCTGCCGTTACTGCCCTGTGGGGCAAGGTGAACGTGGATGAAGTTGG",
-    seqB: "ATGGTGCACCTGACTGATGCGGAGAAGTCTGCTGTTCTCGCCCTGTGGGGCAAGATGAACG---ATGAAGTTGG",
-  },
-  showTranslation: { label: "the start of human β-globin (HBB)", dna: "ATGGTGCACCTGACTCCTGAGGAGAAGTCTGCCGTTACTGCCCTGTGGGGCAAGGTGAACGTGGATGAAGTTGGTGGTGAGGCCCTGGGCAGGTAA" },
-  showPhyloTree: {
-    title: "β-globin across primates and mouse",
-    newick: "((((Human:0.006,Chimpanzee:0.007):0.004,Gorilla:0.010):0.012,Orangutan:0.024):0.030,(Macaque:0.033,Baboon:0.035):0.020,Mouse:0.160);",
+  showDistribution: {
+    distribution: "normal",
+    params: { mean: 0, sd: 1 },
+    region: { from: 1.96, label: "Upper tail beyond z = 1.96" },
   },
 };

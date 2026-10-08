@@ -169,6 +169,8 @@ import { streamWithFallback } from "../llm/streamWithFallback";
 // imported rather than re-declared -- see its doc comment (plain TS, no
 // React, same cross-boundary pattern as @llteacher/ui/auth/courseRole).
 import { isRenderableToolPartType } from "@llteacher/ui/generative/renderableTools";
+import { isToolEnabled } from "@llteacher/ui/generative/toolkits";
+import { normalizeKnowledgeCheckAnswer } from "./knowledgeCheckAnswer";
 import type { AuthContext } from "../middleware/roles";
 // #41: the course knowledge base -- searchKnowledge/showKnowledge (TOOLS,
 // below) read through this service, scoped to the course the conversation
@@ -437,8 +439,8 @@ export const TOOLS: ToolSet = {
     }),
     execute: async (_input: Record<string, never>) => ({ status: "suggested" as const }),
   },
-  /* Subject figures: a shared worked-steps layout, ECON 201 (intro macro)
-     and bioinformatics. All DISPLAY tools, same contract as showDefinition:
+  /* Subject figures: a shared worked-steps layout plus the subject packs
+     an instructor can enable per LLM config (toolkits.ts). All DISPLAY tools, same contract as showDefinition:
      the model supplies arguments, the sentinel below keeps the tool-call
      history valid, and packages/ui draws the figure -- COMPUTING every
      number it shows (equilibrium movement, GDP, rates, the translation,
@@ -595,63 +597,230 @@ export const TOOLS: ToolSet = {
     }),
     execute: async () => ({ status: "displayed" as const }),
   },
-  showAlignment: {
+  showDistribution: {
     description:
-      "Bioinformatics: display a pairwise sequence alignment (DNA or protein) with a match line; the figure " +
-      "computes identity, mismatches, gaps and the score. Both sequences must already be aligned to the same " +
-      "length with '-' for gaps. Args: kind ('dna'|'protein'); seqA, seqB; nameA?, nameB?; scheme? { match, " +
-      "mismatch, gap } (default +1/-1/-2).",
-    inputSchema: jsonSchema<{ kind: "dna" | "protein"; seqA: string; seqB: string; nameA?: string; nameB?: string; scheme?: { match: number; mismatch: number; gap: number } }>({
+      "Statistics: plot a probability distribution -- normal (params mean, sd), Student's t (df), chi-square (df) " +
+      "or binomial (n, p) -- with an optional shaded region; the figure computes and states the region's " +
+      "probability, so don't assert a different one. Use when explaining a p-value, a critical value or a tail " +
+      "probability. Args: distribution; params; region? { from?, to?, label? } (either end open); title?.",
+    inputSchema: jsonSchema<{ distribution: "normal" | "t" | "binomial" | "chi-square"; params: { mean?: number; sd?: number; df?: number; n?: number; p?: number }; region?: { from?: number; to?: number; label?: string }; title?: string }>({
       type: "object",
       properties: {
-        kind: { type: "string", enum: ["dna", "protein"] },
-        seqA: { type: "string", description: "Aligned sequence with '-' for gaps" },
-        seqB: { type: "string", description: "Aligned sequence, same length as seqA" },
-        nameA: { type: "string" },
-        nameB: { type: "string" },
-        scheme: {
+        distribution: { type: "string", enum: ["normal", "t", "binomial", "chi-square"] },
+        params: {
           type: "object",
-          properties: { match: { type: "number" }, mismatch: { type: "number" }, gap: { type: "number" } },
-          required: ["match", "mismatch", "gap"],
+          properties: {
+            mean: { type: "number" },
+            sd: { type: "number", exclusiveMinimum: 0 },
+            df: { type: "number", exclusiveMinimum: 0 },
+            n: { type: "integer", minimum: 1, maximum: 100 },
+            p: { type: "number", minimum: 0, maximum: 1 },
+          },
           additionalProperties: false,
         },
-      },
-      required: ["kind", "seqA", "seqB"],
-      additionalProperties: false,
-    }),
-    execute: async () => ({ status: "displayed" as const }),
-  },
-  showTranslation: {
-    description:
-      "Bioinformatics: translate a DNA coding-strand sequence (up to 360 nt) codon by codon -- DNA, mRNA and " +
-      "amino acid, using the standard genetic code, with start and stop codons marked. The figure does the " +
-      "translation; supply only the sequence. Args: dna; frame? (0, 1 or 2); label?.",
-    inputSchema: jsonSchema<{ dna: string; frame?: 0 | 1 | 2; label?: string }>({
-      type: "object",
-      properties: {
-        dna: { type: "string", description: "Coding-strand DNA (A/C/G/T; U is read as T)" },
-        frame: { type: "integer", enum: [0, 1, 2] },
-        label: { type: "string", description: "What the sequence is, e.g. 'the start of human HBB'" },
-      },
-      required: ["dna"],
-      additionalProperties: false,
-    }),
-    execute: async () => ({ status: "displayed" as const }),
-  },
-  showPhyloTree: {
-    description:
-      "Bioinformatics: draw a phylogenetic tree from a Newick string (2-40 taxa). With branch lengths it is drawn " +
-      "to scale with a scale bar; without them it is drawn as a cladogram and says so. Args: newick; title?.",
-    inputSchema: jsonSchema<{ newick: string; title?: string }>({
-      type: "object",
-      properties: {
-        newick: { type: "string", description: "e.g. '((Human:0.1,Chimp:0.1):0.3,Mouse:0.6);'" },
+        region: {
+          type: "object",
+          properties: { from: { type: "number" }, to: { type: "number" }, label: { type: "string" } },
+          additionalProperties: false,
+        },
         title: { type: "string" },
       },
-      required: ["newick"],
+      required: ["distribution", "params"],
+      additionalProperties: false,
+    }),
+    execute: async ({ distribution }: { distribution: string }) => ({ status: "displayed" as const, distribution }),
+  },
+  /* Clinical informatics pack (toolkits.ts). As with every figure, the model
+     supplies arguments only; packages/ui/src/generative/lib/clinical.ts
+     computes every measure the figure states. */
+  showDiagnosticAccuracy: {
+    description:
+      "Clinical informatics: show a diagnostic test or alert against a reference standard as a 2×2 mosaic and table, " +
+      "from the four counts. Use it when explaining sensitivity, specificity, PPV, NPV, likelihood ratios, or why a " +
+      "positive result may not mean disease. Supply only the counts; the figure computes every measure and the 'Of N " +
+      "positive results, X have the condition' sentence, so do not state values that contradict it. Args: tp, fp, fn, " +
+      "tn (whole numbers, total > 0); testName?; conditionName? (lower case, e.g. 'sepsis').",
+    inputSchema: jsonSchema<{ tp: number; fp: number; fn: number; tn: number; testName?: string; conditionName?: string }>({
+      type: "object",
+      properties: {
+        tp: { type: "integer", minimum: 0, description: "True positives: test positive and the condition is present" },
+        fp: { type: "integer", minimum: 0, description: "False positives: test positive, condition absent" },
+        fn: { type: "integer", minimum: 0, description: "False negatives: test negative, condition present" },
+        tn: { type: "integer", minimum: 0, description: "True negatives: test negative, condition absent" },
+        testName: { type: "string", maxLength: 80, description: "e.g. 'Sepsis screening alert'" },
+        conditionName: { type: "string", maxLength: 60, description: "Lower-case condition, e.g. 'sepsis'" },
+      },
+      required: ["tp", "fp", "fn", "tn"],
       additionalProperties: false,
     }),
     execute: async () => ({ status: "displayed" as const }),
+  },
+  showPrevalenceEffect: {
+    description:
+      "Clinical informatics: show how a test's PPV and NPV change with prevalence while its sensitivity and " +
+      "specificity stay fixed, with the population it is used in marked. Use it for screening, alert fatigue, or 'why " +
+      "does a good test give mostly false alarms here?'. The figure computes PPV/NPV by Bayes' theorem and states how " +
+      "many of every 10 positive alerts are false positives. Args: sensitivity, specificity (proportions, 0 < x ≤ 1); " +
+      "prevalence (0 < p < 1, a proportion, not a percent); testName?.",
+    inputSchema: jsonSchema<{ sensitivity: number; specificity: number; prevalence: number; testName?: string }>({
+      type: "object",
+      properties: {
+        sensitivity: { type: "number", exclusiveMinimum: 0, maximum: 1, description: "Proportion, e.g. 0.8 (not 80)" },
+        specificity: { type: "number", exclusiveMinimum: 0, maximum: 1, description: "Proportion, e.g. 0.85" },
+        prevalence: {
+          type: "number",
+          exclusiveMinimum: 0,
+          exclusiveMaximum: 1,
+          description: "Proportion with the condition in the population where the tool is used, e.g. 0.02",
+        },
+        testName: { type: "string", maxLength: 80 },
+      },
+      required: ["sensitivity", "specificity", "prevalence"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showRocCurve: {
+    description:
+      "Clinical informatics: draw a ROC curve from a test's operating points (one per threshold), with the chance " +
+      "diagonal. Use it when comparing thresholds, explaining the sensitivity–specificity trade-off, AUC, or choosing " +
+      "a cut-off. The figure computes the AUC (trapezoid rule) and the threshold with the highest Youden's J; do not " +
+      "state an AUC or best threshold of your own. Points must come from one test, so sensitivity must not fall as " +
+      "1 − specificity rises. Args: points (2-30 of { sensitivity, specificity, threshold? }, proportions 0-1); label?.",
+    inputSchema: jsonSchema<{ points: Array<{ sensitivity: number; specificity: number; threshold?: string | number }>; label?: string }>({
+      type: "object",
+      properties: {
+        points: {
+          type: "array",
+          minItems: 2,
+          maxItems: 30,
+          items: {
+            type: "object",
+            properties: {
+              sensitivity: { type: "number", minimum: 0, maximum: 1 },
+              specificity: { type: "number", minimum: 0, maximum: 1 },
+              threshold: { type: ["string", "number"], description: "The cut-off for this point, e.g. '≥ 4' or 2.0" },
+            },
+            required: ["sensitivity", "specificity"],
+            additionalProperties: false,
+          },
+        },
+        label: { type: "string", maxLength: 120, description: "What is being predicted, e.g. 'Early warning score, ICU transfer within 24 h'" },
+      },
+      required: ["points"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showPatientTimeline: {
+    description:
+      "Clinical informatics: show one (de-identified) patient's record as a swimlane timeline: encounters, vital " +
+      "signs, labs, medications, procedures, orders and notes on a shared time axis, with abnormal results flagged. " +
+      "Use it when walking through a case, a care pathway, or how EHR data accumulate over a stay. The figure orders " +
+      "events, computes the time span and counts abnormal results itself. Args: events (1-40 of { time: ISO date or " +
+      "date-time, category, label, detail?, abnormal? }); patientLabel?. Never include real patient identifiers.",
+    inputSchema: jsonSchema<{
+      patientLabel?: string;
+      events: Array<{ time: string; category: string; label: string; detail?: string; abnormal?: boolean }>;
+    }>({
+      type: "object",
+      properties: {
+        patientLabel: { type: "string", maxLength: 80, description: "De-identified, e.g. 'Patient A, 68 y'" },
+        events: {
+          type: "array",
+          minItems: 1,
+          maxItems: 40,
+          items: {
+            type: "object",
+            properties: {
+              time: {
+                type: "string",
+                description: "ISO 8601 date '2026-03-03' or date-time '2026-03-03T08:40' (all events in one time zone)",
+              },
+              category: { type: "string", enum: ["encounter", "lab", "medication", "vital", "procedure", "order", "note"] },
+              label: { type: "string", maxLength: 120 },
+              detail: { type: "string", maxLength: 200, description: "e.g. '4.1 mmol/L' or '4.5 g IV'" },
+              abnormal: { type: "boolean" },
+            },
+            required: ["time", "category", "label"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["events"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showCdsRule: {
+    description:
+      "Clinical informatics: evaluate a clinical decision support rule (IF all/any of up to 8 conditions THEN an " +
+      "action) against one patient's data, shown as a rule card. Use it when teaching CDS logic, alert design, or how " +
+      "missing data silently suppresses alerts. Give the rule and the patient values; the figure evaluates each " +
+      "condition (met / not met / missing) and computes whether the rule fires, so do not assert the outcome yourself. " +
+      "Args: name; logic ('all'|'any'); conditions (1-8 of { label, field, operator, value, unit? }); patient " +
+      "({ field: number|string|null }); action?.",
+    inputSchema: jsonSchema<{
+      name: string;
+      logic: "all" | "any";
+      conditions: Array<{ label: string; field: string; operator: string; value: number | string; unit?: string }>;
+      patient: Record<string, number | string | null>;
+      action?: string;
+    }>({
+      type: "object",
+      properties: {
+        name: { type: "string", maxLength: 120 },
+        logic: { type: "string", enum: ["all", "any"] },
+        conditions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 8,
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string", maxLength: 120, description: "Plain-language criterion, e.g. 'Lactate ≥ 2 mmol/L'" },
+              field: { type: "string", maxLength: 60, description: "Key into patient, e.g. 'lactate'" },
+              operator: { type: "string", enum: [">", ">=", "<", "<=", "=", "!="] },
+              value: { type: ["number", "string"], description: "Number to compare, or text (text only with '=' or '!=')" },
+              unit: { type: "string", maxLength: 30 },
+            },
+            required: ["label", "field", "operator", "value"],
+            additionalProperties: false,
+          },
+        },
+        patient: {
+          type: "object",
+          maxProperties: 40,
+          additionalProperties: { type: ["number", "string", "null"] },
+          description: "The patient's values by field; omit a field or use null when it was not recorded",
+        },
+        action: { type: "string", maxLength: 200, description: "What the alert recommends when it fires" },
+      },
+      required: ["name", "logic", "conditions", "patient"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  /* #36: an inline multiple-choice question. Deliberately NO answer field:
+     the model judges the student's choice on its next turn, so nothing in
+     the browser can reveal the answer early. The student's answer comes back
+     as a user message (knowledgeCheckAnswer.ts). */
+  knowledgeCheck: {
+    description:
+      "Pose a short multiple-choice question to check the student's understanding, any subject. The student " +
+      "answers in the chat and their choice arrives as their next message; then tell them whether it was right " +
+      "and why. Never include or hint at the answer in this call. Use sparingly -- after explaining an idea, not " +
+      "instead of a conversation. Args: question; options (2-6 distinct, concise choices).",
+    inputSchema: jsonSchema<{ question: string; options: string[] }>({
+      type: "object",
+      properties: {
+        question: { type: "string" },
+        options: { type: "array", minItems: 2, maxItems: 6, items: { type: "string" } },
+      },
+      required: ["question", "options"],
+      additionalProperties: false,
+    }),
+    execute: async ({ question }: { question: string }) => ({ status: "awaiting_response" as const, question }),
   },
   searchKnowledge: {
     description:
@@ -797,9 +966,16 @@ const KNOWLEDGE_TOOL_NAMES = new Set<keyof typeof TOOLS>(["searchKnowledge", "sh
 
 export function toolsForConversation(
   sectionId: string | null,
-  options?: { withholdRequestHint?: boolean; withholdKnowledge?: boolean },
+  options?: { withholdRequestHint?: boolean; withholdKnowledge?: boolean; genuiToolkits?: readonly string[] },
 ): ToolSet {
   const withheldNames = new Set<keyof typeof TOOLS>();
+  // Subject figure packs are opt-in per LLM config (toolkits.ts): a tool in
+  // a pack the instructor did not enable is never OFFERED, so the model
+  // cannot call it and the student is never shown it.
+  const enabledToolkits = options?.genuiToolkits ?? [];
+  for (const name of Object.keys(TOOLS) as Array<keyof typeof TOOLS>) {
+    if (!isToolEnabled(name, enabledToolkits)) withheldNames.add(name);
+  }
   if (!sectionId) {
     for (const name of SECTION_ONLY_TOOL_NAMES) withheldNames.add(name);
   }
@@ -970,7 +1146,9 @@ const inboundUserMessageSchema = z.object({
 // tool-dispatch loop above understand. A "file" part in particular is
 // rejected here rather than reaching convertToModelMessages, which would map
 // it to an outbound fetch URL (downloadAssets) the model can request.
-const ALLOWED_HISTORY_PART_TYPE_RE = /^(text|step-start|tool-[A-Za-z0-9_]+)$/;
+// #36: plus exactly one data part, a knowledge-check answer -- validated and
+// rebuilt from the persisted check by knowledgeCheckAnswer.ts before storage.
+const ALLOWED_HISTORY_PART_TYPE_RE = /^(text|step-start|tool-[A-Za-z0-9_]+|data-knowledge-check-response)$/;
 const historyPartSchema = withTextLengthCap(
   z.object({ type: z.string().regex(ALLOWED_HISTORY_PART_TYPE_RE) }).passthrough(),
 );
@@ -2459,6 +2637,7 @@ export const chatHandler = effectHandler((c) => Effect.gen(function* () {
     const turnTools = toolsForConversation(conv.sectionId, {
       withholdRequestHint: isHintGranted,
       withholdKnowledge: knowledgeListing === "",
+      genuiToolkits: resolvedLLMConfig.genuiToolkits,
     });
     const systemPrompt = assembleSystemPrompt(
       resolvedSystemPromptContent,
@@ -2491,6 +2670,12 @@ export const chatHandler = effectHandler((c) => Effect.gen(function* () {
       // that was REFUSED was "already on its way" -- the same conflation
       // section_closed was carved out of in_progress to fix. The lock is
       // released by this block's Effect.onError.
+      // #36: a knowledge-check answer is validated against, and rebuilt
+      // from, the check the server itself produced in this conversation.
+      // A refusal fails this locked block, whose onError releases the lock.
+      const kcAnswer = normalizeKnowledgeCheckAnswer(inboundMessage.parts, recentMessages);
+      if (kcAnswer.kind === "invalid") return yield* new BadRequest({ message: kcAnswer.message });
+      const partsToStore = kcAnswer.kind === "answer" ? kcAnswer.parts : inboundMessage.parts;
       {
         const { row: insertedRow, created } = yield* query(
           "appendMessage",
@@ -2499,7 +2684,7 @@ export const chatHandler = effectHandler((c) => Effect.gen(function* () {
               db,
               scope,
               conv.id,
-              { role: "user", parts: inboundMessage.parts, clientMessageId: parsedInbound.data.id },
+              { role: "user", parts: partsToStore, clientMessageId: parsedInbound.data.id },
               { skipOwnershipCheck: true },
             ),
           [IdempotencyKeyConflictError],
@@ -2593,7 +2778,7 @@ export const chatHandler = effectHandler((c) => Effect.gen(function* () {
           // re-derived from appendMessage's returned row) -- only `id` is
           // server-generated and genuinely needs the DB round-trip's result.
           persistedHistory = [
-            { id: insertedRow.id, role: "user", parts: inboundMessage.parts },
+            { id: insertedRow.id, role: "user", parts: partsToStore },
             ...recentMessages.slice(0, MAX_HISTORY_MESSAGES - 1),
           ];
         }

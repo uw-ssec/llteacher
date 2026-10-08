@@ -9,17 +9,15 @@
    -------------------------------------------------------------------------- */
 
 import { MACRO_MODELS, type MacroModelKind } from "./lib/econ";
-import { DEFAULT_SCHEME, normalizeDna, parseNewick, leaves, type AlignmentScheme } from "./lib/bio";
 import type { MacroModelDiagramProps, MacroShift } from "./renderers/econ/MacroModelDiagram";
 import { resolveCurveId } from "./renderers/econ/MacroModelDiagram";
 import type { GdpCompositionProps } from "./renderers/econ/GdpComposition";
 import type { MultiplierRoundsProps } from "./renderers/econ/MultiplierRounds";
 import type { LaborForceProps } from "./renderers/econ/LaborForce";
 import type { PriceIndexProps } from "./renderers/econ/PriceIndex";
-import type { SequenceAlignmentProps } from "./renderers/bio/SequenceAlignment";
-import type { TranslationProps } from "./renderers/bio/Translation";
-import type { PhyloTreeProps } from "./renderers/bio/PhyloTree";
 import type { WorkedStepsProps, WorkedStep } from "./renderers/WorkedSteps";
+import type { DistributionPlotProps } from "./renderers/stats/DistributionPlot";
+import { KNOWLEDGE_CHECK_MAX_OPTIONS, KNOWLEDGE_CHECK_MIN_OPTIONS } from "./knowledgeCheck";
 
 type Obj = Record<string, unknown>;
 type Parsed<P> = Omit<P, "isPartial">;
@@ -116,49 +114,53 @@ export function parseInflationInput(v: unknown): Parsed<PriceIndexProps> | null 
   return { series, indexName };
 }
 
-const DNA_ALIGN = /^[ACGTUN-]+$/;
-const PROTEIN_ALIGN = /^[ACDEFGHIKLMNPQRSTVWYBZXU*-]+$/;
 
-export function parseAlignmentInput(v: unknown): Parsed<SequenceAlignmentProps> | null {
-  if (!isObj(v) || typeof v.seqA !== "string" || typeof v.seqB !== "string") return null;
-  const kind = v.kind === "protein" ? "protein" : v.kind === "dna" ? "dna" : null;
-  if (!kind) return null;
-  const a = v.seqA.replace(/\s/g, "").toUpperCase();
-  const b = v.seqB.replace(/\s/g, "").toUpperCase();
-  if (!a || a.length !== b.length || a.length > 2000) return null;
-  const alphabet = kind === "dna" ? DNA_ALIGN : PROTEIN_ALIGN;
-  if (!alphabet.test(a) || !alphabet.test(b)) return null;
-  for (let i = 0; i < a.length; i++) if (a[i] === "-" && b[i] === "-") return null;
-  const nameA = optStr(v.nameA, 40);
-  const nameB = optStr(v.nameB, 40);
-  if (nameA === null || nameB === null) return null;
-  let scheme: AlignmentScheme = DEFAULT_SCHEME;
-  if (v.scheme !== undefined) {
-    if (!isObj(v.scheme) || ![v.scheme.match, v.scheme.mismatch, v.scheme.gap].every(isFiniteNum)) return null;
-    scheme = { match: v.scheme.match as number, mismatch: v.scheme.mismatch as number, gap: v.scheme.gap as number };
+/** #35: each family's parameters, validated for meaning as well as type. */
+export function parseDistributionInput(v: unknown): Parsed<DistributionPlotProps> | null {
+  if (!isObj(v) || !isObj(v.params)) return null;
+  const kind = v.distribution;
+  const p = v.params;
+  let params: DistributionPlotProps["params"];
+  if (kind === "normal") {
+    const m = p.mean ?? 0;
+    const sd = p.sd ?? 1;
+    if (!isFiniteNum(m) || !isFiniteNum(sd) || sd <= 0) return null;
+    params = { mean: m, sd };
+  } else if (kind === "t" || kind === "chi-square") {
+    if (!isFiniteNum(p.df) || p.df <= 0 || p.df > 500) return null;
+    params = { df: p.df };
+  } else if (kind === "binomial") {
+    if (!isFiniteNum(p.n) || !Number.isInteger(p.n) || p.n < 1 || p.n > 100) return null;
+    if (!isFiniteNum(p.p) || p.p < 0 || p.p > 1) return null;
+    params = { n: p.n, p: p.p };
+  } else {
+    return null;
   }
-  return { seqA: a, seqB: b, nameA: nameA || "Seq A", nameB: nameB || "Seq B", kind, scheme };
-}
-
-export function parseTranslationInput(v: unknown): Parsed<TranslationProps> | null {
-  if (!isObj(v) || typeof v.dna !== "string") return null;
-  const { dna, invalid } = normalizeDna(v.dna);
-  if (invalid.length > 0 || dna.length < 3 || dna.length > 360) return null;
-  const frame = v.frame === undefined ? 0 : v.frame;
-  if (frame !== 0 && frame !== 1 && frame !== 2) return null;
-  if (dna.length - frame < 3) return null;
-  const label = optStr(v.label, 60);
-  if (label === null) return null;
-  return { dna, frame, label };
-}
-
-export function parsePhyloTreeInput(v: unknown): Parsed<PhyloTreeProps> | null {
-  if (!isObj(v) || typeof v.newick !== "string" || v.newick.length > 4000) return null;
-  const tree = parseNewick(v.newick);
-  if (!tree) return null;
-  const tips = leaves(tree).length;
-  if (tips < 2 || tips > 40) return null;
+  let region: DistributionPlotProps["region"];
+  if (v.region !== undefined) {
+    if (!isObj(v.region)) return null;
+    const { from, to } = v.region;
+    if (from !== undefined && !isFiniteNum(from)) return null;
+    if (to !== undefined && !isFiniteNum(to)) return null;
+    if (from === undefined && to === undefined) return null;
+    if (from !== undefined && to !== undefined && (from as number) > (to as number)) return null;
+    const label = optStr(v.region.label, 80);
+    if (label === null) return null;
+    region = { from: from as number | undefined, to: to as number | undefined, label };
+  }
   const title = optStr(v.title, 120);
   if (title === null) return null;
-  return { newick: v.newick, title };
+  return { distribution: kind, params, region, title };
+}
+
+/** #36: a question and 2-6 distinct, non-empty options. Any other field --
+ *  an answer key in particular -- is not read, so it can never render. */
+export function parseKnowledgeCheckInput(v: unknown): { question: string; options: string[] } | null {
+  if (!isObj(v) || typeof v.question !== "string" || !v.question.trim() || v.question.length > 500) return null;
+  if (!Array.isArray(v.options)) return null;
+  if (v.options.length < KNOWLEDGE_CHECK_MIN_OPTIONS || v.options.length > KNOWLEDGE_CHECK_MAX_OPTIONS) return null;
+  if (!v.options.every((o) => typeof o === "string" && o.trim().length > 0 && o.length <= 300)) return null;
+  const options = v.options as string[];
+  if (new Set(options.map((o) => o.trim().toLowerCase())).size !== options.length) return null;
+  return { question: v.question, options };
 }

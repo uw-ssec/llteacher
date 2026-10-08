@@ -2,8 +2,9 @@
 
    Runs the REAL student app (Vite, port 2311) with its API mocked so a
    section conversation's history holds persisted figure tool calls -- the
-   same parts the server stores and replays -- for an ECON 201 thread and a
-   bioinformatics thread. Captures light and dark at three widths and fails
+   same parts the server stores and replays -- for an ECON 201 thread, a
+   clinical informatics thread and a statistics thread (with an answered
+   knowledge check). Captures light and dark at three widths and fails
    on page errors, a missing figure, or a figure wider than the chat column.
 
    Usage (student app running on :2311):
@@ -42,16 +43,40 @@ const THREADS = {
       ai(7, [tool("showGdpComposition", 7), tool("showLaborForce", 7), tool("showInflation", 7), tool("showWorkedSteps", 7)]),
     ],
   },
-  bio: {
-    course: "BIOL 419",
-    homework: "Lab 2 · From sequence to tree",
-    sections: ["Translation", "Pairwise alignment", "Phylogenies"],
+  clinical: {
+    course: "BIME 530",
+    homework: "Module 3 · Screening and decision support",
+    sections: ["Test accuracy", "Prevalence and predictive value", "Clinical decision support"],
     messages: [
-      ai(1, [{ type: "text", text: "Let's start with the coding sequence of human β-globin. Read it in frame 1:" }, tool("showTranslation", 1)]),
-      student(2, "How similar is the mouse version?"),
-      ai(3, [tool("showAlignment", 3), { type: "text", text: "Where do the mismatches cluster, and does the gap keep the reading frame?" }]),
-      student(4, "Three bases, so the frame is kept."),
-      ai(5, [tool("showPhyloTree", 5)]),
+      ai(1, [{ type: "text", text: "Let's start with how a screening test performs against a reference standard:" }, tool("showDiagnosticAccuracy", 1)]),
+      student(2, "So a positive result means they probably have it?"),
+      ai(3, [{ type: "text", text: "That depends on how common the condition is. Watch PPV as prevalence changes:" }, tool("showPrevalenceEffect", 3)]),
+      student(4, "How do we pick the cutoff?"),
+      ai(5, [tool("showRocCurve", 5), { type: "text", text: "Each point is a threshold. Where would you set it for a screening test?" }]),
+      student(6, "What does this look like for a real patient and a CDS alert?"),
+      ai(7, [tool("showPatientTimeline", 7), tool("showCdsRule", 7)]),
+    ],
+  },
+  stats: {
+    course: "STAT 311",
+    homework: "HW 5 · Sampling distributions",
+    sections: ["The normal distribution", "Tail probabilities"],
+    messages: [
+      ai(1, [{ type: "text", text: "Here's the standard normal with the upper tail shaded:" }, tool("showDistribution", 1)]),
+      ai(2, [{ type: "text", text: "Quick check before we go on:" }, {
+        type: "tool-knowledgeCheck", toolCallId: "call-kc-2", state: "output-available",
+        input: { question: "About what share of a normal distribution lies more than 1.96 SD above the mean?", options: ["2.5%", "5%", "1.96%", "50%"] },
+        output: { status: "awaiting_response" },
+      }]),
+      { id: "m3", seq: 3, role: "user", createdAt: "2026-10-08T17:02:00Z", parts: [
+        { type: "text", text: 'My answer to the check "About what share of a normal distribution lies more than 1.96 SD above the mean?": A. 2.5%' },
+        { type: "data-knowledge-check-response", data: { toolCallId: "call-kc-2", selectedIndex: 0 } },
+      ] },
+      ai(4, [{ type: "text", text: "Yes: 2.5% in each tail, 5% in both together. Now try one yourself:" }, {
+        type: "tool-knowledgeCheck", toolCallId: "call-kc-4", state: "output-available",
+        input: { question: "If the cutoff moves from 1.96 to 1.645, the upper tail is…", options: ["Larger", "Smaller", "Unchanged"] },
+        output: { status: "awaiting_response" },
+      }]),
     ],
   },
 };

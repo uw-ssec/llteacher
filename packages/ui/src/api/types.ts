@@ -60,6 +60,9 @@ export interface LlmConfigPayload {
   isActive: boolean;
   /** Whether a tutor on this config may search the course knowledge base. */
   knowledgeEnabled: boolean;
+  /** Subject figure packs enabled on this config (ids from
+   *  @llteacher/ui/generative/toolkits). Empty means none. */
+  genuiToolkits: string[];
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
 }
@@ -79,6 +82,7 @@ export interface LlmConfigWriteBody {
   isActive: boolean;
   isDefault: boolean;
   knowledgeEnabled: boolean;
+  genuiToolkits: string[];
 }
 
 /** The test button's result. 200 either way: a model that refuses is a

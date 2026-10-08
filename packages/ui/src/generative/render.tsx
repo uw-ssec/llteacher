@@ -25,18 +25,28 @@ import { GdpComposition } from "./renderers/econ/GdpComposition";
 import { MultiplierRounds } from "./renderers/econ/MultiplierRounds";
 import { LaborForce } from "./renderers/econ/LaborForce";
 import { PriceIndex } from "./renderers/econ/PriceIndex";
-import { SequenceAlignment } from "./renderers/bio/SequenceAlignment";
-import { Translation } from "./renderers/bio/Translation";
-import { PhyloTree } from "./renderers/bio/PhyloTree";
+import { DistributionPlot } from "./renderers/stats/DistributionPlot";
+import { KnowledgeCheck } from "./renderers/KnowledgeCheck";
+import { DiagnosticAccuracy } from "./renderers/clinical/DiagnosticAccuracy";
+import { PrevalenceEffect } from "./renderers/clinical/PrevalenceEffect";
+import { RocCurve } from "./renderers/clinical/RocCurve";
+import { PatientTimeline } from "./renderers/clinical/PatientTimeline";
+import { CdsRule } from "./renderers/clinical/CdsRule";
 import {
-  parseAlignmentInput,
+  parseCdsRuleInput,
+  parseDiagnosticAccuracyInput,
+  parsePatientTimelineInput,
+  parsePrevalenceEffectInput,
+  parseRocCurveInput,
+} from "./toolInputs.clinical";
+import {
+  parseDistributionInput,
   parseGdpCompositionInput,
   parseInflationInput,
+  parseKnowledgeCheckInput,
   parseLaborForceInput,
   parseMacroModelInput,
   parseMultiplierInput,
-  parsePhyloTreeInput,
-  parseTranslationInput,
   parseWorkedStepsInput,
 } from "./toolInputs";
 
@@ -50,6 +60,8 @@ export interface ToolPart {
     | "output-available"
     | "output-error";
   input?: unknown;
+  /** The AI SDK's id for this call; knowledgeCheck answers reference it. */
+  toolCallId?: string;
 }
 
 /** Runtime-validates the untrusted `input` of a `tool-showDefinition` part
@@ -122,11 +134,17 @@ export function parseExecuteRCodeInput(
  *  exactly as it did before `tool-executeRCode` existed. */
 export interface ToolPartHandlers {
   onRunRCode?: (code: string) => Promise<RCodeResult>;
+  /** #36: answers already given in this conversation (toolCallId ->
+   *  option index), and how to send a new one. Absent = read-only checks. */
+  knowledgeCheck?: {
+    answers: ReadonlyMap<string, number>;
+    onAnswer?: (toolCallId: string, question: string, options: string[], selectedIndex: number) => Promise<void>;
+  };
 }
 
-/* Subject figures (ECON 201, bioinformatics, shared worked steps): every
-   one is "validate the model's JSON, then draw", so they share one table
-   rather than nine near-identical branches. While the arguments are still
+/* Subject figures (shared worked steps, and the subject packs an instructor
+   enables): every one is "validate the model's JSON, then draw", so they
+   share one table rather than near-identical branches. While the arguments are still
    streaming and don't yet validate, a skeleton plate holds the space;
    once streaming has finished, input that still doesn't validate renders
    nothing (the deny-by-default contract above). */
@@ -146,10 +164,13 @@ const FIGURE_TOOLS: Record<string, FigureTool<unknown>> = {
   "tool-showGdpComposition": figureTool({ kicker: "National income", parse: parseGdpCompositionInput, render: (p, partial) => <GdpComposition {...p} isPartial={partial} /> }),
   "tool-showMultiplier": figureTool({ kicker: "Fiscal policy", parse: parseMultiplierInput, render: (p, partial) => <MultiplierRounds {...p} isPartial={partial} /> }),
   "tool-showLaborForce": figureTool({ kicker: "Unemployment", parse: parseLaborForceInput, render: (p, partial) => <LaborForce {...p} isPartial={partial} /> }),
+  "tool-showDistribution": figureTool({ kicker: "Probability distribution", parse: parseDistributionInput, render: (p, partial) => <DistributionPlot {...p} isPartial={partial} /> }),
   "tool-showInflation": figureTool({ kicker: "Inflation", parse: parseInflationInput, render: (p, partial) => <PriceIndex {...p} isPartial={partial} /> }),
-  "tool-showAlignment": figureTool({ kicker: "Sequence alignment", parse: parseAlignmentInput, render: (p, partial) => <SequenceAlignment {...p} isPartial={partial} /> }),
-  "tool-showTranslation": figureTool({ kicker: "Central dogma · translation", parse: parseTranslationInput, render: (p, partial) => <Translation {...p} isPartial={partial} /> }),
-  "tool-showPhyloTree": figureTool({ kicker: "Phylogenetics", parse: parsePhyloTreeInput, render: (p, partial) => <PhyloTree {...p} isPartial={partial} /> }),
+  "tool-showDiagnosticAccuracy": figureTool({ kicker: "Diagnostic accuracy", parse: parseDiagnosticAccuracyInput, render: (p, partial) => <DiagnosticAccuracy {...p} isPartial={partial} /> }),
+  "tool-showPrevalenceEffect": figureTool({ kicker: "Prevalence and predictive value", parse: parsePrevalenceEffectInput, render: (p, partial) => <PrevalenceEffect {...p} isPartial={partial} /> }),
+  "tool-showRocCurve": figureTool({ kicker: "ROC curve", parse: parseRocCurveInput, render: (p, partial) => <RocCurve {...p} isPartial={partial} /> }),
+  "tool-showPatientTimeline": figureTool({ kicker: "Patient timeline", parse: parsePatientTimelineInput, render: (p, partial) => <PatientTimeline {...p} isPartial={partial} /> }),
+  "tool-showCdsRule": figureTool({ kicker: "Decision support rule", parse: parseCdsRuleInput, render: (p, partial) => <CdsRule {...p} isPartial={partial} /> }),
 };
 
 /** The figure-tool part types, exported for the registry lockstep test. */
@@ -207,6 +228,27 @@ function renderToolPartInner(part: ToolPart, handlers?: ToolPartHandlers): React
   // same suggestion card it did live.
   if (part.type === "tool-markSectionComplete") {
     return <SectionCompleteSuggestion isPartial={part.state === "input-streaming"} />;
+  }
+  // #36: interactive, so it needs the call id (answers reference it) and the
+  // app's send path; without either it renders read-only.
+  if (part.type === "tool-knowledgeCheck") {
+    const isPartial = part.state === "input-streaming";
+    const input = parseKnowledgeCheckInput(part.input);
+    if (!input) return isPartial ? <FigureSkeleton kicker="Check your understanding" /> : null;
+    const callId = part.toolCallId;
+    const kc = handlers?.knowledgeCheck;
+    const onAnswer = callId && kc?.onAnswer
+      ? (index: number) => kc.onAnswer!(callId, input.question, input.options, index)
+      : undefined;
+    return (
+      <KnowledgeCheck
+        question={input.question}
+        options={input.options}
+        answeredIndex={callId ? kc?.answers.get(callId) : undefined}
+        onAnswer={onAnswer}
+        isPartial={isPartial}
+      />
+    );
   }
   const figure = FIGURE_TOOLS[part.type];
   if (figure) {

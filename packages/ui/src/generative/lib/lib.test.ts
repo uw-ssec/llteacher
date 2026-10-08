@@ -1,69 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { leaves, normalizeDna, parseNewick, residueClass, scoreAlignment, translate } from "./bio";
 import { MACRO_MODELS, applyShifts, gdpTotal, intersect, spendingMultiplier } from "./econ";
-
-describe("translate (standard genetic code)", () => {
-  it("translates codons and marks start and stop", () => {
-    const codons = translate("ATGGCCATTGTAATGGGCCGCTGAAAG");
-    expect(codons.map((c) => c.aa).join("")).toBe("MAIVMGR*K");
-    expect(codons[0]).toMatchObject({ dna: "ATG", mrna: "AUG", three: "Met", isStart: true, start: 1 });
-    expect(codons[7]).toMatchObject({ dna: "TGA", aa: "*", three: "Stop", isStop: true, start: 22 });
-  });
-
-  it("honours the reading frame and drops an incomplete last codon", () => {
-    expect(translate("AATGTTTA", 1).map((c) => c.dna)).toEqual(["ATG", "TTT"]);
-  });
-
-  it("covers all 64 codons, including every stop", () => {
-    const stops = ["TAA", "TAG", "TGA"].map((c) => translate(c)[0]!.aa);
-    expect(stops).toEqual(["*", "*", "*"]);
-    expect(translate("TGG")[0]!.aa).toBe("W");
-    expect(translate("GGG")[0]!.aa).toBe("G");
-  });
-});
-
-describe("normalizeDna", () => {
-  it("strips numbering and whitespace, reads U as T, reports invalid symbols", () => {
-    expect(normalizeDna("1 atg gcu\n61 tta")).toEqual({ dna: "ATGGCTTTA", invalid: [] });
-    expect(normalizeDna("ATGXN").invalid).toEqual(["X", "N"]);
-  });
-});
-
-describe("residueClass", () => {
-  it("groups by side chain", () => {
-    expect([residueClass("L"), residueClass("S"), residueClass("K"), residueClass("D"), residueClass("G")]).toEqual([
-      "nonpolar", "polar", "positive", "negative", "special",
-    ]);
-    expect(residueClass("*")).toBeNull();
-  });
-});
-
-describe("scoreAlignment", () => {
-  it("counts matches, mismatches and gaps and scores them linearly", () => {
-    const s = scoreAlignment("GATTACA", "GA-TACC", { match: 1, mismatch: -1, gap: -2 });
-    expect(s).toMatchObject({ length: 7, matches: 5, mismatches: 1, gaps: 1, score: 2, identity: 71.4 });
-    expect(s.columns).toEqual(["match", "match", "gap", "match", "match", "match", "mismatch"]);
-  });
-});
-
-describe("parseNewick", () => {
-  it("parses nested clades, branch lengths and quoted names", () => {
-    const tree = parseNewick("((Human:0.1,Chimp:0.12):0.3,'Mus musculus':0.6);")!;
-    expect(tree.children).toHaveLength(2);
-    expect(leaves(tree).map((l) => l.name)).toEqual(["Human", "Chimp", "Mus musculus"]);
-    expect(tree.children[0]!.length).toBe(0.3);
-  });
-
-  it("reads underscores as spaces and tolerates trees without lengths", () => {
-    expect(leaves(parseNewick("(Homo_sapiens,Pan);")!).map((l) => l.name)).toEqual(["Homo sapiens", "Pan"]);
-  });
-
-  it("rejects malformed trees instead of drawing a wrong one", () => {
-    expect(parseNewick("((A,B);")).toBeNull();
-    expect(parseNewick("(A,B)C)extra;")).toBeNull();
-    expect(parseNewick("(A:-1,B);")).toBeNull();
-  });
-});
 
 describe("macro models", () => {
   it("starts AD-AS in long-run equilibrium on LRAS", () => {
@@ -109,5 +45,37 @@ describe("spendingMultiplier", () => {
 describe("gdpTotal", () => {
   it("adds net exports with their sign", () => {
     expect(gdpTotal({ consumption: 14, investment: 4, government: 3.5, netExports: -0.8 })).toBeCloseTo(20.7);
+  });
+});
+
+import { cdf, intervalProbability, pdf } from "./stats";
+
+describe("distributions (#35), against published table values", () => {
+  it.each([
+    ["normal", { mean: 0, sd: 1 }, 1.96, 0.9750021],
+    ["normal", { mean: 0, sd: 1 }, -1.645, 0.0499849],
+    ["normal", { mean: 100, sd: 15 }, 130, 0.9772499],
+    ["t", { df: 10 }, 2.228, 0.97499],
+    ["t", { df: 1 }, 1, 0.75], // Cauchy
+    ["t", { df: 30 }, -2.042, 0.02501],
+    ["chi-square", { df: 3 }, 7.815, 0.95000],
+    ["chi-square", { df: 1 }, 3.841, 0.94999],
+    ["chi-square", { df: 10 }, 18.307, 0.95000],
+  ] as const)("%s %o: P(X <= %d) = %d", (kind, params, x, expected) => {
+    expect(cdf(kind, params, x)).toBeCloseTo(expected, 4);
+  });
+
+  it("binomial matches exact counts", () => {
+    // n=10, p=0.5: P(X <= 2) = (1 + 10 + 45) / 1024
+    expect(cdf("binomial", { n: 10, p: 0.5 }, 2)).toBeCloseTo(56 / 1024, 12);
+    expect(pdf("binomial", { n: 10, p: 0.5 }, 5)).toBeCloseTo(252 / 1024, 12);
+    // inclusive bounds: P(8 <= X) = (45 + 10 + 1) / 1024
+    expect(intervalProbability("binomial", { n: 10, p: 0.5 }, 8)).toBeCloseTo(56 / 1024, 12);
+  });
+
+  it("integrates to 1 and handles open intervals", () => {
+    expect(intervalProbability("normal", { mean: 0, sd: 1 })).toBeCloseTo(1, 12);
+    expect(intervalProbability("normal", { mean: 0, sd: 1 }, -1.96, 1.96)).toBeCloseTo(0.95, 3);
+    expect(intervalProbability("t", { df: 5 }, 2.015)).toBeCloseTo(0.05, 3);
   });
 });

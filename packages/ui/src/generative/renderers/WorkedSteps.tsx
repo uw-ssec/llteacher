@@ -2,8 +2,8 @@
    WorkedSteps (`showWorkedSteps`) -- shared by every subject: a derivation
    or calculation laid out as numbered steps, each with an optional label,
    an expression set in mono, and a plain-language "why". Used for a GDP
-   deflator calculation in ECON 201 as readily as for a Hardy-Weinberg
-   problem in bioinformatics. The arithmetic is the tutor's own, so the
+   deflator calculation in ECON 201 as readily as for a number-needed-to-
+   treat calculation in clinical informatics. The arithmetic is the tutor's own, so the
    figure presents it rather than vouching for it: there is no computed
    takeaway here, unlike the domain figures.
    -------------------------------------------------------------------------- */

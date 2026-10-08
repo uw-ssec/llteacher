@@ -134,10 +134,51 @@ describe("LLMConfigFormView — knowledge base access", () => {
         initialConfig={{
           id: "cfg", recordNumber: 1, name: "Closed book", provider: "openrouter", modelName: "m", basePrompt: "",
           temperature: 0.7, maxCompletionTokens: 1000, fallbackLlmConfigId: null, isDefault: false, isActive: true,
-          knowledgeEnabled: false, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z",
+          knowledgeEnabled: false, genuiToolkits: [], createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z",
         }}
       />,
     );
     expect((screen.getByRole("checkbox", { name: /search the course knowledge base/i }) as HTMLInputElement).checked).toBe(false);
+  });
+});
+
+describe("LLMConfigFormView — subject figures", () => {
+  it("offers every pack, none checked by default, and saves the instructor's picks", async () => {
+    const onSave = vi.fn(async (_values: LLMConfigFormValues) => {});
+    render(<LLMConfigFormView onSave={onSave} onCancel={() => {}} />);
+    const econ = screen.getByRole("checkbox", { name: /economics/i }) as HTMLInputElement;
+    const clinical = screen.getByRole("checkbox", { name: /clinical informatics/i }) as HTMLInputElement;
+    const stats = screen.getByRole("checkbox", { name: /^statistics/i }) as HTMLInputElement;
+    expect([econ.checked, clinical.checked, stats.checked]).toEqual([false, false, false]);
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: "ECON 201 tutor" } });
+    fireEvent.change(screen.getByLabelText(/^base prompt$/i), { target: { value: "Be Socratic." } });
+    fireEvent.click(stats);
+    fireEvent.click(econ);
+    fireEvent.submit(document.querySelector("form")!);
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    // Catalog order regardless of click order.
+    expect(onSave.mock.calls[0]![0]).toMatchObject({ genuiToolkits: ["economics", "statistics"] });
+  });
+
+  it("reflects the stored packs when editing, and unchecking removes one", async () => {
+    const onSave = vi.fn(async (_values: LLMConfigFormValues) => {});
+    render(
+      <LLMConfigFormView
+        onSave={onSave}
+        onCancel={() => {}}
+        initialConfig={{
+          id: "cfg", recordNumber: 1, name: "Nursing", provider: "openrouter", modelName: "m", basePrompt: "Teach.",
+          temperature: 0.7, maxCompletionTokens: 1000, fallbackLlmConfigId: null, isDefault: false, isActive: true,
+          knowledgeEnabled: true, genuiToolkits: ["clinical-informatics", "statistics"],
+          createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z",
+        }}
+      />,
+    );
+    const clinical = screen.getByRole("checkbox", { name: /clinical informatics/i }) as HTMLInputElement;
+    expect(clinical.checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /^statistics/i }));
+    fireEvent.submit(document.querySelector("form")!);
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0]![0]).toMatchObject({ genuiToolkits: ["clinical-informatics"] });
   });
 });

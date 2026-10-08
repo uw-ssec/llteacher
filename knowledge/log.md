@@ -1,4 +1,5 @@
 ## 2026-10-08
+* **Update**: Updated concept `decisions/generative-figures-computed.md` (subject packs opt-in per LLM config; clinical informatics replaces bioinformatics; statistics pack and knowledge check).
 * **Update**: Linked `decisions/generative-figures-computed.md` to `decisions/messages-parts-jsonb.md` (Figures persist as tool-<name> parts in messages.parts and replay through output-available; RENDERABLE_TOOL_NAMES gates which parts count as renderable on replay.).
 * **Creation**: Documented concept `decisions/generative-figures-computed.md` (Subject figures compute what they assert; the model supplies only arguments).
 * **Update**: Linked `decisions/effect-typed-request-pipeline.md` to `bugs/partial-stream-persisted-as-complete.md` (Same chat turn-finalization path: the Effect migration found that a provider rejection before any stream existed left the turn unfinalized and its lock held, returning false 409 in_progress on retry.).

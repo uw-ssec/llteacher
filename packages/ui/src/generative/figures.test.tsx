@@ -5,7 +5,7 @@ import { renderToolPart, FIGURE_TOOL_PART_TYPES, type ToolPart } from "./render"
 import { RENDERABLE_TOOL_NAMES } from "./renderableTools";
 import { FIGURE_FIXTURES } from "./figure/fixtures";
 import { ToolPartErrorBoundary } from "./ToolPartErrorBoundary";
-import { parseAlignmentInput, parseMacroModelInput, parseMultiplierInput, parseTranslationInput } from "./toolInputs";
+import { parseMacroModelInput, parseMultiplierInput } from "./toolInputs";
 
 afterEach(cleanup);
 
@@ -28,7 +28,7 @@ describe("registry lockstep (#38)", () => {
   it("every renderable name is either a figure tool or one of the original three", () => {
     const figures = new Set(FIGURE_TOOL_PART_TYPES.map((t) => t.slice("tool-".length)));
     for (const name of RENDERABLE_TOOL_NAMES) {
-      expect(figures.has(name) || ["showDefinition", "executeRCode", "markSectionComplete"].includes(name), name).toBe(true);
+      expect(figures.has(name) || ["showDefinition", "executeRCode", "markSectionComplete", "knowledgeCheck"].includes(name), name).toBe(true);
     }
   });
 });
@@ -91,32 +91,36 @@ describe("computed, not trusted", () => {
     expect(screen.getByRole("figure").textContent).toContain("(313.7 − 304.7) / 304.7 = +3.0%");
   });
 
-  it("translation: the standard code, ending at the stop codon", () => {
-    show("showTranslation", FIGURE_FIXTURES.showTranslation);
-    const text = screen.getByRole("figure").textContent!;
-    expect(text).toContain("MVHLTPEEKSAVTALWGKVNVDEVGGEALGR·");
-    expect(text).toContain("ends at the TAA stop codon at position 94");
-  });
+});
 
-  it("alignment: identity and score from the columns", () => {
-    show("showAlignment", { kind: "dna", nameA: "a", nameB: "b", seqA: "GATTACA", seqB: "GA-TACC" });
-    const text = screen.getByRole("figure").textContent!;
-    expect(text).toContain("71.4% identity");
-    expect(text).toContain("Score 2 = 5 × 1 (match) + 1 × -1 (mismatch) + 1 × -2 (gap)");
+describe("showDistribution (#35): the shaded probability is computed", () => {
+  it("normal upper tail beyond 1.96", () => {
+    show("showDistribution", FIGURE_FIXTURES.showDistribution);
+    expect(screen.getByRole("figure").textContent).toContain("P(X ≥ 1.96) = 0.0250");
   });
-
-  it("tree: says plainly when it has no branch lengths", () => {
-    show("showPhyloTree", { newick: "((A,B),C);" });
-    expect(screen.getByRole("figure").textContent).toContain("only the branching order is meaningful");
+  it("two-sided t interval", () => {
+    show("showDistribution", { distribution: "t", params: { df: 10 }, region: { from: -2.228, to: 2.228 } });
+    expect(screen.getByRole("figure").textContent).toContain("P(−2.228 ≤ X ≤ 2.228) = 0.9500");
+  });
+  it("binomial bounds are inclusive", () => {
+    show("showDistribution", { distribution: "binomial", params: { n: 10, p: 0.5 }, region: { from: 8 } });
+    // (45 + 10 + 1) / 1024
+    expect(screen.getByRole("figure").textContent).toContain("P(X ≥ 8) = 0.0547");
+  });
+  it.each([
+    ["a non-positive sd", { distribution: "normal", params: { mean: 0, sd: 0 } }],
+    ["a binomial p above 1", { distribution: "binomial", params: { n: 10, p: 1.2 } }],
+    ["a reversed region", { distribution: "normal", params: {}, region: { from: 2, to: 1 } }],
+    ["an unknown family", { distribution: "poisson", params: { lambda: 3 } }],
+  ])("renders nothing for %s", (_l, input) => {
+    const { container } = show("showDistribution", input);
+    expect(container.innerHTML).toBe("");
   });
 });
 
 describe("parsers refuse meaningless input", () => {
   it.each([
     ["an MPC of 1", () => parseMultiplierInput({ mpc: 1, initialChange: 100 })],
-    ["aligned sequences of different length", () => parseAlignmentInput({ kind: "dna", seqA: "ACGT", seqB: "ACG" })],
-    ["a column that is a gap in both rows", () => parseAlignmentInput({ kind: "dna", seqA: "A-GT", seqB: "A-GA" })],
-    ["a non-DNA symbol", () => parseTranslationInput({ dna: "ATGXXX" })],
     ["a curve the model doesn't have", () => parseMacroModelInput({ model: "ad-as", shifts: [{ curve: "IS", direction: "left" }] })],
     ["the same curve shifted twice", () => parseMacroModelInput({ model: "ad-as", shifts: [{ curve: "AD", direction: "left" }, { curve: "ad", direction: "right" }] })],
   ])("%s", (_label, parse) => {

@@ -271,9 +271,16 @@ Props: `term` (string), `body` (string), `isPartial` (boolean, default `false`).
 
 ### Subject figures (FigurePlate family)
 
-Nine tools that draw a figure inline in an AI turn: one shared, five for ECON 201 (intro macroeconomics), three for bioinformatics. Like `DefinitionCard`, they are created only by the tool render registry from streamed tool arguments, never by hand in app code.
+These tools draw a figure inline in an AI turn. Like `DefinitionCard`, they are created only by the tool render registry from streamed tool arguments, never by hand in app code.
 
-| Tool | Component | Subject | What it draws |
+The **Pack** column says when the tutor can use each one:
+- **shared** tools are always available;
+- every other tool belongs to a subject pack, which the instructor turns on under **Subject figures** on the LLM config form;
+- a pack that isn't enabled is never offered to the model.
+
+[generative-ui.md](../architecture/generative-ui.md#subject-figures-and-instructor-chosen-packs) has the details.
+
+| Tool | Component | Pack | What it draws |
 |---|---|---|---|
 | `showWorkedSteps` | `WorkedSteps` | shared | Numbered calculation or derivation steps, with a final result |
 | `showMacroModel` | `MacroModelDiagram` | ECON | AD-AS, loanable-funds or money-market curve shifts, with E₁ → E₂ |
@@ -281,11 +288,15 @@ Nine tools that draw a figure inline in an AI turn: one shared, five for ECON 20
 | `showMultiplier` | `MultiplierRounds` | ECON | The spending multiplier, round by round |
 | `showLaborForce` | `LaborForce` | ECON | Employed, unemployed and not in the labor force, with the three rates |
 | `showInflation` | `PriceIndex` | ECON | A price index over time and the inflation it implies |
-| `showAlignment` | `SequenceAlignment` | Bio | Pairwise alignment with a match line, identity and score |
-| `showTranslation` | `Translation` | Bio | DNA → mRNA → amino acid, codon by codon, standard genetic code |
-| `showPhyloTree` | `PhyloTree` | Bio | A phylogram from Newick, or a labelled cladogram when there are no branch lengths |
+| `showDiagnosticAccuracy` | `DiagnosticAccuracy` | Clinical informatics | A 2×2 table against a reference standard, with sensitivity, specificity, PPV and NPV |
+| `showPrevalenceEffect` | `PrevalenceEffect` | Clinical informatics | How PPV and NPV move with prevalence when sensitivity and specificity are fixed |
+| `showRocCurve` | `RocCurve` | Clinical informatics | An ROC curve from threshold points, with the trapezoidal AUC and the best Youden's J threshold marked |
+| `showPatientTimeline` | `PatientTimeline` | Clinical informatics | A patient's encounters, labs, medications and events on one dated axis |
+| `showCdsRule` | `CdsRule` | Clinical informatics | A decision-support rule's conditions, each one evaluated against a patient, and whether the rule fires |
+| `showDistribution` | `DistributionPlot` | Statistics | A normal, t, chi-square or binomial distribution, with a shaded region and its probability |
+| `knowledgeCheck` | `KnowledgeCheck` | shared | A multiple-choice check the student answers in place; the tutor judges the answer on its next turn (#36) |
 
-**Computed, never trusted.** The model supplies only arguments. Every number, direction and sentence a figure states is computed from those arguments in `packages/ui/src/generative/lib/` (econ geometry, rates, the genetic code, alignment scoring, Newick parsing), so the figure cannot contradict itself or the subject. Each tool has a deny-by-default parser in `toolInputs.ts`: input that is wrong in type or in meaning renders nothing. Examples are an MPC of 1, aligned sequences of unequal length, or a curve the model doesn't have.
+**Computed, never trusted.** The model supplies only arguments. Every number, direction and sentence a figure states is computed from those arguments in `packages/ui/src/generative/lib/` (econ geometry and rates; 2×2 test metrics, Bayes' rule, AUC and rule evaluation; distribution PDFs and CDFs), so the figure cannot contradict itself or the subject. A ratio with a zero denominator reads "undefined", with a note on why, never NaN. Each tool has a deny-by-default parser in `toolInputs.ts` or `toolInputs.clinical.ts`: input that is wrong in type or in meaning renders nothing. Examples are an MPC of 1, ROC points whose sensitivity falls as the false-positive rate rises, or a curve the model doesn't have. The knowledge check has no answer field at all, so nothing in the browser can reveal the answer early.
 
 **Plate.** Every figure sits in `FigurePlate`, styled like a textbook figure rather than a dashboard card:
 - a Geist Mono kicker with the same 4px Heritage Gold tick as an AI turn (the tutor produced it);
@@ -300,7 +311,7 @@ Nine tools that draw a figure inline in an AI turn: one shared, five for ECON 20
 
 **Marks.** Lines are 2px. Markers have r ≥ 4 with a 2px surface ring. Gridlines are 1px `--color-border`. A curve's old position is dashed and muted. Axis titles are horizontal, never rotated. Labels are selective: endpoints and the value the story is about.
 
-**Responsive.** SVG text is in viewBox units. A container query (`.gen-figure` is an inline-size container) enlarges it when the figure is narrower than about 460px, so labels stay about 11px on a phone. Sequence, codon and step layouts are HTML and reflow.
+**Responsive.** SVG text is in viewBox units. A container query (`.gen-figure` is an inline-size container) enlarges it when the figure is narrower than about 460px, so labels stay about 11px on a phone. Steps, the CDS rule's conditions and the knowledge check's options are HTML and reflow.
 
 **States.**
 - `input-streaming` before the input validates: a "Drawing the figure…" skeleton plate.
@@ -312,8 +323,9 @@ The whole plate dims to 55% while `isPartial`. Every tool part renders inside `T
 **Accessibility.**
 - Each `<figure>` carries an `aria-label` that states the computed outcome. For example: "AD shifts left. Price level falls and real GDP falls. Output is below potential: a recessionary gap."
 - Each SVG has `role="img"`, and native `<title>` tooltips sit on the marks.
-- State is never colour alone: mismatches show "." in the match line, and START and STOP are spelled out.
+- State is never colour alone: a CDS condition says "met" or "not met" in words, and a shaded region states its probability in text.
+- The knowledge check is a native radio group in a `fieldset`, so arrow keys work. Once answered, it locks and says which option was chosen.
 
-**CSS hooks:** `.gen-figure*`, `.gen-svg*`, `.gen-line--N`, `.gen-fill--N`, `.gen-swatch--N`, `.gen-steps*`, `.gen-align*`, `.gen-codon*` and `.gen-stat*` in `packages/ui/styles.css`.
+**CSS hooks:** `.gen-figure*`, `.gen-svg*`, `.gen-line--N`, `.gen-fill--N`, `.gen-swatch--N`, `.gen-steps*`, `.gen-stat*`, `.gen-area-shade`, `.gen-check*` and the clinical figures' hooks (under "Clinical informatics figures") in `packages/ui/styles.css`.
 
-**Visual review:** with the student app on :2311, run `npm run screenshots:generative-ui`. It renders an ECON 201 thread and a bioinformatics thread in the real student app (light and dark, 1440, 768 and 390px), saves each figure, and fails on page errors, missing figures or overflow.
+**Visual review:** with the student app on :2311, run `npm run screenshots:generative-ui`. It renders an ECON 201 thread, a clinical informatics thread and a statistics thread (with knowledge checks) in the real student app (light and dark, 1440, 768 and 390px), saves each figure, and fails on page errors, missing figures or overflow.
