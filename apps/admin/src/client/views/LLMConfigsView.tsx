@@ -8,7 +8,7 @@
    authority across both apps).
    -------------------------------------------------------------------------- */
 
-import { Plus, Sparkle, Thermometer } from "@phosphor-icons/react";
+import { BookOpenText, Buildings, Plus, Sparkle, Thermometer } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
 import { ListControls } from "@llteacher/ui";
 import { PageHeader } from "../components/PageHeader";
@@ -26,6 +26,13 @@ export type LLMConfigsViewProps = {
   onCloneConfig: (config: LlmConfigPayload) => void;
   /** #31: deactivate, never delete -- homeworks reference these rows. */
   onDeactivateConfig: (config: LlmConfigPayload) => void;
+  /** #367: may the caller change this configuration? The course's own
+   *  configurations always; shared ones only for an Org Admin. Rows the
+   *  caller cannot change offer View and Copy, never an action the server
+   *  would refuse. */
+  canChange: (config: LlmConfigPayload) => boolean;
+  /** #367: an Org Admin manages the organization's shared configurations. */
+  canManageOrgPool: boolean;
 };
 
 type Sort = "default" | "name" | "model";
@@ -42,6 +49,8 @@ export function LLMConfigsView({
   onCloneConfig,
   onDeactivateConfig,
   onNewConfig,
+  canChange,
+  canManageOrgPool,
 }: LLMConfigsViewProps) {
   const activeCount = configs.filter((c) => c.isActive).length;
   const defaultConfig = configs.find((c) => c.isDefault);
@@ -69,7 +78,11 @@ export function LLMConfigsView({
       <PageHeader
         eyebrow={`LLM CONFIGS · ${configs.length} RECORDS`}
         title="Tutor configurations"
-        subtitle="Model, prompt, and inference parameters that back the AI tutor across this course."
+        subtitle={
+          canManageOrgPool
+            ? "Model, prompt, and inference parameters that back the AI tutor across this course."
+            : "Model, prompt, and inference parameters that back the AI tutor across this course. Shared configurations are managed by your organization's admins; copy one to adapt it here."
+        }
         actions={
           <button
             type="button"
@@ -141,6 +154,22 @@ export function LLMConfigsView({
                 <StatusBadge kind={cfg.isActive ? "active" : "inactive"}>
                   {cfg.isActive ? "active" : "inactive"}
                 </StatusBadge>
+                {/* #367: who owns it -- the organization's shared pool, or
+                    this course. Same meta-chip as the model and temperature:
+                    an attribute of the record, read in the same scan. */}
+                <span className="admin-record-row__meta-chip">
+                  {cfg.scopeCourseId === null ? (
+                    <>
+                      <Buildings size={12} weight="regular" aria-hidden="true" />
+                      shared
+                    </>
+                  ) : (
+                    <>
+                      <BookOpenText size={12} weight="regular" aria-hidden="true" />
+                      this course
+                    </>
+                  )}
+                </span>
                 <span className="admin-record-row__meta-chip admin-record-row__meta-chip--mono">
                   <Sparkle size={12} weight="regular" aria-hidden="true" />
                   {cfg.modelName}
@@ -171,7 +200,7 @@ export function LLMConfigsView({
                 className="admin-button admin-button--ghost"
                 onClick={() => onOpenConfig(cfg.id)}
               >
-                Open
+                {canChange(cfg) ? "Open" : "View"}
               </button>
               {/* #195 (ACC-021) on both: the accessible name LEADS with the
                   visible word, so voice control still matches what is on
@@ -180,7 +209,7 @@ export function LLMConfigsView({
               <button
                 type="button"
                 className="admin-link-button"
-                aria-label={`Copy ${cfg.name}`}
+                aria-label={canManageOrgPool ? `Copy ${cfg.name}` : `Copy ${cfg.name} to this course`}
                 onClick={() => onCloneConfig(cfg)}
               >
                 Copy
@@ -189,7 +218,7 @@ export function LLMConfigsView({
                   disabled one: the server refuses it (it is what every
                   unpinned homework resolves to), and offering a control that
                   always fails is the defect #172 exists to remove. */}
-              {cfg.isActive && !cfg.isDefault && (
+              {cfg.isActive && !cfg.isDefault && canChange(cfg) && (
                 <button
                   type="button"
                   className="admin-link-button admin-link-button--danger"

@@ -1,7 +1,7 @@
 import type { Context, Next } from "hono";
 import { Effect } from "effect";
 import { courseMemberships, courseRoleEnum } from "../../db/schema";
-import { listMembershipsForUser, getUserActivationState } from "../repositories/users";
+import { listMembershipsForUser, listOrgAdminOrgIdsForUser, getUserActivationState } from "../repositories/users";
 import type { SessionPayload } from "../../lib/session";
 import type { AppEnv } from "../context";
 import {
@@ -62,6 +62,10 @@ export interface AuthContext {
    *  course_memberships row -- granting this does not make someone an
    *  instructor of any specific course, on its own. */
   isPlatformInstructor: boolean;
+  /** #367: organizations this user holds an Org Admin grant in
+   *  (organization_memberships). Not widened by isSuperAdmin -- read
+   *  isOrgAdminOf for the authority question. */
+  orgAdminOrgIds: readonly string[];
   hasRole(role: CourseRole): boolean;
   isMemberOf(courseId: string): boolean;
   /** Authoring authority: create/edit/delete/publish/hide course content. */
@@ -77,6 +81,11 @@ export interface AuthContext {
   /** #172: same shape as canViewSolutionsIn, for draft/scheduled/hidden
    *  homeworks -- content the instructor has not released to students. */
   canViewDraftsIn(courseId: string): boolean;
+  /** #367: org-level authority -- the shared LLM config pool and the org
+   *  default. Org-keyed, unlike every predicate above: being an instructor
+   *  of a course in the organization does NOT imply it. A super admin holds
+   *  it everywhere, matching the course predicates. */
+  isOrgAdminOf(organizationId: string): boolean;
 }
 
 /** Loads course_memberships once per request (not per guard) and attaches
@@ -107,9 +116,10 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
     query("listMembershipsForUser", (db) => listMembershipsForUser(db, session.userId)),
     query("getUserActivationState", (db) => getUserActivationState(db, session.userId)),
     Effect.promise(() => loadIdentityCipherKeys(c.env)),
+    query("listOrgAdminOrgIdsForUser", (db) => listOrgAdminOrgIdsForUser(db, session.userId)),
   ], { concurrency: "unbounded" }));
   if (!loaded.ok) return loaded.response;
-  const [memberships, activation, cipherKeys] = loaded.value;
+  const [memberships, activation, cipherKeys, orgAdminOrgIds] = loaded.value;
 
   // Deprovisioned (isActive=false), or this cookie predates the account's
   // current session_epoch (a WorkOS deprovisioning webhook bumped it since
@@ -173,6 +183,7 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
     memberships,
     isSuperAdmin,
     isPlatformInstructor,
+    orgAdminOrgIds,
     // Not course-scoped: "do I hold this role anywhere" is a genuine
     // any-membership question, so `.some()` is correct here. Deliberately
     // not widened by isSuperAdmin -- see the AuthContext doc comment.
@@ -187,6 +198,7 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
     isGraderOf: (courseId) => isSuperAdmin || roleIn(courseId, GRADER_ROLES),
     canViewSolutionsIn: (courseId) => isSuperAdmin || capability(courseId, "canViewSolutions"),
     canViewDraftsIn: (courseId) => isSuperAdmin || capability(courseId, "canViewDrafts"),
+    isOrgAdminOf: (organizationId) => isSuperAdmin || orgAdminOrgIds.includes(organizationId),
   };
 
   c.set("authContext", authContext);

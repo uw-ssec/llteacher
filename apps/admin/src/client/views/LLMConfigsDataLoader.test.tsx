@@ -25,6 +25,7 @@ const DEFAULT_CONFIG = {
   fallbackLlmConfigId: null,
   isDefault: true,
   isActive: true,
+  scopeCourseId: null as string | null,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
@@ -44,8 +45,10 @@ function stub(handler: (url: string, init: RequestInit) => Response) {
   return mock;
 }
 
-const listResponse = (configs: unknown[]) =>
-  new Response(JSON.stringify({ configs }), {
+/** #367: an Org Admin's list by default -- before #367 every instructor held
+ *  that authority, so the pre-#367 tests below keep asserting what they did. */
+const listResponse = (configs: unknown[], canManageOrgPool = true) =>
+  new Response(JSON.stringify({ configs, canManageOrgPool }), {
     status: 200,
     headers: { "content-type": "application/json" },
   });
@@ -228,3 +231,51 @@ describe("LLM config form (#31, #98)", () => {
     await waitFor(() => screen.getByText(/no longer exists/i));
   });
 });
+
+/* #367: a course instructor who is not an Org Admin sees the shared pool as
+   reference -- View and Copy, never an edit or Deactivate the server would
+   refuse -- and their own course's configurations as fully editable. */
+describe("shared vs course-owned configurations (#367)", () => {
+  const OWN = { ...SPARE, id: "cfg-3", recordNumber: 3, name: "Our course tutor", scopeCourseId: "c1" };
+
+  it("offers View and Copy-to-this-course on shared rows, and full actions on the course's own", async () => {
+    stub(() => listResponse([DEFAULT_CONFIG, SPARE, OWN], false));
+    renderLoader();
+    await waitFor(() => screen.getByRole("button", { name: /Copy Free tier to this course/i }));
+    expect(screen.queryByRole("button", { name: /Deactivate Free tier/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /Deactivate Our course tutor/i })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "View" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Open" })).toHaveLength(1);
+    expect(screen.getAllByText("shared")).toHaveLength(2);
+    expect(screen.getByText("this course")).toBeTruthy();
+  });
+
+  it("opens a shared configuration read-only: inert controls, no save, no default, testing still allowed", async () => {
+    stub(() => listResponse([DEFAULT_CONFIG, SPARE], false));
+    renderLoader({ kind: "edit", configId: "cfg-2" });
+    await waitFor(() => screen.getByRole("heading", { name: "Shared configuration" }));
+    expect(screen.getByLabelText("Name").matches(":disabled")).toBe(true);
+    expect(screen.queryByRole("button", { name: /Save changes/ })).toBeNull();
+    expect(screen.queryByText("Organization default")).toBeNull();
+    // The test panel lives outside the lock.
+    const testButtons = screen.getAllByRole("button").filter((b) => /test/i.test(b.textContent ?? ""));
+    expect(testButtons.length).toBeGreaterThan(0);
+  });
+
+  it("lets an Org Admin edit a shared configuration and move the organization default", async () => {
+    stub(() => listResponse([DEFAULT_CONFIG, SPARE], true));
+    renderLoader({ kind: "edit", configId: "cfg-2" });
+    await waitFor(() => screen.getByRole("heading", { name: "Edit configuration" }));
+    expect(screen.getByLabelText("Name").matches(":disabled")).toBe(false);
+    expect(screen.getByText("Organization default")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Save changes/ })).toBeTruthy();
+  });
+
+  it("does not offer the organization default on a course's own configuration", async () => {
+    stub(() => listResponse([DEFAULT_CONFIG, { ...SPARE, scopeCourseId: "c1" }], true));
+    renderLoader({ kind: "edit", configId: "cfg-2" });
+    await waitFor(() => screen.getByRole("heading", { name: "Edit configuration" }));
+    expect(screen.queryByText("Organization default")).toBeNull();
+  });
+});
+

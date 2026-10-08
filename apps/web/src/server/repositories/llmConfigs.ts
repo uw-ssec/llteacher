@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { homeworks, llmConfigs, sections } from "../../db/schema";
 import type { OrgScope } from "./scope";
@@ -38,8 +38,27 @@ export interface LlmConfigRecord {
   isDefault: boolean;
   isActive: boolean;
   knowledgeEnabled: boolean;
+  /** #367: null for the organization's shared pool (Org Admin-owned), or
+   *  the one course that owns this configuration. */
+  scopeCourseId: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** #367: whose configuration a write may touch. "organization" = the shared
+ *  pool (scope_course_id IS NULL); otherwise the owning course's id. */
+export type LlmConfigOwner = "organization" | { courseId: string };
+
+function ownerPredicate(owner: LlmConfigOwner): SQL {
+  return owner === "organization"
+    ? isNull(llmConfigs.scopeCourseId)
+    : eq(llmConfigs.scopeCourseId, owner.courseId);
+}
+
+/** #367: a course sees the shared pool plus its own configurations -- never
+ *  another course's. */
+function visibleToCoursePredicate(courseId: string): SQL {
+  return or(isNull(llmConfigs.scopeCourseId), eq(llmConfigs.scopeCourseId, courseId))!;
 }
 
 /** #33: the repository's shape IS the wire contract, checked rather than
@@ -83,6 +102,7 @@ const CONFIG_COLUMNS = {
   isDefault: llmConfigs.isDefault,
   isActive: llmConfigs.isActive,
   knowledgeEnabled: llmConfigs.knowledgeEnabled,
+  scopeCourseId: llmConfigs.scopeCourseId,
   createdAt: llmConfigs.createdAt,
   updatedAt: llmConfigs.updatedAt,
 };
@@ -99,28 +119,26 @@ function toRecord(r: {
   };
 }
 
-/** #31: the org's configs, newest first, with display ordinals.
+/** #31: the configs a course can see, newest first, with display ordinals.
  *
- *  Org-scoped, and that scope is wider than the caller's authorization: the
- *  routes gate on instructor-of-COURSE and then resolve that course's org.
- *  So an instructor of one course can read and edit configs that other
- *  courses in the same organization use, including the org default.
- *
- *  That is the schema's design (`llm_configs` is documented as a
- *  per-organization pool) and not an oversight, but it is a real widening
- *  and belongs stated: within one UW organization, course staff are trusted
- *  with the shared model pool. If that stops being true -- multiple
- *  unrelated departments in one org -- the fix is course-scoped configs, not
- *  a narrower query here. */
+ *  #367: the organization's shared pool plus this course's own configs --
+ *  never another course's. Numbered over the whole org first, then filtered,
+ *  so a config's `CFG·00N` badge does not change with who is looking. */
 export async function listLlmConfigsForOrg(
   db: Db,
   scope: OrgScope,
+  visibleToCourseId: string,
 ): Promise<LlmConfigRecord[]> {
-  const rows = await db
+  const numbered = db
     .select(CONFIG_COLUMNS)
     .from(llmConfigs)
     .where(eq(llmConfigs.organizationId, scope))
-    .orderBy(desc(llmConfigs.createdAt), desc(llmConfigs.id));
+    .as("numbered");
+  const rows = await db
+    .select()
+    .from(numbered)
+    .where(or(isNull(numbered.scopeCourseId), eq(numbered.scopeCourseId, visibleToCourseId)))
+    .orderBy(desc(numbered.createdAt), desc(numbered.id));
   return rows.map(toRecord);
 }
 
@@ -154,12 +172,22 @@ export async function getDefaultLlmConfig(db: Db, scope: OrgScope) {
 
 /** #161: `homeworks.llm_config_id`'s FK only requires the row to exist
  *  somewhere -- not that it belongs to the caller's tenant. Cheap existence
- *  check under the given org scope, called before writing the id through. */
-export async function llmConfigBelongsToOrg(db: Db, scope: OrgScope, id: string): Promise<boolean> {
+ *  check under the given org scope, called before writing the id through.
+ *
+ *  #367: and visible to the course doing the pinning -- the org pool or that
+ *  course's own config, never a config another course owns. */
+export async function llmConfigBelongsToOrg(
+  db: Db,
+  scope: OrgScope,
+  id: string,
+  visibleToCourseId: string,
+): Promise<boolean> {
   const [found] = await db
     .select({ id: llmConfigs.id })
     .from(llmConfigs)
-    .where(and(eq(llmConfigs.id, id), eq(llmConfigs.organizationId, scope)));
+    .where(
+      and(eq(llmConfigs.id, id), eq(llmConfigs.organizationId, scope), visibleToCoursePredicate(visibleToCourseId)),
+    );
   return !!found;
 }
 
@@ -221,11 +249,13 @@ export async function createLlmConfig(
   db: Db,
   scope: OrgScope,
   input: LlmConfigInput,
+  owner: LlmConfigOwner,
 ): Promise<LlmConfigRecord> {
   const [created] = await db
     .insert(llmConfigs)
     .values({
       organizationId: scope,
+      scopeCourseId: owner === "organization" ? null : owner.courseId,
       name: input.name,
       provider: input.provider,
       modelName: input.modelName,
@@ -256,6 +286,7 @@ export async function updateLlmConfig(
   scope: OrgScope,
   id: string,
   input: LlmConfigInput,
+  owner: LlmConfigOwner,
 ): Promise<LlmConfigRecord | null> {
   const [updated] = await db
     .update(llmConfigs)
@@ -271,7 +302,9 @@ export async function updateLlmConfig(
       isActive: input.isActive,
       updatedAt: new Date(),
     })
-    .where(and(eq(llmConfigs.id, id), eq(llmConfigs.organizationId, scope)))
+    // #367: the owner is part of the WHERE, not only checked by the route
+    // beforehand -- check-then-act on a different key is the gap #174 found.
+    .where(and(eq(llmConfigs.id, id), eq(llmConfigs.organizationId, scope), ownerPredicate(owner)))
     .returning({ id: llmConfigs.id });
   if (!updated) return null;
 
@@ -295,11 +328,12 @@ export async function deactivateLlmConfig(
   db: Db,
   scope: OrgScope,
   id: string,
+  owner: LlmConfigOwner,
 ): Promise<DeactivateOutcome> {
   const [row] = await db
     .select({ isDefault: llmConfigs.isDefault })
     .from(llmConfigs)
-    .where(and(eq(llmConfigs.id, id), eq(llmConfigs.organizationId, scope)));
+    .where(and(eq(llmConfigs.id, id), eq(llmConfigs.organizationId, scope), ownerPredicate(owner)));
   if (!row) return "not_found";
   if (row.isDefault) return "is_default";
 
@@ -312,6 +346,7 @@ export async function deactivateLlmConfig(
       and(
         eq(llmConfigs.id, id),
         eq(llmConfigs.organizationId, scope),
+        ownerPredicate(owner),
         eq(llmConfigs.isDefault, false),
       ),
     )
@@ -343,17 +378,25 @@ export async function cloneLlmConfig(
   scope: OrgScope,
   sourceId: string,
   name: string,
+  /** #367: the source must be visible to this course (pool or its own)... */
+  visibleToCourseId: string,
+  /** ...and the copy belongs to whoever is cloning: a course instructor's
+   *  copy is theirs, so cloning is how they adapt a shared config. */
+  owner: LlmConfigOwner,
 ): Promise<LlmConfigRecord | null> {
   const [source] = await db
     .select()
     .from(llmConfigs)
-    .where(and(eq(llmConfigs.id, sourceId), eq(llmConfigs.organizationId, scope)));
+    .where(
+      and(eq(llmConfigs.id, sourceId), eq(llmConfigs.organizationId, scope), visibleToCoursePredicate(visibleToCourseId)),
+    );
   if (!source) return null;
 
   const [created] = await db
     .insert(llmConfigs)
     .values({
       organizationId: scope,
+      scopeCourseId: owner === "organization" ? null : owner.courseId,
       name,
       provider: source.provider,
       modelName: source.modelName,

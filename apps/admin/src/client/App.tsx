@@ -225,7 +225,7 @@ export default function App() {
     (opts) =>
       CURRENT_COURSE_ID
         ? apiClient.llmConfigs.list(CURRENT_COURSE_ID, opts)
-        : Promise.resolve({ configs: [] }),
+        : Promise.resolve({ configs: [], canManageOrgPool: false }),
     [CURRENT_COURSE_ID],
   );
   const llmConfigs = llmConfigResource.data?.configs ?? [];

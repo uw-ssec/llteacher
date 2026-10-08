@@ -1,13 +1,13 @@
 /* --------------------------------------------------------------------------
    #73: instructor-managed Canvas API token.
 
-   Same authorization shape as llm-configs' own routes, and the same
-   TRACKED GAP those routes document (see llmConfigs.ts's own header):
-   gated on instructor-of-COURSE, operating on that course's ORGANIZATION
+   Gated on instructor-of-COURSE, operating on that course's ORGANIZATION
    credential -- an instructor of one course can set/replace/delete the
-   Canvas token every course in the same org's Canvas sync depends on.
-   Narrowing this needs the same Org Admin role #367 already tracks for
-   llm-configs; not solved here for the same reason it wasn't solved there.
+   Canvas token every course in the same org's Canvas sync depends on. This
+   is the widening llm-configs had before #367. The Org Admin role #367 added
+   (AuthContext.isOrgAdminOf) is what would narrow it, but M11 deliberately
+   made this an instructor-pasted token, so whether to require Org Admin here
+   is a product decision of its own, not part of #367.
 
    Every response from this file is checked, in its own tests, to never
    carry the plaintext token -- only a masked summary.

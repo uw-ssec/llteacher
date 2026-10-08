@@ -5972,6 +5972,28 @@ body {
   }
 }
 
+/* -- Lock: a whole-form disabled state (#367) ------------------------------
+   A bare fieldset whose only job is `disabled`: a shared LLM configuration
+   viewed by someone who may not change it. `display: contents` gives it no
+   box, so the form's own column and gaps are unchanged. Disabled controls
+   read as reference, not as a broken form: the raised surface instead of the
+   input field's paper, secondary text, and no pointer. */
+.admin-form-lock {
+  display: contents;
+}
+
+.admin-form-lock:disabled input,
+.admin-form-lock:disabled select,
+.admin-form-lock:disabled textarea {
+  background-color: var(--color-surface-raised);
+  color: var(--color-text-secondary);
+  cursor: not-allowed;
+}
+
+.admin-form-lock:disabled .admin-form-check {
+  cursor: not-allowed;
+}
+
 /* -- Group: a ruled fieldset, replacing the browser's default box --------- */
 
 .admin-form-group {

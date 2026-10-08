@@ -60,12 +60,20 @@ export interface LlmConfigPayload {
   isActive: boolean;
   /** Whether a tutor on this config may search the course knowledge base. */
   knowledgeEnabled: boolean;
+  /** #367: null for the organization's shared pool (changed only by an Org
+   *  Admin), or the one course that owns this configuration. */
+  scopeCourseId: string | null;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
 }
 
 export interface LlmConfigListPayload {
   configs: LlmConfigPayload[];
+  /** #367: whether the caller may create, edit, deactivate, or set the
+   *  default among the organization's SHARED configurations. A course's own
+   *  configurations (`scopeCourseId === courseId`) are editable by its
+   *  instructors regardless. */
+  canManageOrgPool: boolean;
 }
 
 export interface LlmConfigWriteBody {
@@ -79,6 +87,11 @@ export interface LlmConfigWriteBody {
   isActive: boolean;
   isDefault: boolean;
   knowledgeEnabled: boolean;
+  /** #367: create/clone only -- where the new configuration lives. Omitted:
+   *  the shared pool for an Org Admin, this course for anyone else. A course
+   *  instructor asking for "organization" is refused. Ignored on update; a
+   *  configuration's owner never changes. */
+  scope?: "course" | "organization";
 }
 
 /** The test button's result. 200 either way: a model that refuses is a

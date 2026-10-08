@@ -144,6 +144,8 @@ vi.mock("../db/client", () => ({
   makeDb: () => ({
     query: {
       courseMemberships: { findMany: (...args: unknown[]) => findMany(...args) },
+      // #367: rolesMiddleware also loads Org Admin grants; none by default.
+      organizationMemberships: { findMany: async () => [] },
       users: { findFirst: (...args: unknown[]) => findFirst(...args) },
     },
   }),

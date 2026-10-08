@@ -50,6 +50,7 @@ export function fakeMembership(
 export function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
   const memberships = overrides.memberships ?? [];
   const isSuperAdmin = overrides.isSuperAdmin ?? false;
+  const orgAdminOrgIds = overrides.orgAdminOrgIds ?? [];
 
   // Mirrors rolesMiddleware's structure exactly: resolve the course's
   // membership once, then ask questions about that single row, using the
@@ -74,6 +75,7 @@ export function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthConte
     // grant is narrow by design (see AuthContext's own doc comment), so the
     // fake has nothing to derive it from and just echoes the override.
     isPlatformInstructor: overrides.isPlatformInstructor ?? false,
+    orgAdminOrgIds,
     // Not course-scoped, and deliberately not widened by isSuperAdmin --
     // matches rolesMiddleware exactly (see AuthContext's own doc comment).
     hasRole: (role) => memberships.some((m) => m.role === role),
@@ -86,6 +88,7 @@ export function fakeAuthContext(overrides: Partial<AuthContext> = {}): AuthConte
     isGraderOf: (courseId) => isSuperAdmin || roleIn(courseId, GRADER_ROLES),
     canViewSolutionsIn: (courseId) => isSuperAdmin || capability(courseId, "canViewSolutions"),
     canViewDraftsIn: (courseId) => isSuperAdmin || capability(courseId, "canViewDrafts"),
+    isOrgAdminOf: (organizationId) => isSuperAdmin || orgAdminOrgIds.includes(organizationId),
     ...overrides,
   };
 }

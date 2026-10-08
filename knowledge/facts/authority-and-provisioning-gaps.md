@@ -3,10 +3,10 @@ type: Fact
 title: "Authorization model and known gaps: course-scoped roles, super admins, no course creation"
 description: "All authority is course-scoped (course_memberships roles; TA is a grader with per-course grants); org-level config is editable by any course instructor (#367); there is no course-creation path (#464, M13)."
 tags: [authz, roles, multi-tenancy, admin]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T22:25:31Z" }
+generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-08T20:08:07Z" }
 status: stable
 governance: constraint
-code_refs: ["apps/web/src/server/middleware/roles.ts", "apps/web/src/lib/services/SuperAdminService.ts", "apps/web/src/db/schema/identity.ts", "packages/ui"]
+code_refs: [apps/web/src/server/middleware/roles.ts, apps/web/src/lib/services/SuperAdminService.ts, apps/web/src/db/schema/identity.ts, packages/ui]
 sources:
   - resource: "PR #110"
   - resource: "PR #209"
@@ -40,3 +40,6 @@ sources:
 - #183: whether TA grants survive deprovisioning.
 - #237: TA section conversations are recorded as student work.
 - #377: transcript paging counts rows a draft-restricted TA cannot see.
+
+# Related Concepts
+- [Org Admin owns the shared LLM config pool; course instructors own course-scoped configs](../decisions/org-admin-role-and-course-scoped-configs.md): #367 closed the org-level LLM config gap with an Org Admin role

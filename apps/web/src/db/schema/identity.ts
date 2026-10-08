@@ -51,6 +51,12 @@ export const courseRoleEnum = pgEnum("course_role", [
 
 export const lmsProviderEnum = pgEnum("lms_provider", ["canvas"]);
 
+/** #367: organization-level roles. Only `admin` exists: an Org Admin owns
+ *  org-level configuration (the shared LLM config pool and the org default).
+ *  A separate enum, not a course_role value, because the authority is keyed
+ *  to an organization, not to any one course. */
+export const organizationRoleEnum = pgEnum("organization_role", ["admin"]);
+
 export const credentialProviderEnum = pgEnum("credential_provider", [
   "openai",
   "anthropic",
@@ -282,6 +288,34 @@ export const courses = pgTable(
 // ---------- CourseMembership ----------
 // User <-> Course with a role. Replaces Django's Teacher/Student profiles.
 // Projection of a Canvas enrollment when canvas_enrollment_id is present.
+
+/** #367: user x organization x role. The honest model for an org-level
+ *  authority -- course_memberships.role = 'admin' would put an org-wide grant
+ *  on a row keyed to a single course. Granted by a super admin or an existing
+ *  Org Admin of the same organization (routes/organizationAdmins.ts); never
+ *  backfilled from course roles, because promoting every instructor would
+ *  preserve exactly the widening this role exists to remove. */
+export const organizationMemberships = pgTable(
+  "organization_memberships",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    role: organizationRoleEnum("role").notNull(),
+    grantedByUserId: uuid("granted_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("organization_memberships_user_org_uq").on(t.userId, t.organizationId),
+    index("organization_memberships_org_idx").on(t.organizationId),
+  ],
+);
 
 export const courseMemberships = pgTable(
   "course_memberships",
