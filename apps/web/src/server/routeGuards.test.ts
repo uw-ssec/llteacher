@@ -72,6 +72,7 @@ const handlers = {
   grantPlatformInstructor: ok("grantPlatformInstructor"),
   listPlatformInstructors: ok("listPlatformInstructors"),
   listPlatformCourses: ok("listPlatformCourses"),
+  addCourseInstructor: ok("addCourseInstructor"),
   listLlmConfigs: ok("listLlmConfigs"),
   createLlmConfig: ok("createLlmConfig"),
   getLlmConfig: ok("getLlmConfig"),
@@ -141,6 +142,7 @@ vi.mock("./routes/platformInstructors", () => ({
   listPlatformInstructorsHandler: (c: Context) => handlers.listPlatformInstructors(c),
 }));
 vi.mock("./routes/courseProvisioning", () => ({
+  addCourseInstructorHandler: (c: Context) => handlers.addCourseInstructor(c),
   provisionCourseHandler: (c: Context) => c.json({}, 200),
   listPlatformCoursesHandler: (c: Context) => handlers.listPlatformCourses(c),
 }));
@@ -260,6 +262,8 @@ const ROUTES: { method: string; path: string; handler: HandlerName; admits: Pers
   { method: "GET", path: "/api/platform/instructors", handler: "listPlatformInstructors",
     admits: [] },
   { method: "GET", path: "/api/platform/courses", handler: "listPlatformCourses",
+    admits: [] },
+  { method: "POST", path: "/api/platform/courses/course-a/instructors", handler: "addCourseInstructor",
     admits: [] },
 
   // #31/#170: repointing the organization at a different model, or changing
