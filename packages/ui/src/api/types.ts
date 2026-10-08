@@ -28,6 +28,25 @@
  *  was a Date or a string. */
 export type IsoDateTime = string;
 
+/* -- Deployment institution and course setup ------------------------------ */
+
+export interface OrganizationPayload {
+  id: string;
+  name: string;
+  slug: string;
+  allowedDomains: string[];
+}
+
+export interface OrganizationResponse {
+  organization: OrganizationPayload | null;
+}
+
+export interface CreateOrganizationBody {
+  name: string;
+  slug: string;
+  allowedDomains: string[];
+}
+
 /* -- LLM configuration (#31, #98, #170) ------------------------------------ */
 
 export type LlmProvider =

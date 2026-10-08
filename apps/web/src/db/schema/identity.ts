@@ -118,9 +118,11 @@ export const organizations = pgTable(
   "organizations",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    /** Database-enforced single institution per deployed LLTeacher stack. */
+    deploymentSingleton: boolean("deployment_singleton").notNull().default(true),
     slug: text("slug").notNull(),
     name: text("name").notNull(),
-    workosOrganizationId: text("workos_organization_id").notNull(),
+    workosOrganizationId: text("workos_organization_id"),
     canvasAccountId: text("canvas_account_id"),
     /** The organisation's own default "when to search the knowledge base"
      *  guidance, used by any course without its own. Null means the
@@ -142,7 +144,11 @@ export const organizations = pgTable(
   },
   (t) => [
     uniqueIndex("organizations_slug_uq").on(t.slug),
-    uniqueIndex("organizations_workos_org_uq").on(t.workosOrganizationId),
+    uniqueIndex("organizations_singleton_uq").on(t.deploymentSingleton),
+    check("organizations_singleton_true", sql`${t.deploymentSingleton} = true`),
+    uniqueIndex("organizations_workos_org_uq")
+      .on(t.workosOrganizationId)
+      .where(sql`${t.workosOrganizationId} IS NOT NULL`),
   ],
 );
 
@@ -282,6 +288,11 @@ export const courses = pgTable(
     uniqueIndex("courses_org_canvas_course_uq")
       .on(t.organizationId, t.canvasCourseId)
       .where(sql`${t.canvasCourseId} IS NOT NULL`),
+    uniqueIndex("courses_org_code_term_uq").on(
+      t.organizationId,
+      sql`lower(${t.code})`,
+      sql`lower(${t.term})`,
+    ),
   ],
 );
 

@@ -46,6 +46,7 @@ import {
   updateTaCapabilitiesHandler,
 } from "./routes/courseMemberships";
 import { grantPlatformInstructorHandler } from "./routes/platformInstructors";
+import { createOrganizationHandler, getOrganizationHandler } from "./routes/organizations";
 import {
   cloneLlmConfigHandler,
   createLlmConfigHandler,
@@ -337,6 +338,8 @@ app.post("/api/courses/:courseId/members", requireSuperAdmin()(addCourseMemberHa
 // #316: courseless -- deliberately outside /api/courses, since it grants
 // instructor status before any course exists for the person.
 app.post("/api/platform/instructors", requireSuperAdmin()(grantPlatformInstructorHandler));
+app.get("/api/platform/organization", requireSuperAdmin()(getOrganizationHandler));
+app.post("/api/platform/organization", requireSuperAdmin()(createOrganizationHandler));
 
 // #31/#170/#367: LLM configuration authoring. Instructor-gated on the
 // COURSE; inside the handlers (routes/llmConfigs.ts), the organization's

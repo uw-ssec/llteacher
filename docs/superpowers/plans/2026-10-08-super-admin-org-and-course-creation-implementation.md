@@ -76,7 +76,7 @@ git commit -m "feat(auth): retain organization context in app sessions"
 **Files:**
 
 - Modify: `apps/web/src/db/schema/identity.ts`
-- Create: `apps/web/src/db/migrations/0056_super_admin_org_and_course_creation.sql`
+- Create: `apps/web/src/db/migrations/0056_third_prism.sql`
 - Modify: `apps/web/src/db/migrations/meta/_journal.json`
 - Create: `apps/web/src/server/repositories/organizations.ts`
 - Create: `apps/web/src/server/repositories/organizations.test.ts`
@@ -86,25 +86,25 @@ git commit -m "feat(auth): retain organization context in app sessions"
 - Modify: `apps/web/src/server/index.ts`
 - Modify: `packages/ui/src/api.ts`
 
-- [ ] **Step 1: Write failing repository and route tests**
+- [x] **Step 1: Write failing repository and route tests**
 
 Cover `GET /api/platform/organization` returning `organization: null`, `POST` validation for name/slug/domains, super-admin enforcement, a successful create, idempotent conflict behavior, and ordinary instructors receiving 403. In the real-DB test, race two creates and prove exactly one organization exists.
 
-- [ ] **Step 2: Run the focused tests and observe the missing implementation failure**
+- [x] **Step 2: Run the focused tests and observe the missing implementation failure**
 
 Run: `npm --workspace apps/web test -- --run src/server/repositories/organizations.test.ts src/server/routes/organizations.test.ts`
 
-- [ ] **Step 3: Change the schema and generate the migration**
+- [x] **Step 3: Change the schema and generate the migration**
 
 Make `organizations.workosOrganizationId` nullable, add a database-enforced singleton deployment key/check, retain the existing unique WorkOS id when present, and add normalized uniqueness for a course shell within the institution (`organizationId`, normalized code, normalized term). Use Drizzle's migration generator, then inspect and edit the generated SQL only as needed for safe backfill and partial indexes.
 
 Run: `npm --workspace apps/web run db:generate`
 
-- [ ] **Step 4: Implement the repository and routes**
+- [x] **Step 4: Implement the repository and routes**
 
 Implement list/create with strict trimming and domain normalization. Use the authenticated WorkOS organization id only as optional provenance. Convert the singleton unique violation into HTTP 409; do not call WorkOS. Return shared response types from `@llteacher/ui/api`.
 
-- [ ] **Step 5: Run unit and real-DB tests**
+- [x] **Step 5: Run unit and real-DB tests**
 
 Run: `npm --workspace apps/web test -- --run src/server/repositories/organizations.test.ts src/server/routes/organizations.test.ts`
 
@@ -112,7 +112,7 @@ Run with the repository's isolated PostgreSQL test URL: `npm --workspace apps/we
 
 Expected: PASS, including concurrent-create coverage.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add apps/web/src/db/schema/identity.ts apps/web/src/db/migrations apps/web/src/server/repositories/organizations.ts apps/web/src/server/repositories/organizations.test.ts apps/web/src/server/repositories/organizations.db.test.ts apps/web/src/server/routes/organizations.ts apps/web/src/server/routes/organizations.test.ts apps/web/src/server/index.ts packages/ui/src/api.ts
