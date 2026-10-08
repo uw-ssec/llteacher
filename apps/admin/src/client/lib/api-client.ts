@@ -41,6 +41,7 @@ import type {
   GradeDraftPayload,
   GradeListPayload,
   GrantPlatformInstructorResultPayload,
+  PlatformInstructorListResponse,
   KnowledgeDocumentListPayload,
   KnowledgeDocumentPayload,
   LlmConfigListPayload,
@@ -55,6 +56,7 @@ import type {
   CreateOrganizationBody,
   ProvisionCourseBody,
   ProvisionCourseResponse,
+  PlatformCourseListResponse,
 } from "@llteacher/ui/api";
 
 /** How a request failed, in the terms a view actually branches on.
@@ -236,6 +238,8 @@ export const apiClient = {
   },
 
   platformCourses: {
+    list: (opts: RequestOptions) =>
+      request<PlatformCourseListResponse>("/api/platform/courses", { method: "GET" }, opts),
     create: (body: ProvisionCourseBody, opts: RequestOptions) =>
       request<ProvisionCourseResponse>(
         "/api/platform/courses",
@@ -559,6 +563,8 @@ export const apiClient = {
   // #316: courseless -- not nested under a courseId, unlike every group
   // above. Grants platform-wide instructor recognition by email.
   platformInstructors: {
+    list: (opts: RequestOptions) =>
+      request<PlatformInstructorListResponse>("/api/platform/instructors", { method: "GET" }, opts),
     grant: (email: string, opts: RequestOptions) =>
       request<GrantPlatformInstructorResultPayload>(
         "/api/platform/instructors",

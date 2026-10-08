@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { grantPlatformInstructorHandler } from "./platformInstructors";
+import { grantPlatformInstructorHandler, listPlatformInstructorsHandler } from "./platformInstructors";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext } from "../testing/authContext";
@@ -9,8 +9,12 @@ import { SERVICE_UNAVAILABLE_MESSAGE } from "../utils/errors";
 const TEST_ENV = { DATABASE_URL: "ignored", BOOTSTRAP_ALLOWED_DOMAINS: "example.edu" } as Env;
 
 const grantPlatformInstructorMock = vi.fn();
+const listPlatformInstructorsMock = vi.fn();
 vi.mock("../repositories/users", () => ({
   grantPlatformInstructor: (...a: unknown[]) => grantPlatformInstructorMock(...a),
+}));
+vi.mock("../repositories/platformListings", () => ({
+  listPlatformInstructors: (...a: unknown[]) => listPlatformInstructorsMock(...a),
 }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 vi.mock("../../lib/secrets-loader", () => ({ loadIdentityCipherKeys: async () => ({}) }));
@@ -23,7 +27,12 @@ function buildApp(authContext: AuthContext | undefined) {
     await next();
   });
   app.post("/api/platform/instructors", (c) => grantPlatformInstructorHandler(c));
+  app.get("/api/platform/instructors", (c) => listPlatformInstructorsHandler(c));
   return app;
+}
+
+function get(authContext: AuthContext | undefined) {
+  return buildApp(authContext).request("/api/platform/instructors", {}, TEST_ENV);
 }
 
 const superAdmin = () => fakeAuthContext({ isSuperAdmin: true });
@@ -43,6 +52,7 @@ beforeEach(() => {
     userId: "u-new",
     grantedAt: new Date("2026-01-01T00:00:00Z"),
   });
+  listPlatformInstructorsMock.mockReset().mockResolvedValue([]);
 });
 
 describe("POST /api/platform/instructors (#316)", () => {
@@ -130,5 +140,18 @@ describe("POST /api/platform/instructors failure paths (Effect migration)", () =
     const res = await post(superAdmin(), { email: "new@uw.edu" });
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: SERVICE_UNAVAILABLE_MESSAGE });
+  });
+});
+
+describe("GET /api/platform/instructors", () => {
+  it("returns every platform-approved instructor to a super admin", async () => {
+    listPlatformInstructorsMock.mockResolvedValueOnce([{ userId: "u1", email: "ada@uw.edu", status: "signed_in", grantedAt: "2026-01-01T00:00:00.000Z", assignedCourseCount: 2 }]);
+    const response = await get(superAdmin());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ instructors: [{ userId: "u1", email: "ada@uw.edu", status: "signed_in", grantedAt: "2026-01-01T00:00:00.000Z", assignedCourseCount: 2 }] });
+  });
+
+  it("denies instructor listing to a non-super-admin", async () => {
+    expect((await get(instructor())).status).toBe(403);
   });
 });

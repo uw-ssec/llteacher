@@ -2,11 +2,23 @@ import { Effect } from "effect";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { grantPlatformInstructor } from "../repositories/users";
+import { listPlatformInstructors } from "../repositories/platformListings";
 import type { AuthContext } from "../middleware/roles";
 import type { GrantPlatformInstructorBody, GrantPlatformInstructorResponse } from "../../shared/types";
 import { BadRequest, Forbidden } from "../effect/errors";
 import { effectHandler } from "../effect/http";
 import { query } from "../effect/services";
+import type { PlatformInstructorListResponse } from "@llteacher/ui/api";
+
+export const listPlatformInstructorsHandler = effectHandler((c) => Effect.gen(function* () {
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  if (!authContext?.isSuperAdmin) {
+    return yield* new Forbidden({ message: "Super admin access required" });
+  }
+  const cipher = new IdentityCipher(yield* Effect.promise(() => loadIdentityCipherKeys(c.env)));
+  const instructors = yield* query("listPlatformInstructors", (db) => listPlatformInstructors(db, cipher));
+  return c.json({ instructors } satisfies PlatformInstructorListResponse);
+}));
 
 /** #316: grants courseless, platform-wide "recognized as an instructor"
  *  status by email. Not course-scoped -- no courseId anywhere in this

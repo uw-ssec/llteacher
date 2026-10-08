@@ -1,13 +1,22 @@
 import type { Context } from "hono";
-import type { ProvisionCourseBody, ProvisionCourseResponse } from "@llteacher/ui/api";
+import type { PlatformCourseListResponse, ProvisionCourseBody, ProvisionCourseResponse } from "@llteacher/ui/api";
 import { makeDb } from "../../db/client";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import type { AppEnv } from "../context";
 import type { AuthContext } from "../middleware/roles";
 import { provisionInstructorCourse } from "../repositories/courseProvisioning";
+import { listPlatformCourses } from "../repositories/platformListings";
 import { unsafeOrgScope } from "../repositories/scope";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
+
+export async function listPlatformCoursesHandler(c: Context<AppEnv>) {
+  const auth = c.get("authContext") as AuthContext | undefined;
+  if (!auth?.isSuperAdmin) return c.json({ error: "Super admin access required" }, 403);
+  const db = makeDb(c.env.DATABASE_URL);
+  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
+  return c.json({ courses: await listPlatformCourses(db, cipher) } satisfies PlatformCourseListResponse);
+}
 
 export async function provisionCourseHandler(c: Context<AppEnv>) {
   const auth = c.get("authContext") as AuthContext | undefined;

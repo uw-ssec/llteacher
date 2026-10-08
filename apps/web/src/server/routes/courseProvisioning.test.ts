@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { fakeAuthContext } from "../testing/authContext";
-import { provisionCourseHandler } from "./courseProvisioning";
+import { listPlatformCoursesHandler, provisionCourseHandler } from "./courseProvisioning";
 
 const provisionMock = vi.fn();
 const auditBestEffortMock = vi.fn();
+const listPlatformCoursesMock = vi.fn();
 vi.mock("../repositories/courseProvisioning", () => ({ provisionInstructorCourse: (...a: unknown[]) => provisionMock(...a) }));
+vi.mock("../repositories/platformListings", () => ({ listPlatformCourses: (...a: unknown[]) => listPlatformCoursesMock(...a) }));
 vi.mock("../utils/audit", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../utils/audit")>();
   return { ...actual, auditBestEffort: (...a: unknown[]) => auditBestEffortMock(...a) };
@@ -23,6 +25,30 @@ function post(superAdmin: boolean, body: unknown) {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   }, { DATABASE_URL: "ignored" } as Env);
 }
+
+function get(superAdmin: boolean) {
+  const app = new Hono<AppEnv>();
+  app.use("*", async (c, next) => { c.set("authContext", fakeAuthContext({ isSuperAdmin: superAdmin })); await next(); });
+  app.get("/api/platform/courses", listPlatformCoursesHandler);
+  return app.request("/api/platform/courses", {}, { DATABASE_URL: "ignored" } as Env);
+}
+
+beforeEach(() => {
+  listPlatformCoursesMock.mockReset().mockResolvedValue([]);
+});
+
+describe("GET /api/platform/courses", () => {
+  it("returns every deployment course to a super admin", async () => {
+    listPlatformCoursesMock.mockResolvedValueOnce([{ id: "course-1", title: "Statistics", code: "STAT 311", term: "Autumn 2026", status: "active", instructors: [] }]);
+    const response = await get(true);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ courses: [{ id: "course-1", title: "Statistics", code: "STAT 311", term: "Autumn 2026", status: "active", instructors: [] }] });
+  });
+
+  it("denies course listing to a non-super-admin", async () => {
+    expect((await get(false)).status).toBe(403);
+  });
+});
 
 describe("POST /api/platform/courses", () => {
   beforeEach(() => {

@@ -2,12 +2,22 @@ import { describe, it, vi, afterEach, expect } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import { AddInstructorView } from "./AddInstructorView";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
-function stubFetch(handler: (url: string, init?: RequestInit) => Response) {
-  const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) =>
-    handler(String(input), init),
-  );
+function stubFetch(
+  handler: (url: string, init?: RequestInit) => Response,
+  instructors: unknown[] = [],
+) {
+  const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/api/platform/instructors" && (!init?.method || init.method === "GET")) {
+      return new Response(JSON.stringify({ instructors }), { status: 200 });
+    }
+    return handler(url, init);
+  });
   vi.stubGlobal("fetch", mock);
   return mock;
 }
@@ -17,6 +27,22 @@ function fillEmail(value: string) {
 }
 
 describe("AddInstructorView (#316)", () => {
+  it("lists every platform-approved instructor with sign-in state and assigned-course count", async () => {
+    stubFetch(() => { throw new Error("unexpected mutation"); }, [
+      { userId: "u-signed-in", email: "ada@uw.edu", status: "signed_in", grantedAt: "2026-01-02T00:00:00Z", assignedCourseCount: 2 },
+      { userId: "u-pending", email: "grace@uw.edu", status: "pending", grantedAt: "2026-01-03T00:00:00Z", assignedCourseCount: 0 },
+    ]);
+
+    render(<AddInstructorView />);
+
+    expect(await screen.findByRole("heading", { name: "All instructors" })).toBeTruthy();
+    expect(screen.getByRole("rowheader", { name: "ada@uw.edu" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "Signed in" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "2" })).toBeTruthy();
+    expect(screen.getByRole("rowheader", { name: "grace@uw.edu" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "Pending" })).toBeTruthy();
+  });
+
   it("submits the entered email and shows a success confirmation", async () => {
     const fetchMock = stubFetch((url) => {
       expect(url).toBe("/api/platform/instructors");
@@ -31,12 +57,14 @@ describe("AddInstructorView (#316)", () => {
     fireEvent.click(screen.getByRole("button", { name: /grant instructor access/i }));
 
     await waitFor(() => screen.getByText(/They'll have instructor access/i));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [, init] = fetchMock.mock.calls[0]!;
+    const mutationCalls = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === "POST");
+    expect(mutationCalls).toHaveLength(1);
+    const [, init] = mutationCalls[0]!;
     expect((init as RequestInit).method).toBe("POST");
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({
       email: "new-instructor@uw.edu",
     });
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => !init?.method || init.method === "GET")).toHaveLength(2));
   });
 
   it("clears the field after a successful grant, so the form is ready for the next email", async () => {
@@ -121,6 +149,6 @@ describe("AddInstructorView (#316)", () => {
 
     fillEmail("   ");
     expect(button.disabled).toBe(true);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(false);
   });
 });

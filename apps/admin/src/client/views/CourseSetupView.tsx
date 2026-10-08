@@ -2,8 +2,11 @@ import { useState } from "react";
 import { PageHeader } from "../components/PageHeader";
 import { ApiError, apiClient } from "../lib/api-client";
 import type { ProvisionCourseResponse } from "@llteacher/ui/api";
+import { useApiResource } from "../lib/useApiResource";
+import { ViewEmpty, ViewError, ViewLoading } from "../components/ViewState";
 
 export function CourseSetupView() {
+  const coursesResource = useApiResource((opts) => apiClient.platformCourses.list(opts), []);
   const [form, setForm] = useState({ instructorEmail: "", title: "", code: "", term: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -14,6 +17,7 @@ export function CourseSetupView() {
     try {
       setCreated(await apiClient.platformCourses.create(form, { signal: null }));
       setForm({ instructorEmail: "", title: "", code: "", term: "" });
+      coursesResource.reload();
     } catch (cause) { setError(cause instanceof ApiError ? cause.message : "Could not create the course."); }
     finally { setBusy(false); }
   }
@@ -29,5 +33,22 @@ export function CourseSetupView() {
       {error && <div className="admin-alert" role="alert">{error}</div>}
       {created && <p className="admin-form-hint" role="status">Created {created.course.code}: {created.course.title}. {created.instructor.email} can sign in and run the course.</p>}
     </form>
+    <section aria-labelledby="all-courses-heading">
+      <h2 id="all-courses-heading">All courses</h2>
+      {coursesResource.loading && !coursesResource.data ? <ViewLoading label="Loading courses…" /> : null}
+      {coursesResource.error ? <ViewError error={coursesResource.error} onRetry={coursesResource.reload} detail="GET /api/platform/courses" /> : null}
+      {coursesResource.data?.courses.length === 0 ? <ViewEmpty title="No courses yet" body="Create the first course shell above." /> : null}
+      {coursesResource.data?.courses.length ? <table className="admin-table">
+        <caption className="admin-visually-hidden">All LLTeacher course shells</caption>
+        <thead><tr><th scope="col">Course</th><th scope="col">Code</th><th scope="col">Term</th><th scope="col">Status</th><th scope="col">Instructors</th></tr></thead>
+        <tbody>{coursesResource.data.courses.map((course) => <tr key={course.id}>
+          <th scope="row">{course.title}</th>
+          <td>{course.code}</td>
+          <td>{course.term}</td>
+          <td>{course.status === "active" ? "Active" : "Inactive"}</td>
+          <td>{course.instructors.length ? course.instructors.map((instructor) => <div key={instructor.userId}>{instructor.email}</div>) : "—"}</td>
+        </tr>)}</tbody>
+      </table> : null}
+    </section>
   </div>;
 }

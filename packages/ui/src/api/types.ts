@@ -66,6 +66,15 @@ export interface ProvisionCourseResponse {
   instructor: { userId: string; email: string };
 }
 
+export interface PlatformCourseListItem extends ProvisionedCoursePayload {
+  status: "active" | "inactive";
+  instructors: Array<{ userId: string; email: string }>;
+}
+
+export interface PlatformCourseListResponse {
+  courses: PlatformCourseListItem[];
+}
+
 /* -- LLM configuration (#31, #98, #170) ------------------------------------ */
 
 export type LlmProvider =
@@ -185,6 +194,18 @@ export interface GrantPlatformInstructorResultPayload {
   userId?: string;
   grantedAt?: IsoDateTime;
   message?: string;
+}
+
+export interface PlatformInstructorListItem {
+  userId: string;
+  email: string;
+  status: "pending" | "signed_in";
+  grantedAt: IsoDateTime;
+  assignedCourseCount: number;
+}
+
+export interface PlatformInstructorListResponse {
+  instructors: PlatformInstructorListItem[];
 }
 
 /* -- Roster (#32, #86) ----------------------------------------------------- */
