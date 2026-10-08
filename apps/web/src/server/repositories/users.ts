@@ -1,6 +1,6 @@
 import { and, eq, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { courseMemberships, courses, organizationMemberships, users } from "../../db/schema";
+import { courseMemberships, courses, organizationMemberships, organizations, users } from "../../db/schema";
 import { unsafeOrgScope, type OrgScope } from "./scope";
 import type { BlindIndex } from "../../db/types/encrypted";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
@@ -118,10 +118,8 @@ export async function getUserActivationState(
  *  uses, so a never-logged-in person can be granted this exactly like they
  *  can be added to a course.
  *
- *  Domain-validated against the platform default (no org to pull a custom
- *  allowlist from -- this grant precedes any course/org membership) so a
- *  typo'd address fails loudly instead of silently creating an unreachable
- *  pending account.
+ *  Domain-validated against the deployment's singleton organization, or the
+ *  configured bootstrap domains before that organization exists.
  *
  *  Idempotent: granting an already-granted user updates grantedBy/grantedAt
  *  to this call rather than erroring, so re-running it is never a mistake. */
@@ -129,16 +127,30 @@ export type GrantPlatformInstructorResult =
   | { status: "granted"; userId: string; grantedAt: Date }
   | { status: "invalid_email" | "disallowed_domain"; message: string };
 
+export async function allowedDomainsForPlatformInstructor(
+  db: Db,
+  bootstrapDomains?: string,
+): Promise<string[]> {
+  const organization = await db.query.organizations.findFirst({
+    where: eq(organizations.deploymentSingleton, true),
+    columns: { allowedDomains: true },
+  });
+  return organization?.allowedDomains
+    ?? DomainAllowlistService.bootstrapAllowedDomains(bootstrapDomains);
+}
+
 export async function grantPlatformInstructor(
   db: Db,
   cipher: IdentityCipher,
   granterUserId: string,
   rawEmail: string,
+  bootstrapDomains?: string,
 ): Promise<GrantPlatformInstructorResult> {
   const email = IdentityCipher.normalizeEmail(rawEmail);
+  const allowedDomains = await allowedDomainsForPlatformInstructor(db, bootstrapDomains);
   const domainCheck = DomainAllowlistService.validateEmailDomain(
     email,
-    DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS,
+    allowedDomains,
   );
   if (!domainCheck.allowed) {
     const malformed = domainCheck.reason === "Invalid email format";
@@ -333,4 +345,3 @@ export async function listOrgAdmins(
   }
   return out;
 }
-

@@ -36,7 +36,13 @@ export const grantPlatformInstructorHandler = effectHandler((c) => Effect.gen(fu
   const cipher = new IdentityCipher(yield* Effect.promise(() => loadIdentityCipherKeys(c.env)));
   const result = yield* query(
     "grantPlatformInstructor",
-    (db) => grantPlatformInstructor(db, cipher, authContext.session.userId, email),
+    (db) => grantPlatformInstructor(
+      db,
+      cipher,
+      authContext.session.userId,
+      email,
+      c.env.BOOTSTRAP_ALLOWED_DOMAINS,
+    ),
   );
 
   if (result.status === "invalid_email" || result.status === "disallowed_domain") {

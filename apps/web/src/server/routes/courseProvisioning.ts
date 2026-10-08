@@ -6,7 +6,7 @@ import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import type { AppEnv } from "../context";
 import type { AuthContext } from "../middleware/roles";
 import { provisionInstructorCourse } from "../repositories/courseProvisioning";
-import { getOrgScopeForCourse } from "../repositories/organizations";
+import { unsafeOrgScope } from "../repositories/scope";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 
 export async function provisionCourseHandler(c: Context<AppEnv>) {
@@ -35,8 +35,7 @@ export async function provisionCourseHandler(c: Context<AppEnv>) {
   if (result.status === "organization_missing") return c.json({ error: "Create the institution first" }, 409);
   if (result.status === "duplicate_course") return c.json({ error: "That course code and term already exist" }, 409);
   if (result.status === "invalid_email") return c.json({ error: result.message }, 400);
-  const orgScope = await getOrgScopeForCourse(db, result.course.id);
-  const scopes = orgScope ? [orgScope] : [];
+  const scopes = [unsafeOrgScope(result.organizationId)];
   await Promise.all([
     auditBestEffort(db, scopes, {
       actorUserId: auth.session.userId,

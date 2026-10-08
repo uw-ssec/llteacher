@@ -5,10 +5,8 @@ import { fakeAuthContext } from "../testing/authContext";
 import { provisionCourseHandler } from "./courseProvisioning";
 
 const provisionMock = vi.fn();
-const getOrgScopeForCourseMock = vi.fn();
 const auditBestEffortMock = vi.fn();
 vi.mock("../repositories/courseProvisioning", () => ({ provisionInstructorCourse: (...a: unknown[]) => provisionMock(...a) }));
-vi.mock("../repositories/organizations", () => ({ getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a) }));
 vi.mock("../utils/audit", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../utils/audit")>();
   return { ...actual, auditBestEffort: (...a: unknown[]) => auditBestEffortMock(...a) };
@@ -31,10 +29,10 @@ describe("POST /api/platform/courses", () => {
     provisionMock.mockReset().mockResolvedValue({
       status: "created", course: { id: "course-1", title: "Statistics", code: "STAT 311", term: "Autumn 2026" },
       instructor: { userId: "user-2", email: "prof@uw.edu" },
+      organizationId: "org-1",
       membershipId: "membership-1",
       platformInstructorGrantCreated: true,
     });
-    getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
     auditBestEffortMock.mockReset().mockResolvedValue(undefined);
   });
 
@@ -75,6 +73,7 @@ describe("POST /api/platform/courses", () => {
     provisionMock.mockResolvedValue({
       status: "created", course: { id: "course-2", title: "Statistics II", code: "STAT 312", term: "Winter 2027" },
       instructor: { userId: "user-2", email: "prof@uw.edu" },
+      organizationId: "org-1",
       membershipId: "membership-2",
       platformInstructorGrantCreated: false,
     });

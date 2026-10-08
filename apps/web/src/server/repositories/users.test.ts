@@ -6,6 +6,7 @@ import {
   deactivateByWorkosUserId,
   getOrgScopesForUser,
   grantPlatformInstructor,
+  allowedDomainsForPlatformInstructor,
 } from "./users";
 import type { Db } from "../../db/client";
 import { makeNodeDb } from "../../db/nodeClient";
@@ -59,6 +60,23 @@ describe("users repository", () => {
 
     expect(result).toEqual([{ id: "m1", userId: "u1", courseId: "course-a", role: "instructor" }]);
     expect(findMany).toHaveBeenCalledOnce();
+  });
+
+  it("uses the singleton institution domains for non-UW instructor grants", async () => {
+    const findFirst = vi.fn().mockResolvedValue({ allowedDomains: ["example.edu"] });
+    const db = { query: { organizations: { findFirst } } } as unknown as Db;
+
+    await expect(allowedDomainsForPlatformInstructor(db, "uw.edu")).resolves.toEqual(["example.edu"]);
+    expect(findFirst).toHaveBeenCalledOnce();
+  });
+
+  it("uses configured bootstrap domains before the institution exists", async () => {
+    const db = {
+      query: { organizations: { findFirst: vi.fn().mockResolvedValue(undefined) } },
+    } as unknown as Db;
+
+    await expect(allowedDomainsForPlatformInstructor(db, "example.edu,school.test"))
+      .resolves.toEqual(["example.edu", "school.test"]);
   });
 });
 

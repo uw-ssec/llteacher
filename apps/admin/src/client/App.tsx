@@ -216,22 +216,27 @@ export default function App() {
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(() => {
     return null;
   });
+  const [selectionHydratedForUser, setSelectionHydratedForUser] = useState<string | null>(null);
   useEffect(() => {
     if (!userId || typeof window === "undefined") return;
     try { setSelectedCourseId(window.localStorage.getItem(selectedCourseKey(userId))); } catch { setSelectedCourseId(null); }
+    setSelectionHydratedForUser(userId);
   }, [userId]);
-  const CURRENT_COURSE = courses.find((course) => course.id === selectedCourseId) ?? courses[0];
+  const selectionReady = Boolean(userId && selectionHydratedForUser === userId);
+  const CURRENT_COURSE = selectionReady
+    ? courses.find((course) => course.id === selectedCourseId) ?? courses[0]
+    : undefined;
   const CURRENT_COURSE_ID = CURRENT_COURSE?.id;
 
   useEffect(() => {
-    if (!CURRENT_COURSE_ID || selectedCourseId === CURRENT_COURSE_ID) return;
+    if (!selectionReady || !CURRENT_COURSE_ID || selectedCourseId === CURRENT_COURSE_ID) return;
     setSelectedCourseId(CURRENT_COURSE_ID);
-  }, [CURRENT_COURSE_ID, selectedCourseId]);
+  }, [CURRENT_COURSE_ID, selectedCourseId, selectionReady]);
 
   useEffect(() => {
-    if (!userId || !CURRENT_COURSE_ID || typeof window === "undefined") return;
+    if (!selectionReady || !userId || !CURRENT_COURSE_ID || typeof window === "undefined") return;
     try { window.localStorage.setItem(selectedCourseKey(userId), CURRENT_COURSE_ID); } catch { /* storage unavailable */ }
-  }, [CURRENT_COURSE_ID, userId]);
+  }, [CURRENT_COURSE_ID, selectionReady, userId]);
 
   const changeCourse = (courseId: string) => {
     setSelectedCourseId(courseId);

@@ -222,6 +222,45 @@ describe.skipIf(!DATABASE_URL)("scripts/migrate.ts two-stage split (real DB, #34
   );
 
   it(
+    "0056 stops with remediation guidance before indexing case-only duplicate course identities",
+    async () => {
+      const dbName = `llteacher_migrate_test_course_case_${crypto.randomUUID().replace(/-/g, "")}`;
+      dbNames.push(dbName);
+      const scratchUrl = await createScratchDatabase(adminPool, dbName);
+      const through0055 = buildFolderThrough("0055_absurd_silver_centurion");
+      const pool = new Pool({ connectionString: scratchUrl });
+      const db = drizzle(pool);
+      try {
+        await applyMigrationsFolder(pool, db, through0055);
+        await db.execute(sql`
+          INSERT INTO organizations (id, slug, name, workos_organization_id)
+          VALUES ('45555555-5555-4555-8555-555555555555', 'course-case-org', 'Course Case Org', 'course_case_org')
+        `);
+        await db.execute(sql`
+          INSERT INTO courses (id, organization_id, title, code, term)
+          VALUES
+            ('46666666-6666-4666-8666-666666666661', '45555555-5555-4555-8555-555555555555', 'One', 'STAT 311', 'Autumn 2026'),
+            ('46666666-6666-4666-8666-666666666662', '45555555-5555-4555-8555-555555555555', 'Two', 'stat 311', 'autumn 2026')
+        `);
+      } finally {
+        fs.rmSync(through0055, { recursive: true, force: true });
+        await pool.end();
+      }
+
+      await expect(runMigrations(scratchUrl)).rejects.toThrow(/duplicate organization\/code\/term/i);
+
+      const repairPool = new Pool({ connectionString: scratchUrl });
+      try {
+        await repairPool.query("UPDATE courses SET code = 'STAT 312' WHERE title = 'Two'");
+      } finally {
+        await repairPool.end();
+      }
+      await expect(runMigrations(scratchUrl)).resolves.not.toThrow();
+    },
+    60_000,
+  );
+
+  it(
     "0058 stops with remediation guidance before normalizing duplicate course identities",
     async () => {
       const dbName = `llteacher_migrate_test_course_identity_${crypto.randomUUID().replace(/-/g, "")}`;

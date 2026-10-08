@@ -74,6 +74,18 @@ describe("App selected-course context", () => {
     window.localStorage.clear();
   });
 
+  it("restores a valid saved course without overwriting it during profile hydration", async () => {
+    window.localStorage.setItem("llteacher:admin-selected-course:u1", "course-b");
+    stubMultiCourseProfile();
+    renderApp();
+
+    const picker = await screen.findByRole("combobox", { name: "Current course" }) as HTMLSelectElement;
+    expect(picker.value).toBe("course-b");
+    await screen.findByRole("heading", { name: "BIO 180 · Winter 2027" });
+    expect(window.localStorage.getItem("llteacher:admin-selected-course:u1")).toBe("course-b");
+    window.localStorage.clear();
+  });
+
   it("switching courses exits a nested form and loads the new course homeworks", async () => {
     window.localStorage.clear();
     const fetchMock = stubMultiCourseProfile();

@@ -6,7 +6,7 @@ import type { AppEnv } from "../context";
 import { fakeAuthContext } from "../testing/authContext";
 import { SERVICE_UNAVAILABLE_MESSAGE } from "../utils/errors";
 
-const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
+const TEST_ENV = { DATABASE_URL: "ignored", BOOTSTRAP_ALLOWED_DOMAINS: "example.edu" } as Env;
 
 const grantPlatformInstructorMock = vi.fn();
 vi.mock("../repositories/users", () => ({
@@ -59,6 +59,19 @@ describe("POST /api/platform/instructors (#316)", () => {
       expect.anything(),
       "u1",
       "new-instructor@uw.edu",
+      "example.edu",
+    );
+  });
+
+  it("passes a non-UW deployment allowlist to first-run instructor provisioning", async () => {
+    const res = await post(superAdmin(), { email: "prof@example.edu" });
+    expect(res.status).toBe(200);
+    expect(grantPlatformInstructorMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "u1",
+      "prof@example.edu",
+      "example.edu",
     );
   });
 

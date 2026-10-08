@@ -19,6 +19,7 @@ export type CourseProvisioningResult =
       status: "created";
       course: { id: string; title: string; code: string; term: string };
       instructor: { userId: string; email: string };
+      organizationId: string;
       membershipId: string;
       platformInstructorGrantCreated: boolean;
     };
@@ -100,6 +101,7 @@ export async function provisionInstructorCourse(
         status: "created",
         course: course!,
         instructor: { userId: user!.id, email },
+        organizationId: organization.id,
         membershipId,
         platformInstructorGrantCreated,
       } as const;
