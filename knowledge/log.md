@@ -1,4 +1,6 @@
 ## 2026-10-08
+* **Update**: Linked `bugs/hint-test-initial-hydration-race.md` to `bugs/chat-rerender-per-token.md` (Both depend on the lifecycle and rendering of the real streaming chat surface.).
+* **Creation**: Documented concept `bugs/hint-test-initial-hydration-race.md` (Hint suppression tests must wait for initial history).
 * **Update**: Updated concept `facts/code-typescript-and-install.md`.
 * **Update**: Updated concept `facts/authority-and-provisioning-gaps.md`.
 * **Update**: Linked `decisions/course-membership-roles.md` to `decisions/org-admin-role-and-course-scoped-configs.md` (Adds the first organization-level role beside course roles).
