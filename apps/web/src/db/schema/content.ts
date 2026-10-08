@@ -672,6 +672,9 @@ export const homeworksRelations = relations(homeworks, ({ one, many }) => ({
     references: [llmConfigs.id],
   }),
   sections: many(sections),
+  // #165: loaded alongside sections by getStudentHomeworksForUser, so the
+  // student summary carries widgets without an extra round-trip.
+  progressWidgets: many(homeworkProgressWidgets),
 }));
 
 export const sectionsRelations = relations(sections, ({ one }) => ({

@@ -1,6 +1,13 @@
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { conversations, submissions, courseMemberships, sectionAnswers, type SubmissionSource } from "../../db/schema";
+import {
+  conversations,
+  submissions,
+  courseMemberships,
+  sectionAnswers,
+  homeworkProgressWidgetResponses,
+  type SubmissionSource,
+} from "../../db/schema";
 import { deriveHomeworkStatus, isUnreleased } from "./homeworks";
 
 export type SectionStatusType = "not_started" | "in_progress" | "in_progress_overdue" | "submitted" | "overdue";
@@ -43,6 +50,19 @@ export interface StudentSectionProgress {
   submissionSource: SubmissionSource | null;
 }
 
+/** #165: one authored self-assessment widget plus the caller's OWN recorded
+ *  values. Null means "not answered yet" -- partial completion (pre without
+ *  post) is a valid state, so each side is independent. Only ever the
+ *  requesting student's own row; no other student's values reach this. */
+export interface StudentProgressWidget {
+  id: string;
+  prePrompt: string;
+  postPrompt: string;
+  order: number;
+  preValue: number | null;
+  postValue: number | null;
+}
+
 export interface StudentHomeworkSummary {
   id: string;
   /** #4: the tutor-conversations list surface (apps/web/src/client/hooks/
@@ -61,6 +81,8 @@ export interface StudentHomeworkSummary {
   completedPercentage: number;
   inProgressPercentage: number;
   sections: StudentSectionProgress[];
+  /** #165: ordered by `order`; empty when the homework has none. */
+  widgets: StudentProgressWidget[];
 }
 
 /** Enrollment-scoped: only homeworks belonging to courses the user has a
@@ -85,7 +107,7 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
     // first homework in the list (or, before this fix, not deriving it at
     // all -- App.tsx's breadcrumb/TopNav had "STATS 311" hardcoded as a
     // literal, one character off from the actual seeded course.code).
-    with: { sections: true, course: { columns: { code: true } } },
+    with: { sections: true, progressWidgets: true, course: { columns: { code: true } } },
   });
 
   const visibleHomeworks = allHomeworks.filter((hw) => {
@@ -146,6 +168,25 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
     : [];
   const answeredSectionIds = new Set(answerRows.map((a) => a.sectionId));
 
+  // #165: widgets arrive with each homework above (no extra round-trip);
+  // the caller's own responses are one more batched query, and only when
+  // some visible homework actually has widgets.
+  const widgetRows = visibleHomeworks.flatMap((hw) => hw.progressWidgets);
+  const responseRows = widgetRows.length
+    ? await db
+        .select({
+          widgetId: homeworkProgressWidgetResponses.widgetId,
+          preValue: homeworkProgressWidgetResponses.preValue,
+          postValue: homeworkProgressWidgetResponses.postValue,
+        })
+        .from(homeworkProgressWidgetResponses)
+        .where(and(
+          inArray(homeworkProgressWidgetResponses.widgetId, widgetRows.map((w) => w.id)),
+          eq(homeworkProgressWidgetResponses.userId, userId),
+        ))
+    : [];
+  const responseByWidgetId = new Map(responseRows.map((r) => [r.widgetId, r]));
+
   const results: StudentHomeworkSummary[] = [];
   for (const hw of visibleHomeworks) {
     const sectionSummaries: StudentSectionProgress[] = [];
@@ -187,6 +228,16 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
       completedPercentage: Math.round((completed / total) * 100),
       inProgressPercentage: Math.round((inProgress / total) * 100),
       sections: sectionSummaries,
+      widgets: [...hw.progressWidgets]
+        .sort((a, b) => a.order - b.order)
+        .map((w) => ({
+          id: w.id,
+          prePrompt: w.prePrompt,
+          postPrompt: w.postPrompt,
+          order: w.order,
+          preValue: responseByWidgetId.get(w.id)?.preValue ?? null,
+          postValue: responseByWidgetId.get(w.id)?.postValue ?? null,
+        })),
     });
   }
   return results;

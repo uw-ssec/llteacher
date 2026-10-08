@@ -21,6 +21,8 @@ import {
   courseMemberships,
   courses,
   grades,
+  homeworkProgressWidgetResponses,
+  homeworkProgressWidgets,
   homeworks,
   messages,
   organizations,
@@ -260,6 +262,32 @@ describe.skipIf(!DATABASE_URL)("POST /exports (#91, real DB)", () => {
       parts: [{ type: "text", text: "SECRET-OTHER-PROF-TEST" }],
     });
 
+    // #165: one self-assessment widget. Grace answered both sides; Ada
+    // answered "before" with a real 0 and never answered "after" -- the
+    // export must keep those two apart. A widget on another course, with a
+    // response from Grace, must never appear in this course's export.
+    const [widget] = await db
+      .insert(homeworkProgressWidgets)
+      .values({ homeworkId: hw!.id, prePrompt: "How sure are you about p-values?", postPrompt: "And now?", order: 1 })
+      .returning({ id: homeworkProgressWidgets.id });
+    await db.insert(homeworkProgressWidgetResponses).values([
+      {
+        widgetId: widget!.id, userId: grace.userId, organizationId: orgId,
+        preValue: 3, preSubmittedAt: new Date("2026-10-01T10:00:00Z"),
+        postValue: 8, postSubmittedAt: new Date("2026-10-02T10:00:00Z"),
+      },
+      { widgetId: widget!.id, userId: ada.userId, organizationId: orgId, preValue: 0, preSubmittedAt: new Date("2026-10-01T11:00:00Z") },
+    ]);
+    const [otherHw] = await db
+      .insert(homeworks)
+      .values({ courseId: otherCourseId, createdById: im!.id, title: "OTHER-HW", description: "d", dueDate: new Date(Date.now() + 86_400_000) })
+      .returning({ id: homeworks.id });
+    const [otherWidget] = await db
+      .insert(homeworkProgressWidgets)
+      .values({ homeworkId: otherHw!.id, prePrompt: "OTHER-COURSE-PROMPT", postPrompt: "x", order: 1 })
+      .returning({ id: homeworkProgressWidgets.id });
+    await db.insert(homeworkProgressWidgetResponses).values({ widgetId: otherWidget!.id, userId: grace.userId, organizationId: orgId, preValue: 9 });
+
     await db.insert(grades).values({
       organizationId: orgId,
       submissionId: grace.submissionId,
@@ -386,6 +414,43 @@ describe.skipIf(!DATABASE_URL)("POST /exports (#91, real DB)", () => {
     expect(event.action).toBe("export.created");
     expect(JSON.stringify(event.requestMetadata)).not.toContain("Strong reasoning");
     expect(JSON.stringify(event.requestMetadata)).toContain("grades");
+  });
+
+  describe("self-assessments (#165)", () => {
+    type Row = { student: string; homework: string; widgetNumber: number; prePrompt: string; preValue: number | null; preSubmittedAt: string | null; postValue: number | null; postSubmittedAt: string | null };
+    const rowsOf = async (res: Response) =>
+      (JSON.parse(((await res.json()) as { body: string }).body) as { selfAssessments: Row[] }).selfAssessments;
+
+    it("pairs each student's before and after on one row, keeping a real 0 apart from never answered", async () => {
+      const res = await post({ subject: "self_assessments", format: "json" }, instructorOfCourse());
+      expect(res.status).toBe(200);
+      const rows = await rowsOf(res);
+      const byStudent = Object.fromEntries(rows.map((r) => [r.student, r]));
+      expect(Object.keys(byStudent).sort()).toEqual(["=cmd|'/c calc'!A1", "Grace Hopper"]);
+      expect(byStudent["Grace Hopper"]).toMatchObject({
+        homework: "HW1", widgetNumber: 1, prePrompt: "How sure are you about p-values?",
+        preValue: 3, preSubmittedAt: "2026-10-01T10:00:00.000Z", postValue: 8, postSubmittedAt: "2026-10-02T10:00:00.000Z",
+      });
+      expect(byStudent["=cmd|'/c calc'!A1"]).toMatchObject({ preValue: 0, postValue: null, postSubmittedAt: null });
+    });
+
+    it("writes CSV with an empty cell, not a 0, for a side never answered", async () => {
+      const res = await post({ subject: "self_assessments", format: "csv" }, instructorOfCourse());
+      const artifact = (await res.json()) as { filename: string; body: string };
+      expect(artifact.filename).toBe("self-assessments.csv");
+      const lines = artifact.body.replace(/^\uFEFF/, "").trim().split("\r\n");
+      expect(lines[0]).toBe('"Response ID","Student","Email","Homework","Prompt #","Before prompt","Before (0-10)","Before at","After prompt","After (0-10)","After at"');
+      const ada = lines.find((l) => l.includes("calc"))!;
+      expect(ada).toContain('"0","2026-10-01T11:00:00.000Z","And now?","",""');
+    });
+
+    it("narrows to one student and never includes another course's responses", async () => {
+      const res = await post({ subject: "self_assessments", format: "json", studentId: graceUserId }, instructorOfCourse());
+      const rows = await rowsOf(res);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.student).toBe("Grace Hopper");
+      expect(JSON.stringify(rows)).not.toContain("OTHER-COURSE-PROMPT");
+    });
   });
 
   it("never includes another course's work", async () => {
