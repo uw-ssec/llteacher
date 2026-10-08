@@ -147,7 +147,12 @@ export type { LlmConfigRecord };
 
 export interface LlmConfigListResponse {
   configs: LlmConfigRecord[];
+  /** #367: see @llteacher/ui/api's LlmConfigListPayload. */
+  canManageOrgPool: boolean;
 }
+
+/** #367: where a created or cloned configuration lives. */
+export type LlmConfigScope = "course" | "organization";
 
 /** The create/update body. Deliberately has no credential field: the
  *  platform gateway needs no key from an instructor, and an
@@ -164,10 +169,14 @@ export interface LlmConfigBody {
   fallbackLlmConfigId: string | null;
   isActive: boolean;
   isDefault: boolean;
+  /** #367: create only; see LlmConfigScope. */
+  scope?: LlmConfigScope;
 }
 
 export interface LlmConfigCloneBody {
   name: string;
+  /** #367: see LlmConfigScope. */
+  scope?: LlmConfigScope;
 }
 
 export interface LlmConfigTestBody {

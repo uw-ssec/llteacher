@@ -319,7 +319,7 @@ export const updateHomeworkHandler = effectHandler((c) => Effect.gen(function* (
     const configId = llmConfigId;
     const courseOrgScope = yield* query("getOrgScopeForCourse", (db) => getOrgScopeForCourse(db, courseId));
     const belongsToOrg = courseOrgScope
-      ? yield* query("llmConfigBelongsToOrg", (db) => llmConfigBelongsToOrg(db, courseOrgScope, configId))
+      ? yield* query("llmConfigBelongsToOrg", (db) => llmConfigBelongsToOrg(db, courseOrgScope, configId, courseId))
       : false;
     if (!belongsToOrg) {
       return yield* new BadRequest({ message: "llmConfigId does not belong to this course's organization" });

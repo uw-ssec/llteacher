@@ -108,6 +108,11 @@ export interface ResolvedLLMConfig {
    *  column's own doc comment for why a half-known rate isn't used). */
   pricePerMillionInputTokens: number | null;
   pricePerMillionOutputTokens: number | null;
+  /** #367: null for the organization's shared pool, or the owning course.
+   *  Optional so hand-built fixtures of this shape need not state it; the
+   *  loader always projects it. Read by the config-test route to refuse a
+   *  config another course owns, from this same single read (#390). */
+  scopeCourseId?: string | null;
   /** #168: per-config override of the markSectionComplete stopping-rule
    *  wording -- see llm_configs.markCompleteInstruction's own doc comment
    *  (db/schema/content.ts). Null (the common case) means "use
@@ -132,6 +137,7 @@ const LLM_CONFIG_COLUMNS = {
   fallbackLlmConfigId: llmConfigs.fallbackLlmConfigId,
   basePrompt: llmConfigs.basePrompt,
   knowledgeEnabled: llmConfigs.knowledgeEnabled,
+  scopeCourseId: llmConfigs.scopeCourseId,
 } as const;
 
 /** #364: the single "load THIS config row, under THIS org" primitive. Every

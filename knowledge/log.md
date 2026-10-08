@@ -1,4 +1,9 @@
 ## 2026-10-08
+* **Update**: Updated concept `facts/code-typescript-and-install.md`.
+* **Update**: Updated concept `facts/authority-and-provisioning-gaps.md`.
+* **Update**: Linked `decisions/course-membership-roles.md` to `decisions/org-admin-role-and-course-scoped-configs.md` (Adds the first organization-level role beside course roles).
+* **Update**: Linked `facts/authority-and-provisioning-gaps.md` to `decisions/org-admin-role-and-course-scoped-configs.md` (#367 closed the org-level LLM config gap with an Org Admin role).
+* **Creation**: Documented concept `decisions/org-admin-role-and-course-scoped-configs.md` (Org Admin owns the shared LLM config pool; course instructors own course-scoped configs).
 * **Update**: Linked `decisions/effect-typed-request-pipeline.md` to `bugs/partial-stream-persisted-as-complete.md` (Same chat turn-finalization path: the Effect migration found that a provider rejection before any stream existed left the turn unfinalized and its lock held, returning false 409 in_progress on retry.).
 * **Creation**: Documented concept `decisions/effect-typed-request-pipeline.md` (API handlers run as Effect 4 programs with typed errors).
 
