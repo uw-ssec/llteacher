@@ -2,22 +2,25 @@
    #73: the Canvas token credential store.
 
    Real-DB, for the same reason the sibling roster/llmConfigs suites are:
-   the design rests on organization_credentials_org_provider_label_uq
-   making "set" a real upsert, and on the encrypted_secret round-trip
-   actually decrypting to what was written -- a mock would pass either
-   way without exercising the bytea column or the check constraint.
+   the design rests on the partial owner/provider/label index making "set"
+   a real per-instructor upsert, and on the encrypted_secret round-trip
+   actually decrypting to what was written -- a mock would pass either way
+   without exercising the bytea column, ownership index, or check constraint.
    -------------------------------------------------------------------------- */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
-import { organizations, users } from "../../db/schema";
+import { organizationCredentials, organizations, users } from "../../db/schema";
 import { unsafeOrgScope } from "./scope";
 import {
+  CANVAS_CREDENTIAL_LABEL,
   deleteCanvasCredential,
   getCanvasCredentialSummary,
   getDecryptedCanvasCredential,
+  getDecryptedCanvasCredentialById,
+  hasLegacyCanvasCredential,
   maskToken,
   setCanvasCredential,
 } from "./organizationCredentials";
@@ -42,6 +45,7 @@ describe.skipIf(!DATABASE_URL)("organizationCredentials (#73)", () => {
   let cipher: IdentityCipher;
   let orgAId: string;
   let orgBId: string;
+  let orgCId: string | undefined;
   let ownerAId: string;
   let ownerBId: string;
 
@@ -78,8 +82,14 @@ describe.skipIf(!DATABASE_URL)("organizationCredentials (#73)", () => {
   });
 
   afterAll(async () => {
-    await deleteCanvasCredential(db, unsafeOrgScope(orgAId), ownerAId);
-    await deleteCanvasCredential(db, unsafeOrgScope(orgBId), ownerBId);
+    await db.delete(organizationCredentials).where(eq(organizationCredentials.organizationId, orgAId));
+    await db.delete(organizationCredentials).where(eq(organizationCredentials.organizationId, orgBId));
+    if (orgCId) {
+      await db.delete(organizationCredentials).where(eq(organizationCredentials.organizationId, orgCId));
+      await db.delete(organizations).where(eq(organizations.id, orgCId));
+    }
+    await db.delete(organizations).where(eq(organizations.id, orgAId));
+    await db.delete(organizations).where(eq(organizations.id, orgBId));
     await db.delete(users).where(eq(users.id, ownerAId));
     await db.delete(users).where(eq(users.id, ownerBId));
   });
@@ -144,9 +154,39 @@ describe.skipIf(!DATABASE_URL)("organizationCredentials (#73)", () => {
       .insert(organizations)
       .values({ slug: `oc-c-${crypto.randomUUID()}`, name: "C", workosOrganizationId: `w-c-${crypto.randomUUID()}` })
       .returning({ id: organizations.id });
+    orgCId = otherOrg!.id;
 
     const summary = await getCanvasCredentialSummary(db, cipher, unsafeOrgScope(otherOrg!.id), ownerAId);
     expect(summary).toBeNull();
+  });
+
+  it("does not reveal or decrypt one instructor's credential for another instructor", async () => {
+    const scope = unsafeOrgScope(orgAId);
+    const { id } = await setCanvasCredential(db, cipher, scope, ownerAId, {
+      token: "owner-a-private-token",
+      canvasBaseUrl: "https://uw.instructure.com",
+      expiresAt: null,
+    });
+
+    expect(await getCanvasCredentialSummary(db, cipher, scope, ownerBId)).toBeNull();
+    expect(await getDecryptedCanvasCredential(db, cipher, scope, ownerBId)).toBeNull();
+    expect(await getDecryptedCanvasCredentialById(db, cipher, scope, ownerBId, id)).toBeNull();
+  });
+
+  it("reports an ownerless legacy token but never assigns or decrypts it for an instructor", async () => {
+    const scope = unsafeOrgScope(orgAId);
+    await db.insert(organizationCredentials).values({
+      organizationId: orgAId,
+      ownerUserId: null,
+      provider: "canvas",
+      label: CANVAS_CREDENTIAL_LABEL,
+      encryptedSecret: await cipher.encryptString("legacy-organization-token"),
+      canvasBaseUrl: "https://uw.instructure.com",
+    });
+
+    expect(await hasLegacyCanvasCredential(db, scope)).toBe(true);
+    expect(await getCanvasCredentialSummary(db, cipher, scope, ownerBId)).toBeNull();
+    expect(await getDecryptedCanvasCredential(db, cipher, scope, ownerBId)).toBeNull();
   });
 
   it("deletes the credential; a second delete reports nothing to remove", async () => {

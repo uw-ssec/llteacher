@@ -209,15 +209,9 @@ export default function App() {
     [isAuthenticated, isSuperAdmin],
   );
 
-  // Stopgap: this app assumes exactly one course everywhere else today
-  // (TopNav's hardcoded course="STATS 311" string) -- courses[0] matches
-  // that existing assumption rather than inventing a switcher here. Real
-  // multi-course support (picker, deep-linked course context, persisted
-  // selection) is issue #70; when that lands, replace this with real
-  // course-scoped navigation. See Resolved Design Decision 8 in the M3 plan
-  // for the full reasoning. An instructor with zero courses (a genuine edge
-  // case, e.g. a brand-new admin account before any course assignment)
-  // sees the "No course found" empty state below rather than a broken form.
+  // The selected course owns every course-scoped loader below. A stale saved
+  // id falls back to the first current membership, and changeCourse resets a
+  // detail/form view before any new-course request can reuse an old id.
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(() => {
     if (typeof window === "undefined") return null;
     try { return window.localStorage.getItem(SELECTED_COURSE_KEY); } catch { return null; }
@@ -425,6 +419,8 @@ export default function App() {
                 CURRENT_COURSE_ID ? (
                   <HomeworksDataLoader
                     courseId={CURRENT_COURSE_ID}
+                    courseCode={CURRENT_COURSE.code}
+                    term={CURRENT_COURSE.term}
                     onOpenHomework={(id) => setView({ kind: "edit-homework", homeworkId: id })}
                     onOpenSubmissions={(id) => setView({ kind: "submissions", homeworkId: id })}
                     canAuthor={canAuthor}
@@ -838,6 +834,8 @@ export default function App() {
 
 function HomeworksDataLoader({
   courseId,
+  courseCode,
+  term,
   onOpenHomework,
   onOpenSubmissions,
   onNewHomework,
@@ -845,6 +843,8 @@ function HomeworksDataLoader({
   canViewDrafts,
 }: {
   courseId: string;
+  courseCode: string;
+  term: string;
   onOpenHomework: (id: string) => void;
   onOpenSubmissions: (id: string) => void;
   onNewHomework: () => void;
@@ -878,6 +878,8 @@ function HomeworksDataLoader({
   if (!homeworks) return null;
   return (
     <HomeworksView
+      courseCode={courseCode}
+      term={term}
       homeworks={homeworks}
       onOpenHomework={onOpenHomework}
       onOpenSubmissions={onOpenSubmissions}

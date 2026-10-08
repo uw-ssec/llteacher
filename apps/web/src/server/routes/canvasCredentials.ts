@@ -1,9 +1,9 @@
 /* --------------------------------------------------------------------------
    #73: instructor-managed Canvas API token.
 
-   Gated on instructor-of-COURSE and scoped to the signed-in instructor.
-   One instructor can reuse their Canvas credential across their courses,
-   without exposing or replacing another instructor's credential.
+   Gated on instructor-of-course and owner-scoped to the authenticated user.
+   One instructor can reuse their account credential across their courses,
+   while a co-instructor can neither read nor spend it.
 
    Every response from this file is checked, in its own tests, to never
    carry the plaintext token -- only a masked summary.

@@ -44,6 +44,19 @@ const IDLE_STATUS = {
 const renderView = () => render(<CanvasIntegrationView courseId="c1" courseTitle="STATS 311" />);
 
 describe("CanvasIntegrationView -- token settings (#73)", () => {
+  it("explains that a legacy organization token must be reconnected by this instructor", async () => {
+    stub((url, init) => {
+      if (url.endsWith("/canvas/credential") && (!init.method || init.method === "GET")) {
+        return jsonRes({ credential: null, reconnectRequired: true });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    renderView();
+
+    await waitFor(() => expect(screen.getAllByText(/legacy organization Canvas token cannot be assigned safely/i).length).toBeGreaterThan(0));
+    expect(screen.getByLabelText("API token")).toBeTruthy();
+  });
+
   it("offers the token form when none is set, and never renders a saved token in full", async () => {
     const fetchMock = stub((url, init) => {
       if (url.endsWith("/canvas/credential") && (!init.method || init.method === "GET")) {

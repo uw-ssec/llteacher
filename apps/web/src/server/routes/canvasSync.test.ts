@@ -81,6 +81,10 @@ function buildApp(authContext: AuthContext | undefined) {
 
 const instructorOfA = () =>
   fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] });
+const instructorOfAAndB = () => fakeAuthContext({ memberships: [
+  fakeMembership({ courseId: "course-a", role: "instructor" }),
+  fakeMembership({ courseId: "course-b", role: "instructor" }),
+] });
 const taOfA = () => fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] });
 
 const url = (suffix: string) => `/api/courses/course-a/canvas${suffix}`;
@@ -190,6 +194,21 @@ describe("PUT link", () => {
       ["org-1"],
       expect.objectContaining({ action: "lms_integration.canvas_course_linked" }),
     );
+  });
+
+  it("reuses one instructor-owned credential when linking two of their courses", async () => {
+    listCanvasCoursesMock.mockResolvedValue([
+      { canvasCourseId: "canvas-a", name: "Course A", courseCode: "A", term: "Fall" },
+      { canvasCourseId: "canvas-b", name: "Course B", courseCode: "B", term: "Winter" },
+    ]);
+    getOrgScopeForCourseMock.mockResolvedValue("org-1");
+    const app = buildApp(instructorOfAAndB());
+    expect((await app.request("/api/courses/course-a/canvas/link", json("PUT", { canvasCourseId: "canvas-a" }), TEST_ENV)).status).toBe(200);
+    expect((await app.request("/api/courses/course-b/canvas/link", json("PUT", { canvasCourseId: "canvas-b" }), TEST_ENV)).status).toBe(200);
+
+    expect(getDecryptedMock).toHaveBeenCalledTimes(2);
+    expect(getDecryptedMock.mock.calls.every((call) => call[3] === "u1")).toBe(true);
+    expect(linkCanvasCourseMock.mock.calls.map((call) => call[3].credentialId)).toEqual(["cred-1", "cred-1"]);
   });
 
   it("409s when another course already claims that Canvas course", async () => {

@@ -1,6 +1,6 @@
 import { eq, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { courseMemberships, courses, users } from "../../db/schema";
+import { courseMemberships, courses, organizations, users } from "../../db/schema";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { DomainAllowlistService } from "../../lib/services/DomainAllowlistService";
 
@@ -41,6 +41,7 @@ export async function provisionInstructorCourse(
   input: CourseProvisioningInput,
 ): Promise<CourseProvisioningResult> {
   const organization = await db.query.organizations.findFirst({
+    where: eq(organizations.deploymentSingleton, true),
     columns: { id: true, allowedDomains: true },
   });
   if (!organization) return { status: "organization_missing" };

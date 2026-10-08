@@ -39,6 +39,57 @@ describe("App auth gate", () => {
   });
 });
 
+describe("App selected-course context", () => {
+  const courses = [
+    { id: "course-a", title: "Statistics", code: "STAT 311", term: "Autumn 2026", role: "instructor", canViewSolutions: true, canViewDrafts: true },
+    { id: "course-b", title: "Biology", code: "BIO 180", term: "Winter 2027", role: "instructor", canViewSolutions: true, canViewDrafts: true },
+  ];
+
+  function stubMultiCourseProfile() {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/profile") {
+        return new Response(JSON.stringify({ userId: "u1", role: "instructor", courses }), { status: 200 });
+      }
+      if (url.endsWith("/llm-configs")) return new Response(JSON.stringify({ configs: [] }), { status: 200 });
+      if (/\/api\/courses\/course-[ab]\/homeworks$/.test(url)) {
+        return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("falls back from a stale saved id and persists the first current course", async () => {
+    window.localStorage.setItem("llteacher:admin-selected-course", "removed-course");
+    stubMultiCourseProfile();
+    renderApp();
+
+    const picker = await screen.findByRole("combobox", { name: "Current course" }) as HTMLSelectElement;
+    expect(picker.value).toBe("course-a");
+    await waitFor(() => expect(window.localStorage.getItem("llteacher:admin-selected-course")).toBe("course-a"));
+    window.localStorage.clear();
+  });
+
+  it("switching courses exits a nested form and loads the new course homeworks", async () => {
+    window.localStorage.clear();
+    const fetchMock = stubMultiCourseProfile();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "STAT 311 · Autumn 2026" });
+    fireEvent.click(screen.getByRole("button", { name: "New homework" }));
+    await screen.findByRole("heading", { name: "New homework" });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Current course" }), { target: { value: "course-b" } });
+
+    await screen.findByRole("heading", { name: "BIO 180 · Winter 2027" });
+    expect(screen.queryByRole("heading", { name: "New homework" })).toBeNull();
+    expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/courses/course-b/homeworks")).toBe(true);
+    window.localStorage.clear();
+  });
+});
+
 /** #316: a super admin or a granted platform instructor may have ZERO real
  *  course_memberships (role: null, no courses), which is exactly the case
  *  this grant exists to admit. Neither flag should widen what a non-admin

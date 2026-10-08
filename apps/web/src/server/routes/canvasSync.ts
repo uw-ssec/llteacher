@@ -71,8 +71,8 @@ function canvasFailureCause(err: CanvasApiError | ExternalServiceError): unknown
   return err._tag === "ExternalServiceError" ? err.cause : err;
 }
 
-/** #74's course picker / #3's visibility check: every course the org's
- *  stored token's own account can see. A failure is answered here with an
+/** #74's course picker / #3's visibility check: every course the instructor's
+ *  stored token's account can see. A failure is answered here with an
  *  actionable sentence at 503 (the instructor's next step depends on
  *  whether Canvas rejected the token, rate-limited, or was unreachable),
  *  not the generic 503 body. */
@@ -96,7 +96,7 @@ function visibleCanvasCourses(
   );
 }
 
-/** #74's course picker: every course the org's stored token's own account
+/** #74's course picker: every course the instructor's stored token's account
  *  can see. */
 export const listCanvasCoursesHandler = effectHandler((c) => Effect.gen(function* () {
   const ctx = yield* instructorCourseScope(c);
@@ -145,11 +145,8 @@ export const linkCanvasCourseHandler = effectHandler((c) => Effect.gen(function*
   if (!credential) return yield* noCredential();
 
   // #3 (security review, PR #457): canvasCourseId arrives from the request
-  // body, not from a value this handler itself resolved. The credential is
-  // shared org-wide (canvasCredentials.ts's own header), so without this
-  // check an instructor of ANY course in the org could supply an arbitrary
-  // Canvas course id and pull a colleague's roster -- names, emails, role
-  // -- onto their own course. Cross-checking against this same token's own
+  // body, not from a value this handler itself resolved. Cross-checking
+  // against this same instructor-owned token's own
   // listCanvasCourses() result -- the same list the course picker itself
   // shows -- confirms the id is actually one the token's owner teaches.
   const listed = yield* visibleCanvasCourses(c, "linkCanvasCourseHandler", credential);

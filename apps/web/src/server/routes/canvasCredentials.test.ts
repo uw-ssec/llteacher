@@ -137,6 +137,14 @@ describe("GET credential", () => {
     const res = await buildApp(instructorOfA()).request(url(), {}, TEST_ENV);
     expect(await res.json()).toEqual({ credential: null });
   });
+
+  it("requires an explicit reconnect for an ownerless legacy token", async () => {
+    getSummaryMock.mockResolvedValue(null);
+    hasLegacyMock.mockResolvedValue(true);
+    const res = await buildApp(instructorOfA()).request(url(), {}, TEST_ENV);
+    expect(await res.json()).toEqual({ credential: null, reconnectRequired: true });
+    expect(getDecryptedMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("PUT credential", () => {

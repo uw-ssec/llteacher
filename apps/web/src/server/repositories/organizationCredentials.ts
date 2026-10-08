@@ -1,13 +1,9 @@
 /* --------------------------------------------------------------------------
    #73: the instructor-supplied Canvas API token.
 
-   One credential per organization, at a fixed label -- unlike llm_configs'
-   organization_credentials rows (which can be many, one per provider
-   binding an instructor names), the console offers exactly one Canvas
-   connection per org, matching the "instructor registers their token"
-   flow the issue describes. CANVAS_CREDENTIAL_LABEL is that fixed label;
-   `organization_credentials_org_provider_label_uq` (schema) is what makes
-   "set" an upsert rather than a second row.
+   One credential per instructor, at a fixed label. The same instructor may
+   bind it to several courses; another instructor in the institution gets an
+   independent credential row. CANVAS_CREDENTIAL_LABEL is that fixed label.
 
    The full token is never returned by anything in this module. Every read
    path here returns either a decrypted plaintext (for internal use by
@@ -132,7 +128,7 @@ export async function getDecryptedCanvasCredentialById(
   return { id: row.id, token: await cipher.decryptString(row.encryptedSecret), canvasBaseUrl: row.canvasBaseUrl };
 }
 
-/** Creates the org's Canvas credential, or replaces it if one already
+/** Creates the instructor's Canvas credential, or replaces it if one already
  *  exists -- "Replace token" (#73) is a full re-entry, not a diff, so this
  *  is one upsert rather than a separate create/update pair. rotatedAt is
  *  stamped on every call, including the first, so "when was this last

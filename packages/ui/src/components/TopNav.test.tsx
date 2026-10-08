@@ -80,3 +80,22 @@ describe("TopNav account menu", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 });
+
+describe("TopNav course switcher", () => {
+  it("renders real course options and reports the selected course", async () => {
+    const onCourseChange = vi.fn();
+    renderAuthed({
+      course: "STAT 311",
+      term: "Autumn 2026",
+      courseOptions: [
+        { id: "course-a", label: "STAT 311 · Autumn 2026" },
+        { id: "course-b", label: "BIO 180 · Winter 2027" },
+      ],
+      selectedCourseId: "course-a",
+      onCourseChange,
+    });
+
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Current course" }), "course-b");
+    expect(onCourseChange).toHaveBeenCalledWith("course-b");
+  });
+});
