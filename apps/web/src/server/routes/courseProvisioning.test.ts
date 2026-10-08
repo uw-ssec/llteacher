@@ -5,7 +5,14 @@ import { fakeAuthContext } from "../testing/authContext";
 import { provisionCourseHandler } from "./courseProvisioning";
 
 const provisionMock = vi.fn();
+const getOrgScopeForCourseMock = vi.fn();
+const auditBestEffortMock = vi.fn();
 vi.mock("../repositories/courseProvisioning", () => ({ provisionInstructorCourse: (...a: unknown[]) => provisionMock(...a) }));
+vi.mock("../repositories/organizations", () => ({ getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a) }));
+vi.mock("../utils/audit", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../utils/audit")>();
+  return { ...actual, auditBestEffort: (...a: unknown[]) => auditBestEffortMock(...a) };
+});
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 vi.mock("../../lib/secrets-loader", () => ({ loadIdentityCipherKeys: async () => ({}) }));
 vi.mock("../../lib/crypto/identity-cipher", () => ({ IdentityCipher: class {} }));
@@ -20,10 +27,14 @@ function post(superAdmin: boolean, body: unknown) {
 }
 
 describe("POST /api/platform/courses", () => {
-  beforeEach(() => provisionMock.mockReset().mockResolvedValue({
-    status: "created", course: { id: "course-1", title: "Statistics", code: "STAT 311", term: "Autumn 2026" },
-    instructor: { userId: "user-2", email: "prof@uw.edu" },
-  }));
+  beforeEach(() => {
+    provisionMock.mockReset().mockResolvedValue({
+      status: "created", course: { id: "course-1", title: "Statistics", code: "STAT 311", term: "Autumn 2026" },
+      instructor: { userId: "user-2", email: "prof@uw.edu" },
+    });
+    getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
+    auditBestEffortMock.mockReset().mockResolvedValue(undefined);
+  });
 
   it("is super-admin only", async () => {
     expect((await post(false, { instructorEmail: "prof@uw.edu", title: "Statistics", code: "STAT 311", term: "Autumn 2026" })).status).toBe(403);
@@ -35,6 +46,13 @@ describe("POST /api/platform/courses", () => {
     expect(response.status).toBe(201);
     expect(provisionMock).toHaveBeenCalledWith(expect.anything(), expect.anything(), "u1", {
       instructorEmail: "prof@uw.edu", title: "Statistics", code: "STAT 311", term: "Autumn 2026",
+    });
+    expect(auditBestEffortMock).toHaveBeenCalledWith(expect.anything(), ["org-1"], {
+      actorUserId: "u1",
+      action: "course.created",
+      targetType: "course",
+      targetId: "course-1",
+      requestMetadata: { instructorUserId: "user-2" },
     });
   });
 

@@ -38,6 +38,9 @@ export const AUDIT_ACTIONS = {
   USER_PROVISIONED: "user.provisioned",
   USER_DEPROVISIONED: "user.deprovisioned",
   PROFILE_UPDATED: "profile.updated",
+  /** A super admin created a local course shell and assigned its initial
+   *  instructor. Canvas linking is deliberately a separate, optional event. */
+  COURSE_CREATED: "course.created",
   HOMEWORK_PUBLISHED: "homework.published",
   HOMEWORK_UNPUBLISHED: "homework.unpublished",
   HOMEWORK_HIDDEN: "homework.hidden",

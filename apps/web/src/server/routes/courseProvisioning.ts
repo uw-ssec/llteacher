@@ -6,6 +6,8 @@ import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import type { AppEnv } from "../context";
 import type { AuthContext } from "../middleware/roles";
 import { provisionInstructorCourse } from "../repositories/courseProvisioning";
+import { getOrgScopeForCourse } from "../repositories/organizations";
+import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 
 export async function provisionCourseHandler(c: Context<AppEnv>) {
   const auth = c.get("authContext") as AuthContext | undefined;
@@ -23,8 +25,9 @@ export async function provisionCourseHandler(c: Context<AppEnv>) {
   if (!/^\S+@\S+\.\S+$/.test(input.instructorEmail) || !input.title || !input.code || !input.term) {
     return c.json({ error: "Instructor email, title, code, and term are required" }, 400);
   }
+  const db = makeDb(c.env.DATABASE_URL);
   const result = await provisionInstructorCourse(
-    makeDb(c.env.DATABASE_URL),
+    db,
     new IdentityCipher(await loadIdentityCipherKeys(c.env)),
     auth.session.userId,
     input,
@@ -32,5 +35,13 @@ export async function provisionCourseHandler(c: Context<AppEnv>) {
   if (result.status === "organization_missing") return c.json({ error: "Create the institution first" }, 409);
   if (result.status === "duplicate_course") return c.json({ error: "That course code and term already exist" }, 409);
   if (result.status === "invalid_email") return c.json({ error: result.message }, 400);
+  const orgScope = await getOrgScopeForCourse(db, result.course.id);
+  await auditBestEffort(db, orgScope ? [orgScope] : [], {
+    actorUserId: auth.session.userId,
+    action: AUDIT_ACTIONS.COURSE_CREATED,
+    targetType: AUDIT_TARGET_TYPES.COURSE,
+    targetId: result.course.id,
+    requestMetadata: { instructorUserId: result.instructor.userId },
+  });
   return c.json({ course: result.course, instructor: result.instructor } satisfies ProvisionCourseResponse, 201);
 }
