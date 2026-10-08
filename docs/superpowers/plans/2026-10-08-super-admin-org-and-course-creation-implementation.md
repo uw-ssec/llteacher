@@ -398,21 +398,26 @@ Include the branch name, commit list, verification evidence, isolated Floci cont
 
 - Static checks passed: all five workspace typechecks, all production builds,
   and `git diff --check`.
-- Package tests passed sequentially: UI 310; web 2,013 with 544 environment-
-  gated skips; admin 457; evals 47 with 6 dataset skips; infrastructure 152
-  (56 Vitest plus 96 Node tests) with 1 production-only skip.
-- The five review-focus cases have direct coverage, including real-PostgreSQL
-  races/rollback and instructor/legacy Canvas credential boundaries.
+- Package suites passed: UI 310; web 2,020 with 547 environment-gated skips;
+  admin 458; evals 47 with 6 dataset skips; infrastructure 153 (57 Vitest
+  plus 96 Node tests) with 1 production-only skip.
+- The review-focus cases have direct coverage, including real-PostgreSQL
+  races/rollback, the real 0055-to-head duplicate-course upgrade path,
+  instructor/legacy Canvas credential boundaries, saved-course hydration,
+  post-commit auditing, and non-UW institution domains. Independent re-review
+  found no remaining Critical or Important issues.
 - Isolated emulator: `llteacher-floci-super-admin-org-course`; isolated state:
   `.floci/super-admin-org-course/data`; isolated Pulumi backend:
   `.pulumi/super-admin-org-course`; scratch RDS container:
   `floci-rds-db-7CA4016B0BCB434D9DD51BD3-45755a`.
 - Final image:
-  `000000000000.dkr.ecr.us-west-2.amazonaws.com/llteacher-local/app:super-admin-org-course-v2`
-  at `sha256:136a2de5b906736833a7a3adb50dacb14e0b3453c7801695b7f6a8f1b25ad450`.
-- All 58 migrations are applied. Immediately before handoff,
-  `organizations`, `courses`, `course_memberships`, and `users` each contained
-  zero rows.
+  `000000000000.dkr.ecr.us-west-2.amazonaws.com/llteacher-local/app:super-admin-org-course-v4`
+  at `sha256:60e67e41e9dee2f7a1f246faf54ff33d19d74876179594d38fbfc85d9493b60b`.
+- All 59 migrations are applied. The database was confirmed to contain zero
+  organizations, courses, course memberships, and users before the test URL
+  was exposed. Live acceptance activity then created the UW organization,
+  `Testing 001` course shell, one membership, and its two user records; that
+  user-created data is intentionally preserved.
 - `GET /api/health` returned that final image SHA, `/admin` returned 200, and
   `/api/auth/login` redirected to AuthKit with the already-registered
   `http://localhost:8080/api/auth/callback`. No WorkOS setting or object was
