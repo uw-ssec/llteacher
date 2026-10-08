@@ -3,7 +3,7 @@ type: Decision
 title: ShadCN lint enforces the shared UW design system
 description: "Both client apps and packages/ui use six ShadCN lint rules in CI, with shared-theme discovery, explicit component contracts, and screenshot review."
 tags: [design-system, lint, ui]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-08T20:52:12Z" }
+generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-08T21:04:31Z" }
 status: stable
 ---
 
@@ -18,7 +18,7 @@ scripts/design-system-screenshots.mjs renders real clients with deterministic AP
 The owner's standing rule for UI work: load the visual-design skill and keep `npm run lint` (this policy) clean. Two practical consequences:
 
 - A new class is "unknown" to `shadcn/no-unknown-classes` until it is defined in a stylesheet `design-system.lint.css` imports (packages/ui/styles.css for shared and admin styles). Prefer existing classes; when one is needed, define it there with tokens, as #484 did for `admin-form-lock`.
-- Lint does not prove rendering. `scripts/design-system-screenshots.mjs` renders both clients with fixtures at four widths in light and dark themes; run it for visible UI changes. It was NOT run for #484's admin LLM-config states (ownership chip, read-only shared config), which were verified in jsdom only.
+- Lint does not prove rendering. `scripts/design-system-screenshots.mjs` (`npm run screenshots:design-system`, with `npm run dev` serving 2311/2312) renders both clients with mocked APIs at four widths and fails on clipping or horizontal overflow; run it for visible UI changes, and add a screen when a change introduces a state no existing screen reaches. On 2026-10-08 it gained `admin-configs` and `admin-config-shared` (#484's non-admin states), and on its first run found a pre-existing overflow: the monospace model-id chip (`google/gemma-4-31b-it:free`) ran past the row at 320px. The overflow check now names the offending elements. Look at the PNGs too: the checks prove fit, not design (the same review caught a top-bar crumb saying "Edit" on a read-only page).
 
 # Related Concepts
 - [LLTeacher v2 system overview](../architecture/system-overview.md): The shared UI package and two clients are governed by this design-system lint policy.

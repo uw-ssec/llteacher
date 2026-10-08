@@ -1,4 +1,5 @@
 ## 2026-10-08
+* **Update**: Updated concept `decisions/design-system-lint.md`.
 * **Update**: Linked `project/current-state.md` to `facts/check-for-concurrent-work.md` (Read before picking up open work).
 * **Update**: Linked `facts/code-test-suite-quirks.md` to `decisions/org-admin-role-and-course-scoped-configs.md` (The change that surfaced these quirks).
 * **Update**: Linked `facts/code-test-suite-quirks.md` to `facts/code-typescript-and-install.md` (The other verification trap from the same session).
