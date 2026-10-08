@@ -3,7 +3,10 @@ import { render, screen, waitFor, cleanup, fireEvent, within } from "@testing-li
 import App, { FeedbackDashboardDataLoader } from "./App";
 import { AuthProvider } from "./components/AuthProvider";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  window.localStorage.clear();
+});
 
 function renderApp() {
   return render(
@@ -80,7 +83,7 @@ describe("App selected-course context", () => {
     renderApp();
 
     const picker = await screen.findByRole("combobox", { name: "Current course" }) as HTMLSelectElement;
-    expect(picker.value).toBe("course-b");
+    await waitFor(() => expect(picker.value).toBe("course-b"));
     await screen.findByRole("heading", { name: "BIO 180 · Winter 2027" });
     expect(window.localStorage.getItem("llteacher:admin-selected-course:u1")).toBe("course-b");
     window.localStorage.clear();

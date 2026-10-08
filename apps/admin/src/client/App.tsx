@@ -223,9 +223,12 @@ export default function App() {
     setSelectionHydratedForUser(userId);
   }, [userId]);
   const selectionReady = Boolean(userId && selectionHydratedForUser === userId);
+  // Render the first membership while the user-specific preference hydrates,
+  // but do not persist that temporary fallback. This avoids a "no course"
+  // flash without recreating the overwrite race the hydration gate prevents.
   const CURRENT_COURSE = selectionReady
     ? courses.find((course) => course.id === selectedCourseId) ?? courses[0]
-    : undefined;
+    : courses[0];
   const CURRENT_COURSE_ID = CURRENT_COURSE?.id;
 
   useEffect(() => {
