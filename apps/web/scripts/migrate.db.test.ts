@@ -222,7 +222,7 @@ describe.skipIf(!DATABASE_URL)("scripts/migrate.ts two-stage split (real DB, #34
   );
 
   it(
-    "0056 stops with remediation guidance before indexing case-only duplicate course identities",
+    "0057 stops with remediation guidance before indexing case-only duplicate course identities",
     async () => {
       const dbName = `llteacher_migrate_test_course_case_${crypto.randomUUID().replace(/-/g, "")}`;
       dbNames.push(dbName);
@@ -261,16 +261,16 @@ describe.skipIf(!DATABASE_URL)("scripts/migrate.ts two-stage split (real DB, #34
   );
 
   it(
-    "0058 stops with remediation guidance before normalizing duplicate course identities",
+    "0059 stops with remediation guidance before normalizing duplicate course identities",
     async () => {
       const dbName = `llteacher_migrate_test_course_identity_${crypto.randomUUID().replace(/-/g, "")}`;
       dbNames.push(dbName);
       const scratchUrl = await createScratchDatabase(adminPool, dbName);
-      const through0057 = buildFolderThrough("0057_uneven_bloodaxe");
+      const through0058 = buildFolderThrough("0058_naive_impossible_man");
       const pool = new Pool({ connectionString: scratchUrl });
       const db = drizzle(pool);
       try {
-        await applyMigrationsFolder(pool, db, through0057);
+        await applyMigrationsFolder(pool, db, through0058);
         await db.execute(sql`
           INSERT INTO organizations (id, slug, name)
           VALUES ('55555555-5555-4555-8555-555555555555', 'course-identity-org', 'Course Identity Org')
@@ -282,7 +282,7 @@ describe.skipIf(!DATABASE_URL)("scripts/migrate.ts two-stage split (real DB, #34
             ('66666666-6666-4666-8666-666666666662', '55555555-5555-4555-8555-555555555555', 'Two', ' STAT 311 ', ' Autumn 2026 ')
         `);
       } finally {
-        fs.rmSync(through0057, { recursive: true, force: true });
+        fs.rmSync(through0058, { recursive: true, force: true });
         await pool.end();
       }
 

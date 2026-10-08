@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
 import type { Db } from "../../db/client";
-import { makeNodeDb } from "../../db/nodeClient";
+import * as schema from "../../db/schema";
 import { courseMemberships, courses, organizations, users } from "../../db/schema";
+import { runMigrations } from "../../../scripts/migrate";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { listPlatformCourses, listPlatformInstructors } from "./platformListings";
@@ -20,17 +22,32 @@ describe.skipIf(!DATABASE_URL)("platform super-admin listings (real DB)", () => 
   let pendingUserId: string;
   let secondInstructorId: string;
   const suffix = crypto.randomUUID();
+  const databaseName = `llteacher_listings_test_${suffix.replace(/-/g, "")}`;
+  let adminPool: Pool;
+  let fixturePool: Pool | undefined;
+  let databaseCreated = false;
 
   beforeAll(async () => {
-    db = makeNodeDb(DATABASE_URL!);
+    // Listings read the deployment singleton and every platform grant. Give
+    // this suite its own database so other suites' organizations and cipher
+    // keys cannot affect it, regardless of seed data or parallel execution.
+    adminPool = new Pool({ connectionString: DATABASE_URL! });
+    await adminPool.query(`CREATE DATABASE ${databaseName}`);
+    databaseCreated = true;
+    const fixtureUrl = new URL(DATABASE_URL!);
+    fixtureUrl.pathname = `/${databaseName}`;
+    await runMigrations(fixtureUrl.toString());
+    fixturePool = new Pool({ connectionString: fixtureUrl.toString() });
+    db = drizzle(fixturePool, { schema }) as Db;
     cipher = new IdentityCipher(await loadIdentityCipherKeys({
       ENCRYPTION_KEY: process.env.ENCRYPTION_KEY ?? Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
       BLIND_INDEX_KEY: process.env.BLIND_INDEX_KEY ?? Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64"),
     } as Env));
-    const deployment = await db.query.organizations.findFirst({
-      where: eq(organizations.deploymentSingleton, true), columns: { id: true },
-    });
-    if (!deployment) throw new Error("platform listing DB test requires the deployment organization fixture");
+    const [deployment] = await db.insert(organizations).values({
+      name: "Deployment fixture",
+      slug: `deployment-${suffix}`,
+      deploymentSingleton: true,
+    }).returning({ id: organizations.id });
     deploymentOrgId = deployment.id;
 
     const [ordinary] = await db.insert(organizations).values({ name: "Other org", slug: `other-${suffix}` }).returning({ id: organizations.id });
@@ -65,14 +82,15 @@ describe.skipIf(!DATABASE_URL)("platform super-admin listings (real DB)", () => 
       { courseId: visibleCourseId, userId: secondInstructorId, role: "instructor" },
       { courseId: hiddenCourseId, userId: pendingUserId, role: "instructor" },
     ]);
-  });
+  }, 60_000);
 
   afterAll(async () => {
-    await db.delete(courses).where(eq(courses.id, visibleCourseId));
-    await db.delete(organizations).where(eq(organizations.id, ordinaryOrgId));
-    await db.delete(users).where(eq(users.id, signedInUserId));
-    await db.delete(users).where(eq(users.id, pendingUserId));
-    await db.delete(users).where(eq(users.id, secondInstructorId));
+    try {
+      await fixturePool?.end();
+      if (databaseCreated) await adminPool.query(`DROP DATABASE ${databaseName}`);
+    } finally {
+      await adminPool.end();
+    }
   });
 
   it("lists only deployment courses and decrypts their active instructor emails", async () => {
