@@ -45,7 +45,9 @@ function payload(row: typeof organizations.$inferSelect): OrganizationPayload {
 }
 
 export async function getDeploymentOrganization(db: Db): Promise<OrganizationPayload | null> {
-  const row = await db.query.organizations.findFirst();
+  const row = await db.query.organizations.findFirst({
+    where: eq(organizations.deploymentSingleton, true),
+  });
   return row ? payload(row) : null;
 }
 
@@ -60,6 +62,7 @@ export async function createDeploymentOrganization(
 ): Promise<{ created: boolean; organization: OrganizationPayload }> {
   const rows = await db.insert(organizations).values({
     name: input.name,
+    deploymentSingleton: true,
     slug: input.slug,
     allowedDomains: input.allowedDomains,
     workosOrganizationId: input.workosOrganizationId,

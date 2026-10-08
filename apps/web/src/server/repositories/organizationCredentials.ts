@@ -15,7 +15,7 @@
    a masked summary (safe to return to the console).
    -------------------------------------------------------------------------- */
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { organizationCredentials } from "../../db/schema";
 import type { OrgScope } from "./scope";
@@ -52,12 +52,14 @@ export async function getCanvasCredentialSummary(
   db: Db,
   cipher: IdentityCipher,
   orgScope: OrgScope,
+  ownerUserId: string,
 ): Promise<CanvasCredentialSummary | null> {
   const row = await db.query.organizationCredentials.findFirst({
     where: and(
       eq(organizationCredentials.organizationId, orgScope),
       eq(organizationCredentials.provider, PROVIDER),
       eq(organizationCredentials.label, CANVAS_CREDENTIAL_LABEL),
+      eq(organizationCredentials.ownerUserId, ownerUserId),
     ),
   });
   if (!row || !row.encryptedSecret || !row.canvasBaseUrl) return null;
@@ -72,6 +74,19 @@ export async function getCanvasCredentialSummary(
   };
 }
 
+export async function hasLegacyCanvasCredential(db: Db, orgScope: OrgScope): Promise<boolean> {
+  const row = await db.query.organizationCredentials.findFirst({
+    where: and(
+      eq(organizationCredentials.organizationId, orgScope),
+      eq(organizationCredentials.provider, PROVIDER),
+      eq(organizationCredentials.label, CANVAS_CREDENTIAL_LABEL),
+      sql`${organizationCredentials.ownerUserId} IS NULL`,
+    ),
+    columns: { id: true },
+  });
+  return row !== undefined;
+}
+
 /** Internal use only (canvas-api.ts callers: /validate, the course
  *  picker, the sync service) -- never call this from a route handler that
  *  serializes its return value straight into a response. */
@@ -79,12 +94,14 @@ export async function getDecryptedCanvasCredential(
   db: Db,
   cipher: IdentityCipher,
   orgScope: OrgScope,
+  ownerUserId: string,
 ): Promise<DecryptedCanvasCredential | null> {
   const row = await db.query.organizationCredentials.findFirst({
     where: and(
       eq(organizationCredentials.organizationId, orgScope),
       eq(organizationCredentials.provider, PROVIDER),
       eq(organizationCredentials.label, CANVAS_CREDENTIAL_LABEL),
+      eq(organizationCredentials.ownerUserId, ownerUserId),
     ),
   });
   if (!row || !row.encryptedSecret || !row.canvasBaseUrl) return null;
@@ -96,6 +113,25 @@ export async function getDecryptedCanvasCredential(
   };
 }
 
+export async function getDecryptedCanvasCredentialById(
+  db: Db,
+  cipher: IdentityCipher,
+  orgScope: OrgScope,
+  ownerUserId: string,
+  credentialId: string,
+): Promise<DecryptedCanvasCredential | null> {
+  const row = await db.query.organizationCredentials.findFirst({
+    where: and(
+      eq(organizationCredentials.id, credentialId),
+      eq(organizationCredentials.organizationId, orgScope),
+      eq(organizationCredentials.ownerUserId, ownerUserId),
+      eq(organizationCredentials.provider, PROVIDER),
+    ),
+  });
+  if (!row?.encryptedSecret || !row.canvasBaseUrl) return null;
+  return { id: row.id, token: await cipher.decryptString(row.encryptedSecret), canvasBaseUrl: row.canvasBaseUrl };
+}
+
 /** Creates the org's Canvas credential, or replaces it if one already
  *  exists -- "Replace token" (#73) is a full re-entry, not a diff, so this
  *  is one upsert rather than a separate create/update pair. rotatedAt is
@@ -105,6 +141,7 @@ export async function setCanvasCredential(
   db: Db,
   cipher: IdentityCipher,
   orgScope: OrgScope,
+  ownerUserId: string,
   input: { token: string; canvasBaseUrl: string; expiresAt: Date | null },
 ): Promise<{ id: string }> {
   const encryptedSecret = await cipher.encryptString(input.token);
@@ -113,6 +150,7 @@ export async function setCanvasCredential(
     .insert(organizationCredentials)
     .values({
       organizationId: orgScope,
+      ownerUserId,
       provider: PROVIDER,
       label: CANVAS_CREDENTIAL_LABEL,
       encryptedSecret,
@@ -122,10 +160,11 @@ export async function setCanvasCredential(
     })
     .onConflictDoUpdate({
       target: [
-        organizationCredentials.organizationId,
+        organizationCredentials.ownerUserId,
         organizationCredentials.provider,
         organizationCredentials.label,
       ],
+      targetWhere: sql`${organizationCredentials.ownerUserId} IS NOT NULL`,
       set: {
         encryptedSecret,
         canvasBaseUrl: input.canvasBaseUrl,
@@ -148,6 +187,7 @@ export async function setCanvasCredential(
 export async function deleteCanvasCredential(
   db: Db,
   orgScope: OrgScope,
+  ownerUserId: string,
 ): Promise<{ deleted: boolean; id?: string }> {
   const [deleted] = await db
     .delete(organizationCredentials)
@@ -156,6 +196,7 @@ export async function deleteCanvasCredential(
         eq(organizationCredentials.organizationId, orgScope),
         eq(organizationCredentials.provider, PROVIDER),
         eq(organizationCredentials.label, CANVAS_CREDENTIAL_LABEL),
+        eq(organizationCredentials.ownerUserId, ownerUserId),
       ),
     )
     .returning({ id: organizationCredentials.id });

@@ -548,6 +548,7 @@ export interface CanvasCredentialResponse {
     expiresAt: string | null;
     rotatedAt: string | null;
   } | null;
+  reconnectRequired?: boolean;
 }
 
 export interface CanvasCredentialBody {

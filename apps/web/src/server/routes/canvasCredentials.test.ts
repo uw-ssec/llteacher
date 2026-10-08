@@ -25,6 +25,7 @@ const getSummaryMock = vi.fn();
 const setCredentialMock = vi.fn();
 const deleteCredentialMock = vi.fn();
 const getDecryptedMock = vi.fn();
+const hasLegacyMock = vi.fn();
 const getOrgScopeForCourseMock = vi.fn();
 const auditBestEffortMock = vi.fn();
 const validateCanvasTokenMock = vi.fn();
@@ -34,6 +35,7 @@ vi.mock("../repositories/organizationCredentials", () => ({
   setCanvasCredential: (...a: unknown[]) => setCredentialMock(...a),
   deleteCanvasCredential: (...a: unknown[]) => deleteCredentialMock(...a),
   getDecryptedCanvasCredential: (...a: unknown[]) => getDecryptedMock(...a),
+  hasLegacyCanvasCredential: (...a: unknown[]) => hasLegacyMock(...a),
 }));
 vi.mock("../repositories/organizations", () => ({
   getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a),
@@ -96,6 +98,7 @@ beforeEach(() => {
     token: "super-secret-canvas-token",
     canvasBaseUrl: "https://uw.instructure.com",
   });
+  hasLegacyMock.mockReset().mockResolvedValue(false);
   getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
   auditBestEffortMock.mockReset().mockResolvedValue(undefined);
   validateCanvasTokenMock.mockReset().mockResolvedValue({ ok: true, canvasUserId: "1", name: "Lauren" });
@@ -155,6 +158,7 @@ describe("PUT credential", () => {
       {},
       expect.anything(),
       "org-1",
+      "u1",
       expect.objectContaining({ token: "raw-plaintext-token", canvasBaseUrl: "https://uw.instructure.com" }),
     );
     expect(auditBestEffortMock).toHaveBeenCalledWith(
@@ -189,6 +193,7 @@ describe("PUT credential", () => {
       {},
       expect.anything(),
       "org-1",
+      "u1",
       expect.objectContaining({ expiresAt: new Date("2026-12-01") }),
     );
   });
@@ -212,6 +217,7 @@ describe("PUT credential", () => {
       {},
       expect.anything(),
       "org-1",
+      "u1",
       expect.objectContaining({ canvasBaseUrl: "https://uw.instructure.com" }),
     );
   });

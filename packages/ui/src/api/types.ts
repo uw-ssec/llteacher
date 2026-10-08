@@ -485,6 +485,7 @@ export interface CanvasCredentialSummary {
 
 export interface CanvasCredentialResponse {
   credential: CanvasCredentialSummary | null;
+  reconnectRequired?: boolean;
 }
 
 export interface CanvasCredentialBody {

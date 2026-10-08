@@ -248,7 +248,7 @@ git commit -m "feat(admin): add instructor course switching"
 **Files:**
 
 - Modify: `apps/web/src/db/schema/identity.ts`
-- Create: `apps/web/src/db/migrations/0057_instructor_canvas_credentials.sql`
+- Create: `apps/web/src/db/migrations/0057_uneven_bloodaxe.sql`
 - Modify: `apps/web/src/server/repositories/organizationCredentials.ts`
 - Modify: `apps/web/src/server/repositories/organizationCredentials.test.ts`
 - Create: `apps/web/src/server/repositories/organizationCredentials.db.test.ts`
@@ -258,33 +258,33 @@ git commit -m "feat(admin): add instructor course switching"
 - Modify: `apps/web/src/server/routes/canvasSync.test.ts`
 - Modify: `packages/ui/src/api.ts`
 
-- [ ] **Step 1: Write failing ownership tests**
+- [x] **Step 1: Write failing ownership tests**
 
 Cover one instructor saving one credential and using it for two linked courses, another instructor seeing only an unconfigured state, refusal to link or sync with another instructor's credential, course sync loading the exact credential id stored on `lms_integrations`, co-instructor rebind using their own credential, and token responses remaining secret-free.
 
-- [ ] **Step 2: Write failing legacy-migration tests**
+- [x] **Step 2: Write failing legacy-migration tests**
 
 Create an old organization-owned Canvas credential with `owner_user_id IS NULL`; prove it is reported as reconnect-required and cannot be spent. Prove the migration does not infer ownership from course memberships or current integrations.
 
-- [ ] **Step 3: Run focused tests and observe ownership failures**
+- [x] **Step 3: Run focused tests and observe ownership failures**
 
 Run: `npm --workspace apps/web test -- --run src/server/repositories/organizationCredentials.test.ts src/server/routes/canvasCredentials.test.ts src/server/routes/canvasSync.test.ts`
 
-- [ ] **Step 4: Implement schema and repository ownership**
+- [x] **Step 4: Implement schema and repository ownership**
 
 Add nullable `ownerUserId` for safe legacy representation, remove the organization-wide uniqueness that blocks multiple instructors, add partial unique indexes for instructor-owned Canvas credentials and legacy rows, and update helpers to require `(organization scope, authenticated user id)` for normal read/write/delete. Add an explicit lookup-by-id used only after verifying the integration's credential owner matches the caller.
 
-- [ ] **Step 5: Update routes and linking/sync semantics**
+- [x] **Step 5: Update routes and linking/sync semantics**
 
 Expose the account credential endpoints as instructor-owned resources, bind a selected course integration to the current instructor's credential during Canvas linking, and make sync use that stored id while enforcing its owner. Preserve course authorization and base-URL validation. Do not add Canvas material import endpoints.
 
-- [ ] **Step 6: Run unit and real-DB tests**
+- [x] **Step 6: Run unit and real-DB tests**
 
 Run the command from Step 3, then run: `npm --workspace apps/web test -- --run src/server/repositories/organizationCredentials.db.test.ts src/server/routes/canvasProvisioning.integration.test.ts`
 
 Expected: PASS, including legacy reconnect behavior and cross-instructor denial.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add apps/web/src/db/schema/identity.ts apps/web/src/db/migrations/0057_instructor_canvas_credentials.sql apps/web/src/db/migrations/meta apps/web/src/server/repositories/organizationCredentials.ts apps/web/src/server/repositories/organizationCredentials.test.ts apps/web/src/server/repositories/organizationCredentials.db.test.ts apps/web/src/server/routes/canvasCredentials.ts apps/web/src/server/routes/canvasCredentials.test.ts apps/web/src/server/routes/canvasSync.ts apps/web/src/server/routes/canvasSync.test.ts packages/ui/src/api.ts
@@ -302,25 +302,25 @@ git commit -m "feat(canvas): scope credentials to instructors"
 - Modify: `apps/admin/src/client/App.tsx`
 - Modify: `apps/admin/src/client/App.test.tsx`
 
-- [ ] **Step 1: Write failing Canvas UI tests**
+- [x] **Step 1: Write failing Canvas UI tests**
 
 Test separate “My Canvas account” and “This course’s Canvas connection” sections; token setup once across multiple courses; per-course Canvas course selection; optional/unlinked course state; roster-only language; legacy reconnect-required state; switcher-driven course changes; and no token value rendered after save.
 
-- [ ] **Step 2: Run tests and observe the expected failures**
+- [x] **Step 2: Run tests and observe the expected failures**
 
 Run: `npm --workspace apps/admin test -- --run src/client/lib/api-client.test.ts src/client/views/CanvasIntegrationView.test.tsx src/client/App.test.tsx`
 
-- [ ] **Step 3: Implement the split account/course flow**
+- [x] **Step 3: Implement the split account/course flow**
 
 Use instructor-scoped credential endpoints for save/validate/delete and course-scoped endpoints for list/link/sync. Make linking optional, clearly state that only the roster imports, and direct materials to the existing Knowledge tab. When the selected course changes, reload only its connection while retaining the instructor account summary.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 Run the command from Step 2.
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/admin/src/client/lib/api-client.ts apps/admin/src/client/lib/api-client.test.ts apps/admin/src/client/views/CanvasIntegrationView.tsx apps/admin/src/client/views/CanvasIntegrationView.test.tsx apps/admin/src/client/App.tsx apps/admin/src/client/App.test.tsx

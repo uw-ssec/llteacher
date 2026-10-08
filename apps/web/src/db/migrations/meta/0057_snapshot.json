@@ -301,7 +301,7 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
-          "default": true
+          "default": false
         },
         "last_synced_at": {
           "name": "last_synced_at",
@@ -1108,6 +1108,7 @@
             }
           ],
           "isUnique": true,
+          "where": "\"organizations\".\"deployment_singleton\" = true",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1133,12 +1134,7 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {
-        "organizations_singleton_true": {
-          "name": "organizations_singleton_true",
-          "value": "\"organizations\".\"deployment_singleton\" = true"
-        }
-      },
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.users": {

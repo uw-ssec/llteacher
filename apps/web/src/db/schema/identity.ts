@@ -119,7 +119,7 @@ export const organizations = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     /** Database-enforced single institution per deployed LLTeacher stack. */
-    deploymentSingleton: boolean("deployment_singleton").notNull().default(true),
+    deploymentSingleton: boolean("deployment_singleton").notNull().default(false),
     slug: text("slug").notNull(),
     name: text("name").notNull(),
     workosOrganizationId: text("workos_organization_id"),
@@ -144,8 +144,9 @@ export const organizations = pgTable(
   },
   (t) => [
     uniqueIndex("organizations_slug_uq").on(t.slug),
-    uniqueIndex("organizations_singleton_uq").on(t.deploymentSingleton),
-    check("organizations_singleton_true", sql`${t.deploymentSingleton} = true`),
+    uniqueIndex("organizations_singleton_uq")
+      .on(t.deploymentSingleton)
+      .where(sql`${t.deploymentSingleton} = true`),
     uniqueIndex("organizations_workos_org_uq")
       .on(t.workosOrganizationId)
       .where(sql`${t.workosOrganizationId} IS NOT NULL`),
@@ -440,6 +441,10 @@ export const organizationCredentials = pgTable(
     organizationId: uuid("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
+    /** Canvas tokens are owned by the instructor who entered them. Null is
+     *  retained only for legacy organization-scoped rows, which must be
+     *  reconnected rather than assigned by guesswork. */
+    ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "cascade" }),
     provider: credentialProviderEnum("provider").notNull(),
     label: text("label").notNull(),
     secretRef: text("secret_ref"),
@@ -474,11 +479,12 @@ export const organizationCredentials = pgTable(
   },
   (t) => [
     index("organization_credentials_org_idx").on(t.organizationId),
-    uniqueIndex("organization_credentials_org_provider_label_uq").on(
-      t.organizationId,
-      t.provider,
-      t.label,
-    ),
+    uniqueIndex("organization_credentials_owner_provider_label_uq")
+      .on(t.ownerUserId, t.provider, t.label)
+      .where(sql`${t.ownerUserId} IS NOT NULL`),
+    uniqueIndex("organization_credentials_legacy_org_provider_label_uq")
+      .on(t.organizationId, t.provider, t.label)
+      .where(sql`${t.ownerUserId} IS NULL`),
     check(
       "organization_credentials_exactly_one_secret_shape_chk",
       sql`(${t.secretRef} IS NOT NULL) <> (${t.encryptedSecret} IS NOT NULL)`,

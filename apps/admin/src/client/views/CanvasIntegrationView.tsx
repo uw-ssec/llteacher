@@ -82,7 +82,7 @@ export function CanvasIntegrationView({
   // Kept in the prop type rather than removed so restoring it later (once
   // there's a real multi-course picker) is a one-line change here, not a
   // signature change at the call site too.
-  courseTitle: _courseTitle,
+  courseTitle,
 }: {
   courseId: string;
   courseTitle: string;
@@ -171,11 +171,13 @@ export function CanvasIntegrationView({
     fetch(`/api/courses/${courseId}/canvas/credential`, { signal })
       .then(async (r) => {
         if (!r.ok) throw new Error(await errorMessageFor(r, "Could not load Canvas token settings."));
-        return r.json() as Promise<{ credential: CanvasCredentialSummary | null }>;
+        return r.json() as Promise<{ credential: CanvasCredentialSummary | null; reconnectRequired?: boolean }>;
       })
       .then((data) => {
         setCredential(data.credential);
-        setCredentialError(null);
+        setCredentialError(data.reconnectRequired
+          ? "A legacy organization Canvas token cannot be assigned safely. Reconnect with your own Canvas token."
+          : null);
         setCredentialLoadFailed(false);
         if (data.credential) setBaseUrlInput(data.credential.canvasBaseUrl);
       })
@@ -310,17 +312,16 @@ export function CanvasIntegrationView({
       announce("Still removing the Canvas token — please wait.");
       return;
     }
-    // #10 (usability review, PR #457): the previous wording never stated
-    // the blast radius (org-wide, not just this course) or the undo path.
+    // Name the instructor-owned blast radius and the undo path.
     // Matches this codebase's own confirm-dialog convention elsewhere
     // (StudentsView/TaCapabilitiesView): name the subject, state the
     // consequence, state what's preserved, state the undo path.
     const confirmed = window.confirm(
-      "Remove this organization's Canvas token?\n\n" +
-        "This token is shared by every course in your organization that syncs from Canvas -- " +
-        "ALL of them stop being able to sync the moment it's removed, not just this course. " +
+      "Remove your Canvas token?\n\n" +
+        "Courses you linked with this credential will stop syncing until you reconnect them. " +
+        "No other instructor's Canvas account is affected. " +
         "Rosters already synced are kept; no one loses access because of this. " +
-        "Enter a new token any time to restore syncing everywhere.",
+        "Enter a new token any time to restore syncing.",
     );
     if (!confirmed) return;
     deletingCredentialRef.current = true;
@@ -543,7 +544,7 @@ export function CanvasIntegrationView({
       <PageHeader
         eyebrow="CANVAS INTEGRATION"
         title="Canvas"
-        subtitle="Connect this organization's Canvas account and keep a course roster in sync from it."
+        subtitle="Connect your Canvas account once, then optionally link this course for roster imports."
       />
 
       {/* #5 (accessibility review, PR #457, ACC-004): the ONE always-mounted
@@ -559,7 +560,7 @@ export function CanvasIntegrationView({
       </div>
 
       <section aria-labelledby="canvas-token-heading">
-        <h2 id="canvas-token-heading">Canvas API token</h2>
+        <h2 id="canvas-token-heading">My Canvas account</h2>
 
         {credentialError && (
           <div className="admin-alert">
@@ -771,7 +772,10 @@ export function CanvasIntegrationView({
 
       {credential && (
         <section aria-labelledby="canvas-sync-heading">
-          <h2 id="canvas-sync-heading">Course roster sync</h2>
+          <h2 id="canvas-sync-heading">This course's Canvas connection</h2>
+          <p className="admin-form-hint">
+            {courseTitle} uses Canvas only for roster enrollment imports. Add files and teaching materials from the Knowledge tab.
+          </p>
 
           {statusError && (
             <div className="admin-alert">

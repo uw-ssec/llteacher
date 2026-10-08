@@ -21,6 +21,7 @@ import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
 
 const getDecryptedMock = vi.fn();
+const getDecryptedByIdMock = vi.fn();
 const getOrgScopeForCourseMock = vi.fn();
 const getLmsIntegrationMock = vi.fn();
 const linkCanvasCourseMock = vi.fn();
@@ -33,6 +34,7 @@ const syncCanvasRosterMock = vi.fn();
 
 vi.mock("../repositories/organizationCredentials", () => ({
   getDecryptedCanvasCredential: (...a: unknown[]) => getDecryptedMock(...a),
+  getDecryptedCanvasCredentialById: (...a: unknown[]) => getDecryptedByIdMock(...a),
 }));
 vi.mock("../repositories/organizations", () => ({
   getOrgScopeForCourse: (...a: unknown[]) => getOrgScopeForCourseMock(...a),
@@ -101,6 +103,7 @@ const INTEGRATION = {
 
 beforeEach(() => {
   getDecryptedMock.mockReset().mockResolvedValue(CREDENTIAL);
+  getDecryptedByIdMock.mockReset().mockResolvedValue(CREDENTIAL);
   getOrgScopeForCourseMock.mockReset().mockResolvedValue("org-1");
   getLmsIntegrationMock.mockReset().mockResolvedValue(INTEGRATION);
   linkCanvasCourseMock.mockReset().mockResolvedValue({ outcome: "linked", lmsIntegrationId: "lms-1" });
@@ -142,7 +145,7 @@ describe("GET courses (course picker)", () => {
     const res = await buildApp(instructorOfA()).request(url("/courses"), {}, TEST_ENV);
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toMatch(/Canvas API token/i);
+    expect(body.error).toMatch(/Canvas account/i);
   });
 
   it("reports a 503 with an actionable message when Canvas can't be reached", async () => {
@@ -232,6 +235,14 @@ describe("PUT link", () => {
 });
 
 describe("POST sync", () => {
+  it("refuses to spend a credential owned by another instructor", async () => {
+    getDecryptedByIdMock.mockResolvedValue(null);
+    const res = await buildApp(instructorOfA()).request(url("/sync"), { method: "POST" }, TEST_ENV);
+    expect(res.status).toBe(409);
+    expect(syncCanvasRosterMock).not.toHaveBeenCalled();
+    expect(getDecryptedByIdMock).toHaveBeenCalledWith({}, expect.anything(), "org-1", "u1", "cred-1");
+  });
+
   it("runs the sync, records success status, and audits", async () => {
     const res = await buildApp(instructorOfA()).request(url("/sync"), { method: "POST" }, TEST_ENV);
     expect(res.status).toBe(200);
