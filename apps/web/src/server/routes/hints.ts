@@ -1,11 +1,10 @@
-import { type Context } from "hono";
-import { makeDb } from "../../db/client";
+import { Effect } from "effect";
 import { UUID_RE } from "../utils/uuid";
 import { getSectionHintStatus } from "../repositories/hints";
-import { courseScopeFromAuthContext } from "../repositories/scope";
-import type { AuthContext } from "../middleware/roles";
-import type { AppEnv } from "../context";
 import type { HintCountResponse } from "../../shared/types";
+import { NotFound } from "../effect/errors";
+import { effectHandler, requireCourseAccess } from "../effect/http";
+import { query } from "../effect/services";
 
 /* --------------------------------------------------------------------------
    #80: GET /api/courses/:courseId/sections/:sectionId/hints -- the caller's
@@ -18,28 +17,24 @@ import type { HintCountResponse } from "../../shared/types";
    a hint) happen only through /api/chat's own isHintRequest envelope flag
    (chat.ts), never through this route -- this is read-only.
    -------------------------------------------------------------------------- */
-export async function getSectionHintsHandler(c: Context<AppEnv>) {
-  const courseId = c.req.param("courseId");
+export const getSectionHintsHandler = effectHandler((c) => Effect.gen(function* () {
+  const { authContext, scope } = yield* requireCourseAccess(c);
   const sectionId = c.req.param("sectionId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
-
-  const scope = authContext && courseId ? courseScopeFromAuthContext(authContext, courseId) : null;
-  if (!scope || !authContext) {
-    return c.json({ error: "Course access denied" }, 403);
-  }
   // #206/#172 audit (SEC-020): shape-checked before reaching a uuid-typed
   // column comparison -- see getSectionAnswerHandler's identical guard
   // (routes/sectionAnswers.ts) for why a malformed value must 404 here
   // rather than fall through to Postgres's own "invalid input syntax" (a
-  // generic 503 via app.onError).
+  // generic 503).
   if (!sectionId || !UUID_RE.test(sectionId)) {
-    return c.json({ error: "Section not found" }, 404);
+    return yield* new NotFound({ message: "Section not found" });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const status = await getSectionHintStatus(db, scope, sectionId, authContext.session.userId);
-  if (!status) return c.json({ error: "Section not found" }, 404);
+  const status = yield* query(
+    "getSectionHintStatus",
+    (db) => getSectionHintStatus(db, scope, sectionId, authContext.session.userId),
+  );
+  if (!status) return yield* new NotFound({ message: "Section not found" });
 
   const responseBody: HintCountResponse = status;
   return c.json(responseBody);
-}
+}));

@@ -114,7 +114,7 @@ import {
   requireSuperAdmin,
 } from "./utils/guards";
 import { SERVICE_UNAVAILABLE_MESSAGE, logServerError } from "./utils/errors";
-import { TenancyMismatchError, IdempotencyKeyConflictError, PromptTemplateConflictError } from "./repositories/errors";
+import { errorResponse, fromThrown } from "./effect/http";
 import type { AppEnv } from "./context";
 
 /** Exported so route-level suites can call `app.request(path, init, env)` and
@@ -136,28 +136,13 @@ export const app = new Hono<AppEnv>();
 // "Tenancy Mismatch Errors" section. Checked before the generic case so it
 // takes precedence.
 app.onError((err, c) => {
-  if (err instanceof TenancyMismatchError) {
-    return c.json({ error: "Not found" }, 404);
-  }
-  // #266: appendMessage throws this when a client reuses a clientMessageId
-  // for different content than the row already stored under it -- the
-  // request is well-formed and the caller is who they say they are, the id
-  // just collides. 409, not a silent 200 that discards the new message.
-  //
-  // Carries the same `code` chatHandler's own local catch (routes/chat.ts)
-  // returns, so the two paths are indistinguishable to readErrorMessage
-  // (packages/ui) -- a body with no `code` at all falls into its `default`
-  // branch, which is both retryable and worded as a model failure ("The
-  // tutor didn't finish answering"), neither of which is true here.
-  if (err instanceof IdempotencyKeyConflictError) {
-    return c.json({ error: err.message, code: "duplicate_message" }, 409);
-  }
-  // #317 review, code-review follow-up: same 409 treatment as
-  // IdempotencyKeyConflictError above -- a well-formed request that lost a
-  // genuine race against another writer, not a server-side failure.
-  if (err instanceof PromptTemplateConflictError) {
-    return c.json({ error: err.message }, 409);
-  }
+  // The typed answers (#141 TenancyMismatchError -> 404, #266
+  // IdempotencyKeyConflictError -> 409 duplicate_message, #317
+  // PromptTemplateConflictError -> 409) live in effect/http.ts's
+  // errorResponse, shared with every Effect handler so a thrown refusal and
+  // a failed one are answered identically.
+  const typed = fromThrown(err);
+  if (typed) return errorResponse(c, typed);
   logServerError("server", err);
   return c.json({ error: SERVICE_UNAVAILABLE_MESSAGE }, 503);
 });

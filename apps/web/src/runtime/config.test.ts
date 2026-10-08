@@ -13,7 +13,8 @@ vi.mock("drizzle-orm/node-postgres", () => ({
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { closeDb, makeDb } from "../db/client";
-import { loadRuntimeConfig } from "./config";
+import { Effect } from "effect";
+import { loadRuntimeConfig, runtimeConfig } from "./config";
 
 const runtimeEnvironment = {
   APP_URL: "https://llteacher.example.edu",
@@ -119,5 +120,23 @@ describe("makeDb", () => {
     expect(() => makeDb("postgres://other:secret@localhost/other")).toThrow(
       "closeDb",
     );
+  });
+});
+
+describe("runtimeConfig", () => {
+  it("reports every missing or invalid variable in one typed RuntimeConfigError", async () => {
+    const { DATABASE_URL: _db, SESSION_SECRET: _session, ...rest } = runtimeEnvironment;
+    const error = await Effect.runPromise(Effect.flip(runtimeConfig({ ...rest, APP_URL: "https://x.edu/path" })));
+    expect(error._tag).toBe("RuntimeConfigError");
+    expect(error.problems).toEqual([
+      "APP_URL must be an absolute HTTP(S) origin with no path, query, hash, or credentials",
+      "DATABASE_URL is required",
+      "SESSION_SECRET is required",
+    ]);
+  });
+
+  it("names all of them in the startup error too", () => {
+    const { DATABASE_URL: _db, WORKOS_API_KEY: _key, ...rest } = runtimeEnvironment;
+    expect(() => loadRuntimeConfig(rest)).toThrow("DATABASE_URL is required; WORKOS_API_KEY is required");
   });
 });

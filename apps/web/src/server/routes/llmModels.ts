@@ -21,11 +21,13 @@
    allowlist (#323) landed first.
    -------------------------------------------------------------------------- */
 
-import { type Context } from "hono";
+import { Effect } from "effect";
 import { LLMOXIE_DEFAULT_BASE_URL } from "../../lib/ai";
 import { logServerError } from "../utils/errors";
 import type { AuthContext } from "../middleware/roles";
-import type { AppEnv } from "../context";
+import { ExternalServiceError, Forbidden } from "../effect/errors";
+import { effectHandler } from "../effect/http";
+import { external } from "../effect/services";
 
 /** The gateway can be slow or unreachable; a model picker is not worth
  *  holding a worker request open indefinitely for. */
@@ -38,14 +40,27 @@ interface ModelListResponse {
   models: string[];
 }
 
-export async function listLlmModelsHandler(c: Context<AppEnv>) {
+/** Each way the gateway call can fail, keyed by the ExternalServiceError
+ *  `operation` that names it, with the sentence the client is told. All of
+ *  them are 502: the gateway, not this server, is what failed. */
+const GATEWAY_FAILURES: Record<string, string> = {
+  fetch: "Could not reach the model gateway.",
+  upstream: "The model gateway rejected the request.",
+  parse: "The model gateway returned an unreadable response.",
+  shape: "The model gateway returned an unexpected response.",
+};
+
+const gatewayFailure = (operation: keyof typeof GATEWAY_FAILURES, cause: unknown) =>
+  new ExternalServiceError({ service: "llm", operation, cause });
+
+export const listLlmModelsHandler = effectHandler((c) => Effect.gen(function* () {
   const courseId = c.req.param("courseId");
   const authContext = c.get("authContext") as AuthContext | undefined;
 
   // requireInstructorOf already verified this; guarded again here to match
   // every sibling authoring-surface handler.
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
-    return c.json({ error: "Course access denied" }, 403);
+    return yield* new Forbidden({ message: "Course access denied" });
   }
 
   const apiKey = c.env.LLMOXIE_API_KEY;
@@ -64,53 +79,42 @@ export async function listLlmModelsHandler(c: Context<AppEnv>) {
 
   const baseUrl = c.env.LLMOXIE_BASE_URL || LLMOXIE_DEFAULT_BASE_URL;
 
-  let res: Response;
-  try {
-    res = await fetch(`${baseUrl}/models`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
-    });
-  } catch (err) {
-    // Covers both the timeout and a DNS/TLS failure. The gateway host is a
-    // generated Azure name that does not survive its environment being
-    // recreated, so "unreachable" is a state worth naming in the log.
-    logServerError("listLlmModelsHandler.fetch", err);
-    return c.json({ error: "Could not reach the model gateway." }, 502);
-  }
-
-  if (!res.ok) {
-    // Body is not forwarded: an upstream error body can carry gateway detail
-    // the instructor has no business seeing, and this is the same
-    // information-disclosure shape the audit flagged on the chat stream.
-    logServerError(
-      "listLlmModelsHandler.upstream",
-      new Error(`Gateway returned ${res.status}`),
+  return yield* Effect.gen(function* () {
+    // A rejection covers both the timeout and a DNS/TLS failure. The gateway
+    // host is a generated Azure name that does not survive its environment
+    // being recreated, so "unreachable" is a state worth naming in the log.
+    const res = yield* external("llm", "fetch", () =>
+      fetch(`${baseUrl}/models`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+      }),
     );
-    return c.json({ error: "The model gateway rejected the request." }, 502);
-  }
 
-  let payload: unknown;
-  try {
-    payload = await res.json();
-  } catch (err) {
-    logServerError("listLlmModelsHandler.parse", err);
-    return c.json({ error: "The model gateway returned an unreadable response." }, 502);
-  }
+    if (!res.ok) {
+      // Body is not forwarded: an upstream error body can carry gateway detail
+      // the instructor has no business seeing, and this is the same
+      // information-disclosure shape the audit flagged on the chat stream.
+      return yield* gatewayFailure("upstream", new Error(`Gateway returned ${res.status}`));
+    }
 
-  const data = (payload as { data?: unknown })?.data;
-  if (!Array.isArray(data)) {
-    logServerError(
-      "listLlmModelsHandler.shape",
-      new Error("Gateway response had no `data` array"),
-    );
-    return c.json({ error: "The model gateway returned an unexpected response." }, 502);
-  }
+    const payload: unknown = yield* external("llm", "parse", () => res.json());
 
-  const models = data
-    .map((m) => (typeof m === "object" && m !== null ? (m as { id?: unknown }).id : undefined))
-    .filter((id): id is string => typeof id === "string" && id.length > 0)
-    .sort((a, b) => a.localeCompare(b));
+    const data = (payload as { data?: unknown })?.data;
+    if (!Array.isArray(data)) {
+      return yield* gatewayFailure("shape", new Error("Gateway response had no `data` array"));
+    }
 
-  const body: ModelListResponse = { models };
-  return c.json(body);
-}
+    const models = data
+      .map((m) => (typeof m === "object" && m !== null ? (m as { id?: unknown }).id : undefined))
+      .filter((id): id is string => typeof id === "string" && id.length > 0)
+      .sort((a, b) => a.localeCompare(b));
+
+    const body: ModelListResponse = { models };
+    return c.json(body);
+  }).pipe(Effect.catchTag("ExternalServiceError", (err) => Effect.sync(() => {
+    // 502 with its own sentence rather than the bridge's generic 503: the
+    // instructor's picker shows which of these happened.
+    logServerError(`listLlmModelsHandler.${err.operation}`, err.cause);
+    return c.json({ error: GATEWAY_FAILURES[err.operation] ?? GATEWAY_FAILURES.fetch }, 502);
+  })));
+}));

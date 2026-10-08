@@ -10,8 +10,9 @@ vi.mock("../../db/client", () => ({
   makeDb: () => ({}),
 }));
 
+const createPingMock = vi.fn(async () => ({ id: "00000000-0000-0000-0000-000000000001", message: "mocked" }));
 vi.mock("../repositories/pings", () => ({
-  createPing: async () => ({ id: "00000000-0000-0000-0000-000000000001", message: "mocked" }),
+  createPing: () => createPingMock(),
 }));
 
 describe("GET /api/hello", () => {
@@ -31,5 +32,15 @@ describe("GET /api/hello", () => {
     const body = (await res.json()) as { message: string; ping_id: string };
     expect(body.message).toContain("stub");
     expect(body.ping_id).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+describe("GET /api/hello -- database failure", () => {
+  it("answers 503 when createPing fails", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    createPingMock.mockRejectedValueOnce(new Error("Connection terminated unexpectedly"));
+    const res = await hello.request("/", {}, { DATABASE_URL: "ignored" } as Env);
+    expect(res.status).toBe(503);
+    consoleSpy.mockRestore();
   });
 });

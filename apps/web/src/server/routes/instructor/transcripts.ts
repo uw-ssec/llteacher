@@ -1,5 +1,4 @@
-import { type Context } from "hono";
-import { makeDb } from "../../../db/client";
+import { Effect } from "effect";
 import { UUID_RE } from "../../utils/uuid";
 import {
   listInstructorTranscripts,
@@ -14,8 +13,9 @@ import { courseScopeFromAuthContext } from "../../repositories/scope";
 import { loadIdentityCipherKeys } from "../../../lib/secrets-loader";
 import { IdentityCipher } from "../../../lib/crypto/identity-cipher";
 import { canReadCourseTranscripts, recordTranscriptAccess } from "../../../lib/instructor-authz";
-import type { AuthContext } from "../../middleware/roles";
-import type { AppEnv } from "../../context";
+import { BadRequest, Forbidden, NotFound } from "../../effect/errors";
+import { effectHandler } from "../../effect/http";
+import { AppConfig, query } from "../../effect/services";
 
 /* --------------------------------------------------------------------------
    Instructor transcript viewer routes (#29).
@@ -44,23 +44,35 @@ function isValidUuidParam(value: string | undefined): value is string {
   return value !== undefined && UUID_RE.test(value);
 }
 
-export async function listInstructorTranscriptsHandler(c: Context<AppEnv>) {
+/** Same body whether the id is malformed, missing, another grader's test
+ *  run, or unreleased -- see getInstructorTranscriptHandler. */
+const transcriptNotFound = () => new NotFound({ message: "Transcript not found" });
+
+/** The identity cipher for this request. Missing or malformed key material
+ *  is a deployment fault, not a request outcome: it stays a defect, which
+ *  the bridge logs and answers 503 -- the same answer app.onError gave. */
+const identityCipher = Effect.gen(function* () {
+  const env = yield* AppConfig;
+  return new IdentityCipher(yield* Effect.promise(() => loadIdentityCipherKeys(env)));
+});
+
+export const listInstructorTranscriptsHandler = effectHandler((c) => Effect.gen(function* () {
   const courseId = c.req.param("courseId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
+  const authContext = c.get("authContext");
 
   if (!authContext || !courseId || !canReadCourseTranscripts(authContext, courseId)) {
-    return c.json({ error: "Grader access denied" }, 403);
+    return yield* new Forbidden({ message: "Grader access denied" });
   }
   const scope = courseScopeFromAuthContext(authContext, courseId);
-  if (!scope) return c.json({ error: "Course access denied" }, 403);
+  if (!scope) return yield* new Forbidden({ message: "Course access denied" });
 
   const sectionIdParam = c.req.query("sectionId");
   if (sectionIdParam !== undefined && !UUID_RE.test(sectionIdParam)) {
-    return c.json({ error: "sectionId must be a valid uuid" }, 400);
+    return yield* new BadRequest({ message: "sectionId must be a valid uuid" });
   }
   const studentIdParam = c.req.query("studentId");
   if (studentIdParam !== undefined && !UUID_RE.test(studentIdParam)) {
-    return c.json({ error: "studentId must be a valid uuid" }, 400);
+    return yield* new BadRequest({ message: "studentId must be a valid uuid" });
   }
 
   const limitParam = c.req.query("limit");
@@ -68,7 +80,7 @@ export async function listInstructorTranscriptsHandler(c: Context<AppEnv>) {
   if (limitParam !== undefined) {
     const parsed = Number(limitParam);
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 200) {
-      return c.json({ error: "limit must be an integer between 1 and 200" }, 400);
+      return yield* new BadRequest({ message: "limit must be an integer between 1 and 200" });
     }
     limit = parsed;
   }
@@ -77,19 +89,21 @@ export async function listInstructorTranscriptsHandler(c: Context<AppEnv>) {
   if (offsetParam !== undefined) {
     const parsed = Number(offsetParam);
     if (!Number.isInteger(parsed) || parsed < 0) {
-      return c.json({ error: "offset must be a non-negative integer" }, 400);
+      return yield* new BadRequest({ message: "offset must be a non-negative integer" });
     }
     offset = parsed;
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-  const result = await listInstructorTranscripts(db, scope, cipher, authContext.session.userId, {
-    sectionId: sectionIdParam,
-    studentId: studentIdParam,
-    limit,
-    offset,
-  });
+  const cipher = yield* identityCipher;
+  const result = yield* query(
+    "listInstructorTranscripts",
+    (db) => listInstructorTranscripts(db, scope, cipher, authContext.session.userId, {
+      sectionId: sectionIdParam,
+      studentId: studentIdParam,
+      limit,
+      offset,
+    }),
+  );
 
   // #208/#366 merge: a transcript's own content (greeting + replay, built
   // from the section as it stood at conversation-start time) is unreleased
@@ -109,12 +123,12 @@ export async function listInstructorTranscriptsHandler(c: Context<AppEnv>) {
   // FERPA audit -- best-effort, never blocks the response (see
   // recordTranscriptAccess's own doc comment for why this is a real write,
   // not the no-op the issue's own text describes).
-  const orgScope = await getOrgScopeForCourse(db, courseId);
-  await recordTranscriptAccess(db, orgScope, {
+  const orgScope = yield* query("getOrgScopeForCourse", (db) => getOrgScopeForCourse(db, courseId));
+  yield* query("recordTranscriptAccess", (db) => recordTranscriptAccess(db, orgScope, {
     viewerId: authContext.session.userId,
     courseId,
     action: "list",
-  });
+  }));
 
   return c.json({
     items: visibleItems.map((item) => ({
@@ -136,7 +150,7 @@ export async function listInstructorTranscriptsHandler(c: Context<AppEnv>) {
     limit,
     offset,
   });
-}
+}));
 
 /** Full transcript reads are one page at a time (an instructor reading a
  *  student's record wants the whole thing, not an incrementally-scrolled
@@ -173,21 +187,21 @@ export async function listInstructorTranscriptsHandler(c: Context<AppEnv>) {
  *  academic-integrity case file", which is what #91 is for. */
 const TRANSCRIPT_DETAIL_MESSAGE_LIMIT = 1000;
 
-export async function getInstructorTranscriptHandler(c: Context<AppEnv>) {
+export const getInstructorTranscriptHandler = effectHandler((c) => Effect.gen(function* () {
   const courseId = c.req.param("courseId");
   const conversationId = c.req.param("conversationId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
+  const authContext = c.get("authContext");
 
   if (!authContext || !courseId || !canReadCourseTranscripts(authContext, courseId)) {
-    return c.json({ error: "Grader access denied" }, 403);
+    return yield* new Forbidden({ message: "Grader access denied" });
   }
   const scope = courseScopeFromAuthContext(authContext, courseId);
-  if (!scope) return c.json({ error: "Course access denied" }, 403);
+  if (!scope) return yield* new Forbidden({ message: "Course access denied" });
   // Same not-found shape whether the id is malformed or genuinely missing --
   // shape must never be an existence oracle (SEC-020/#211, matched here from
   // routes/sectionConversations.ts's own notFound() convention).
   if (!isValidUuidParam(conversationId)) {
-    return c.json({ error: "Transcript not found" }, 404);
+    return yield* transcriptNotFound();
   }
 
   // #371: same non-negative-integer validation shape as
@@ -197,15 +211,17 @@ export async function getInstructorTranscriptHandler(c: Context<AppEnv>) {
   if (offsetParam !== undefined) {
     const parsed = Number(offsetParam);
     if (!Number.isInteger(parsed) || parsed < 0) {
-      return c.json({ error: "offset must be a non-negative integer" }, 400);
+      return yield* new BadRequest({ message: "offset must be a non-negative integer" });
     }
     offset = parsed;
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-  const detail = await getInstructorTranscriptDetail(db, scope, cipher, conversationId);
-  if (!detail) return c.json({ error: "Transcript not found" }, 404);
+  const cipher = yield* identityCipher;
+  const detail = yield* query(
+    "getInstructorTranscriptDetail",
+    (db) => getInstructorTranscriptDetail(db, scope, cipher, conversationId),
+  );
+  if (!detail) return yield* transcriptNotFound();
 
   // #246: the exact per-row rule the student-facing detail read already
   // enforces (getSectionConversationHandler) -- reused, not re-derived, so
@@ -216,7 +232,7 @@ export async function getInstructorTranscriptHandler(c: Context<AppEnv>) {
     { ownerUserId: detail.ownerUserId, isTeacherTest: detail.isTeacherTest },
     { userId: authContext.session.userId, isGrader: authContext.isGraderOf(courseId) },
   );
-  if (!allowed) return c.json({ error: "Transcript not found" }, 404);
+  if (!allowed) return yield* transcriptNotFound();
 
   // #208/#366 merge: see listInstructorTranscriptsHandler's own comment --
   // same release gate, applied to the single-conversation read. 404, not
@@ -226,23 +242,21 @@ export async function getInstructorTranscriptHandler(c: Context<AppEnv>) {
   // the conversation is missing, another grader's teacher-test, or simply
   // currently unreleased.
   if (!authContext.canViewDraftsIn(courseId) && isUnreleased(detail.homeworkStatus)) {
-    return c.json({ error: "Transcript not found" }, 404);
+    return yield* transcriptNotFound();
   }
 
-  const messages = await getSectionConversationMessagesFromStart(
-    db,
-    conversationId,
-    TRANSCRIPT_DETAIL_MESSAGE_LIMIT,
-    offset,
+  const messages = yield* query(
+    "getSectionConversationMessagesFromStart",
+    (db) => getSectionConversationMessagesFromStart(db, conversationId, TRANSCRIPT_DETAIL_MESSAGE_LIMIT, offset),
   );
 
-  const orgScope = await getOrgScopeForCourse(db, courseId);
-  await recordTranscriptAccess(db, orgScope, {
+  const orgScope = yield* query("getOrgScopeForCourse", (db) => getOrgScopeForCourse(db, courseId));
+  yield* query("recordTranscriptAccess", (db) => recordTranscriptAccess(db, orgScope, {
     viewerId: authContext.session.userId,
     courseId,
     conversationId,
     action: "detail",
-  });
+  }));
 
   return c.json({
     conversation: {
@@ -271,4 +285,4 @@ export async function getInstructorTranscriptHandler(c: Context<AppEnv>) {
     hasMore: messages.length === TRANSCRIPT_DETAIL_MESSAGE_LIMIT,
     offset,
   });
-}
+}));

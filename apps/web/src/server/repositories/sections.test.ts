@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planSectionDiff, type ExistingSection } from "./sections";
+import { ContentDiffError, planSectionDiff, type ExistingSection } from "./sections";
 
 const existing: ExistingSection[] = [
   { id: "s1", order: 1, title: "Sample spaces", content: "c1", solutionId: "sol1", type: "conversation" },
@@ -115,5 +115,19 @@ describe("planSectionDiff", () => {
     expect(() =>
       planSectionDiff(existing, [{ id: "does-not-exist", title: "X", content: "c", order: 1 }]),
     ).toThrow(/unknown section id/i);
+  });
+
+  // Typed so PATCH /homeworks/:id can answer 422 by class, not by message.
+  it("throws a ContentDiffError for every client-input refusal", () => {
+    expect(() =>
+      planSectionDiff(existing, [{ id: "does-not-exist", title: "X", content: "c", order: 1 }]),
+    ).toThrow(ContentDiffError);
+  });
+
+  // sections_order_range_chk (1-20) used to be reached as a raw Postgres
+  // check violation; refused up front instead, so it stays a 422.
+  it.each([0, 21, 1.5])("refuses an out-of-range order %s before it reaches the database", (order) => {
+    expect(() => planSectionDiff([], [{ title: "A", content: "c", order }])).toThrow(ContentDiffError);
+    expect(() => planSectionDiff([], [{ title: "A", content: "c", order }])).toThrow(/out of range/i);
   });
 });

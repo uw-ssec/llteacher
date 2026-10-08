@@ -17,6 +17,7 @@ import {
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
+import { SERVICE_UNAVAILABLE_MESSAGE } from "../utils/errors";
 
 const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
 const MEMBERSHIP_ID = "11111111-2222-4333-8444-555555555555";
@@ -311,5 +312,27 @@ describe("DELETE /roster/:membershipId (#32)", () => {
   it("404s a malformed id without reaching the database", async () => {
     expect((await del("not-a-uuid")).status).toBe(404);
     expect(removeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("roster failure paths (Effect migration)", () => {
+  it("answers a database failure with the generic 503", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    listMock.mockRejectedValue(new Error("connection terminated"));
+    const res = await buildApp(instructorOfA()).request("/api/courses/course-a/roster", undefined, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: SERVICE_UNAVAILABLE_MESSAGE });
+  });
+
+  it("still answers a removal when the audit's org lookup fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    getOrgScopeForCourseMock.mockRejectedValue(new Error("audit down"));
+    const res = await buildApp(instructorOfA()).request(
+      `/api/courses/course-a/roster/${MEMBERSHIP_ID}`,
+      { method: "DELETE" },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ membershipId: MEMBERSHIP_ID });
   });
 });

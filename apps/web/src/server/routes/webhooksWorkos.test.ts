@@ -394,3 +394,48 @@ describe("POST /api/webhooks/workos", () => {
     });
   });
 });
+
+/* Effect migration: the dependency failures this handler declares. */
+describe("POST /api/webhooks/workos dependency failures (Effect error channel)", () => {
+  it("does not log a routine bad signature as a server error", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const req = await signedRequest(userDeletedEvent("workos_1"), "whsec_wrong_secret");
+    const res = await webhooksWorkos.request("/", req, TEST_ENV);
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "Invalid signature" });
+    expect(consoleSpy).not.toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it("503s (so WorkOS retries) when the claim itself can't reach the database", async () => {
+    claimWebhookEvent.mockRejectedValue(new Error("connect ECONNREFUSED"));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await webhooksWorkos.request("/", await signedRequest(userDeletedEvent("workos_1")), TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(deactivateByWorkosUserId).not.toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it("still answers 500 when recording the failure fails too", async () => {
+    deactivateByWorkosUserId.mockRejectedValue(new Error("connect ECONNREFUSED"));
+    recordWebhookEvent.mockRejectedValue(new Error("connect ECONNREFUSED"));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await webhooksWorkos.request("/", await signedRequest(userDeletedEvent("workos_1")), TEST_ENV);
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Internal error" });
+    consoleSpy.mockRestore();
+  });
+
+  it("500s and records failed when the audit write for a deprovisioning fails", async () => {
+    deactivateByWorkosUserId.mockResolvedValue({ userId: "user-1", orgScopes: ["org-a"] });
+    recordAuditEvent.mockRejectedValue(new Error("connect ECONNREFUSED"));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await webhooksWorkos.request("/", await signedRequest(userDeletedEvent("workos_1")), TEST_ENV);
+    expect(res.status).toBe(500);
+    expect(recordWebhookEvent).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ status: "failed" }),
+    );
+    consoleSpy.mockRestore();
+  });
+});

@@ -501,6 +501,46 @@ describe("POST /api/chat -- an error-only turn must not persist an assistant row
     expect(assistantRows).toHaveLength(1);
   });
 
+  // A provider call that fails OUTRIGHT -- the provider's doStream rejects
+  // (a network error, or the HTTP 429/5xx @ai-sdk/openai throws before any
+  // stream exists), rather than emitting an in-stream `error` chunk like
+  // erroringModel above. No step is ever recorded, so ai@5.0.195 rejects
+  // result.totalUsage/response with NoOutputGeneratedError. chatHandler's
+  // onFinish used to land that rejection in its catch and never reach
+  // finalizeAssistantTurn: the turn lock stayed held for LOCK_STALE_MS, so
+  // the student's Retry got a false 409 in_progress for 90 seconds.
+  it("releases the turn lock when the provider call itself rejects, so Retry is not locked out", async () => {
+    fakeModel = {
+      specificationVersion: "v2",
+      provider: "test-provider",
+      modelId: "test-model",
+      supportedUrls: {},
+      async doGenerate() {
+        throw new Error("doGenerate should not be called by streamText's streaming path");
+      },
+      async doStream() {
+        throw Object.assign(new Error("fetch failed"), { code: "ECONNRESET" });
+      },
+    };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await postChat(buildApp(), { messages: [userUiMessage], courseId: "55555555-5555-5555-5555-555555555555" });
+    expect(res.status).toBe(200);
+    await res.text(); // drain the stream so onFinish has actually run
+
+    const conv = conversationsStore.get("22222222-2222-2222-2222-222222222222");
+    expect(conv?.processingStartedAt).toBeNull();
+    const rows = messagesStore.filter((m) => m.conversationId === "22222222-2222-2222-2222-222222222222");
+    expect(rows.map((r) => r.role)).toEqual(["user"]);
+    const logged = errorSpy.mock.calls.map((call) => JSON.parse(call[0] as string) as Record<string, unknown>);
+    expect(logged).toContainEqual(
+      expect.objectContaining({ context: "chatHandler.onFinish.usageFetchFailed", tag: "ExternalServiceError" }),
+    );
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
   describe("#268: partial content then a provider error mid-generation", () => {
     it("does not persist the partial text -- the half-sentence must not become a permanent 'answer'", async () => {
       fakeModel = partialThenErrorModel();

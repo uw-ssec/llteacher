@@ -42,6 +42,7 @@ import type { GradePayload } from "@llteacher/ui/api";
  *  -- the gap #141 recorded against recordGrade, now that a real route
  *  exists to answer it. */
 export class SubmissionNotInCourseError extends Error {
+  readonly _tag = "SubmissionNotInCourseError" as const;
   constructor() {
     super("Submission not found in this course");
     this.name = "SubmissionNotInCourseError";

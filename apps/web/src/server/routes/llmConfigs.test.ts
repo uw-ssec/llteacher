@@ -593,3 +593,71 @@ describe("POST test (#31)", () => {
     expect(auditBestEffortMock.mock.calls[0]![2].action).toBe("llm_config.tested");
   });
 });
+
+/* Effect migration: the dependency-failure paths each handler now declares.
+   A database failure is the generic 503 (DatabaseError) unless the handler
+   deliberately answers it otherwise; the audit write is best-effort. */
+describe("dependency failures (Effect error channel)", () => {
+  it("503s with the generic body when the course->org lookup fails, never a 403", async () => {
+    getOrgScopeForCourseMock.mockRejectedValue(new Error("connect ECONNREFUSED"));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await buildApp(instructorOfA()).request(url(), undefined, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "Something went wrong. Please try again later." });
+    consoleSpy.mockRestore();
+  });
+
+  it("503s (not 409) when a create fails on anything other than the default race", async () => {
+    createMock.mockRejectedValue(new Error('violates check constraint "llm_configs_temperature_range_chk"'));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await buildApp(instructorOfA()).request(url(), json("POST", VALID_BODY), TEST_ENV);
+    expect(res.status).toBe(503);
+    consoleSpy.mockRestore();
+  });
+
+  it("reports a lost default race on update as a 409 too", async () => {
+    updateMock.mockRejectedValue(
+      new Error('duplicate key value violates unique constraint "llm_configs_org_default_uq"'),
+    );
+    const res = await buildApp(instructorOfA()).request(
+      url(`/${CONFIG_ID}`),
+      json("PATCH", { ...VALID_BODY, isDefault: true }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toMatch(/Reload and try again/);
+  });
+
+  it("does not fail a save that landed when the audit write fails", async () => {
+    auditBestEffortMock.mockRejectedValue(new Error("audit table unavailable"));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await buildApp(instructorOfA()).request(url(), json("POST", VALID_BODY), TEST_ENV);
+    expect(res.status).toBe(201);
+    consoleSpy.mockRestore();
+  });
+
+  it("answers the test button 200 ok:false (not 5xx) when the LLM gateway is down", async () => {
+    generateTextMock.mockRejectedValue(new TypeError("fetch failed"));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await buildApp(instructorOfA()).request(
+      url(`/${CONFIG_ID}/test`),
+      json("POST", { message: "hi" }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(false);
+    expect(auditBestEffortMock).not.toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it("400s an unparseable JSON body on create without a write", async () => {
+    const res = await buildApp(instructorOfA()).request(
+      url(),
+      { method: "POST", headers: { "content-type": "application/json" }, body: "{not json" },
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Request body must be valid JSON" });
+    expect(createMock).not.toHaveBeenCalled();
+  });
+});

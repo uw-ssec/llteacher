@@ -398,3 +398,44 @@ describe.skipIf(!DATABASE_URL)("POST /exports (#91, real DB)", () => {
     expect(parsed.submissions.every((s) => s.homework === "HW1")).toBe(true);
   });
 });
+
+/* Dependency failure: no live database needed -- the point is that there
+   isn't one. A build that cannot reach Postgres keeps this route's own 503
+   sentence, and a per-student lookup that cannot reach it gets the
+   bridge's generic 503 -- never a routine 404 "not on this course". */
+describe("POST /exports when the database is unreachable", () => {
+  const UNREACHABLE = "postgres://llteacher:x@127.0.0.1:1/none";
+  const ENV = {
+    DATABASE_URL: UNREACHABLE,
+    ENCRYPTION_KEY: ENC,
+    BLIND_INDEX_KEY: BLIND,
+  } as Env;
+  const COURSE = "11111111-2222-4333-8444-555555555555";
+
+  function post(body: unknown) {
+    const a = new Hono<AppEnv>();
+    a.use("*", async (c, next) => {
+      c.set("authContext", fakeAuthContext({ memberships: [fakeMembership({ courseId: COURSE, role: "instructor" })] }));
+      await next();
+    });
+    a.post("/api/courses/:courseId/exports", (c) => createExportHandler(c));
+    return a.request(
+      `/api/courses/${COURSE}/exports`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) },
+      ENV,
+    );
+  }
+
+  it("answers a failed build with 503 and this route's own message", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await post({ subject: "grades", format: "csv" });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "Could not build that export. Please try again." });
+  });
+
+  it("answers a failed student lookup with 503, not 404", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await post({ subject: "grades", format: "csv", studentId: "22222222-3333-4444-8555-666666666666" });
+    expect(res.status).toBe(503);
+  });
+});

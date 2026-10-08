@@ -280,3 +280,86 @@ describe("POST sync", () => {
     );
   });
 });
+
+/* Effect migration: Canvas failures keep their actionable sentences (503
+   for the picker/link check, 502 for a sync run); a database failure is the
+   generic 503. */
+describe("dependency failures (Effect error channel)", () => {
+  const silence = () => vi.spyOn(console, "error").mockImplementation(() => {});
+
+  it("tells the instructor Canvas rejected the token (503) on a 401 from Canvas", async () => {
+    const { CanvasApiError } = await import("../../lib/canvas-api");
+    listCanvasCoursesMock.mockRejectedValue(new CanvasApiError("Canvas API request failed (401)", 401));
+    const spy = silence();
+    const res = await buildApp(instructorOfA()).request(url("/courses"), {}, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toMatch(/Canvas rejected this token/);
+    spy.mockRestore();
+  });
+
+  it("reports a rate limit distinctly from a rejected token, even when it arrives as a 403", async () => {
+    const { CanvasRateLimitedError } = await import("../../lib/canvas-api");
+    listCanvasCoursesMock.mockRejectedValue(new CanvasRateLimitedError(403));
+    const spy = silence();
+    const res = await buildApp(instructorOfA()).request(url("/courses"), {}, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toMatch(/rate-limiting/);
+    spy.mockRestore();
+  });
+
+  it("does not link when the visibility check can't reach Canvas", async () => {
+    listCanvasCoursesMock.mockRejectedValue(new TypeError("fetch failed"));
+    const spy = silence();
+    const res = await buildApp(instructorOfA()).request(
+      url("/link"),
+      json("PUT", { canvasCourseId: "canvas-course-1" }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toMatch(/Could not reach Canvas/);
+    expect(linkCanvasCourseMock).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("records a rate-limited sync as an error with the rate-limit sentence (502)", async () => {
+    const { CanvasRateLimitedError } = await import("../../lib/canvas-api");
+    syncCanvasRosterMock.mockRejectedValue(new CanvasRateLimitedError(429));
+    const spy = silence();
+    const res = await buildApp(instructorOfA()).request(url("/sync"), { method: "POST" }, TEST_ENV);
+    expect(res.status).toBe(502);
+    expect(updateSyncStatusMock).toHaveBeenCalledWith(
+      {},
+      "lms-1",
+      { status: "error", errorMessage: "Canvas is rate-limiting this request. Wait a moment and try again." },
+    );
+    spy.mockRestore();
+  });
+
+  it("503s (not a 502 'Could not reach Canvas') when recording a finished sync fails", async () => {
+    // The roster is already written at this point; reporting a Canvas
+    // failure and marking the run "error" would be false.
+    markCourseSyncedMock.mockRejectedValue(new Error("connect ECONNREFUSED"));
+    const spy = silence();
+    const res = await buildApp(instructorOfA()).request(url("/sync"), { method: "POST" }, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(updateSyncStatusMock).not.toHaveBeenCalledWith({}, "lms-1", expect.objectContaining({ status: "error" }));
+    spy.mockRestore();
+  });
+
+  it("503s when the database is down before any Canvas call", async () => {
+    getLmsIntegrationMock.mockRejectedValue(new Error("connect ECONNREFUSED"));
+    const spy = silence();
+    const res = await buildApp(instructorOfA()).request(url("/sync"), { method: "POST" }, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(beginSyncMock).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("releases the sync claim when the credential is gone (409)", async () => {
+    getDecryptedMock.mockResolvedValue(null);
+    const res = await buildApp(instructorOfA()).request(url("/sync"), { method: "POST" }, TEST_ENV);
+    expect(res.status).toBe(409);
+    expect(updateSyncStatusMock).toHaveBeenCalledWith({}, "lms-1", expect.objectContaining({ status: "error" }));
+    expect(syncCanvasRosterMock).not.toHaveBeenCalled();
+  });
+});

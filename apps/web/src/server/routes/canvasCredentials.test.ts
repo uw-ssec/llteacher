@@ -339,3 +339,59 @@ describe("POST validate", () => {
     expect(body.ok).toBe(false);
   });
 });
+
+/* Effect migration: dependency failures. A stored token that can't be read
+   or decrypted is a 503, never "no token on file"; Canvas being down or
+   rate-limiting is a result the Validate button reports (200 ok:false). */
+describe("dependency failures (Effect error channel)", () => {
+  it("validate reports a rate limit distinctly, still as 200 ok:false", async () => {
+    const { CanvasRateLimitedError } = await import("../../lib/canvas-api");
+    validateCanvasTokenMock.mockRejectedValue(new CanvasRateLimitedError(429));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await buildApp(instructorOfA()).request(url("/validate"), { method: "POST" }, TEST_ENV);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: false,
+      message: "Canvas is rate-limiting this request. Wait a moment and try again.",
+    });
+    consoleSpy.mockRestore();
+  });
+
+  it("503s (not 404) when the stored token cannot be decrypted", async () => {
+    getDecryptedMock.mockRejectedValue(new Error('Cannot decrypt: unknown key id "k0"'));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await buildApp(instructorOfA()).request(url("/validate"), { method: "POST" }, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(JSON.stringify(await res.json())).not.toMatch(/key id/);
+    expect(validateCanvasTokenMock).not.toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it("503s when the database is down", async () => {
+    getSummaryMock.mockRejectedValue(new Error("connect ECONNREFUSED"));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await buildApp(instructorOfA()).request(url(), {}, TEST_ENV);
+    expect(res.status).toBe(503);
+    consoleSpy.mockRestore();
+  });
+
+  it("503s when the identity cipher keys are not configured", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await buildApp(instructorOfA()).request(
+      url(),
+      {},
+      { ...TEST_ENV, ENCRYPTION_KEY: undefined } as unknown as Env,
+    );
+    expect(res.status).toBe(503);
+    expect(getSummaryMock).not.toHaveBeenCalled();
+    consoleSpy.mockRestore();
+  });
+
+  it("does not fail a delete that landed when the audit write fails", async () => {
+    auditBestEffortMock.mockRejectedValue(new Error("audit table unavailable"));
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await buildApp(instructorOfA()).request(url(), { method: "DELETE" }, TEST_ENV);
+    expect(res.status).toBe(200);
+    consoleSpy.mockRestore();
+  });
+});

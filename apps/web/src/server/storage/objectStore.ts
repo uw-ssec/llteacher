@@ -21,6 +21,7 @@ export interface ObjectStore {
  *  caller can branch on it. Neon returns 503 SlowDown when throttling, which
  *  is worth retrying; a 403 never is. Without this, both read as "failed". */
 export class StorageError extends Error {
+  readonly _tag = "StorageError" as const;
   constructor(
     readonly operation: "put" | "get" | "delete" | "head",
     readonly status: number,
@@ -119,6 +120,7 @@ export function s3ObjectStore(config: S3StoreConfig): ObjectStore {
 /** Thrown when a deployment has not provisioned object storage (#81): the
  *  upload routes fail with this rather than a confusing S3 error. */
 export class StorageNotConfiguredError extends Error {
+  readonly _tag = "StorageNotConfiguredError" as const;
   constructor() {
     super("Object storage is not configured: set STORAGE_BUCKET; local endpoints also require STORAGE_ACCESS_KEY_ID and STORAGE_SECRET_ACCESS_KEY.");
     this.name = "StorageNotConfiguredError";

@@ -25,7 +25,7 @@ import { ocrOptionsFromEnv } from "../knowledge/extract/ocr";
    -------------------------------------------------------------------------- */
 
 import type { Context } from "hono";
-import { makeDb } from "../../db/client";
+import { Effect } from "effect";
 import type { AppEnv } from "../context";
 import { instructorScope } from "../utils/guards";
 import {
@@ -36,6 +36,7 @@ import {
   setMaterialStatus,
   setMaterialStorageKey,
 } from "../repositories/materials";
+import type { CourseScope } from "../repositories/scope";
 import { knowledgeServiceFromEnv } from "../knowledge/service";
 import { scheduleExtraction, extractMaterial } from "../knowledge/extract/job";
 import { materialStorageKey, storageFromEnv, StorageError } from "../storage/objectStore";
@@ -47,6 +48,9 @@ import {
 } from "../knowledge/convert";
 import { withMaterialLock } from "../knowledge/materialLock";
 import { logServerError } from "../utils/errors";
+import { BadRequest, ExternalServiceError, Forbidden, NotFound } from "../effect/errors";
+import { effectHandler } from "../effect/http";
+import { Database, external, query } from "../effect/services";
 import type { MaterialListPayload } from "@llteacher/ui/api";
 
 function membershipIdOf(c: Context<AppEnv>, courseId: string): string | null {
@@ -60,23 +64,55 @@ async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
     .join("");
 }
 
-export async function listMaterialsHandler(c: Context<AppEnv>) {
+/** instructorScope() (see the header) as a typed refusal. */
+function requireInstructorScope(c: Context<AppEnv>): Effect.Effect<CourseScope, Forbidden> {
   const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
-
-  const db = makeDb(c.env.DATABASE_URL);
-  const materials = await listMaterialsForCourse(db, scope);
-  return c.json({ materials } satisfies MaterialListPayload);
+  return scope ? Effect.succeed(scope) : Effect.fail(new Forbidden({ message: "Not permitted." }));
 }
 
-export async function uploadMaterialHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+const noSuchMaterial = () => new NotFound({ message: "No such material." });
 
-  const form = await c.req.formData();
+/** knowledgeServiceFromEnv throws KnowledgeNotConfiguredError when
+ *  KNOWLEDGE_ROOT is unset; that, like any knowledge outage, is a logged 503. */
+function knowledgeService(c: Context<AppEnv>) {
+  return Effect.try({
+    try: () => knowledgeServiceFromEnv(c.env),
+    catch: (cause) => new ExternalServiceError({ service: "knowledge", operation: "knowledgeServiceFromEnv", cause }),
+  });
+}
+
+/** Runs `effect` under withMaterialLock (shared with extraction), keeping its
+ *  typed failures: the lock is promise-based, so the effect runs to an Exit
+ *  inside it and that Exit is replayed outside. */
+function underMaterialLock<A, E, R>(
+  courseId: string,
+  materialId: string,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> {
+  return Effect.flatMap(Effect.context<R>(), (context) =>
+    Effect.flatten(Effect.promise(() =>
+      withMaterialLock(courseId, materialId, () => Effect.runPromiseExitWith(context)(effect)))));
+}
+
+export const listMaterialsHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+  const materials = yield* query("listMaterialsForCourse", async (db) => listMaterialsForCourse(db, scope));
+  return c.json({ materials } satisfies MaterialListPayload);
+}));
+
+export const uploadMaterialHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
+
+  // A body that is not parseable multipart (wrong content type, truncated
+  // stream) is the client's malformed request -- it used to fall through to
+  // the generic 503 as if the server were down.
+  const form = yield* Effect.tryPromise({
+    try: () => c.req.formData(),
+    catch: () => new BadRequest({ message: "No file was uploaded." }),
+  });
   const file = form.get("file");
   if (!(file instanceof File)) {
-    return c.json({ error: "No file was uploaded." }, 400);
+    return yield* new BadRequest({ message: "No file was uploaded." });
   }
 
   const relativePathRaw = form.get("relativePath");
@@ -86,18 +122,16 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
       ? relativePathRaw
       : null;
   if (typeof relativePathRaw === "string" && relativePathRaw.length > 0 && relativePath === null) {
-    return c.json({ error: "Invalid relativePath." }, 400);
+    return yield* new BadRequest({ message: "Invalid relativePath." });
   }
 
   const extension = extensionOf(file.name);
   if (!(ALLOWED_EXTENSIONS as readonly string[]).includes(extension)) {
-    return c.json(
-      {
-        error: `Unsupported file type ".${extension}". Allowed: ${ALLOWED_EXTENSIONS.join(", ")}.`,
-      },
-      400,
-    );
+    return yield* new BadRequest({
+      message: `Unsupported file type ".${extension}". Allowed: ${ALLOWED_EXTENSIONS.join(", ")}.`,
+    });
   }
+  // 413 is not one of the bridge's request outcomes, so it stays a Response.
   if (file.size > MAX_UPLOAD_BYTES) {
     return c.json(
       { error: `File is larger than the ${MAX_UPLOAD_BYTES / 1024 / 1024} MB limit.` },
@@ -109,11 +143,10 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
   // one after confirming the membership), so this reads it off scope rather
   // than re-reading the possibly-absent route param.
   const membershipId = membershipIdOf(c, scope);
-  if (!membershipId) return c.json({ error: "Not permitted." }, 403);
+  if (!membershipId) return yield* new Forbidden({ message: "Not permitted." });
 
-  const bytes = await file.arrayBuffer();
-  const checksum = await sha256Hex(bytes);
-  const db = makeDb(c.env.DATABASE_URL);
+  const bytes = yield* Effect.promise(() => file.arrayBuffer());
+  const checksum = yield* Effect.promise(() => sha256Hex(bytes));
 
   // Insert first: the row's id is part of the storage key, so a stored
   // object always has a row that names it. The reverse order can strand an
@@ -122,7 +155,7 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
   // The row starts at `pending` unconditionally now: extraction runs after
   // this handler returns (scheduleExtraction, below), so nothing here yet
   // knows whether the format is supported or the concept write will land.
-  const material = await insertMaterial(db, scope, {
+  const material = yield* query("insertMaterial", async (db) => insertMaterial(db, scope, {
     title: file.name.replace(/\.[^.]+$/, ""),
     sourceType: sourceTypeFor(file.name),
     originalFilename: file.name,
@@ -134,29 +167,39 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
     status: "pending",
     errorDetail: null,
     uploadedById: membershipId,
-  });
+  }));
 
   const key = materialStorageKey(scope, material.id, file.name);
-  try {
-    await storageFromEnv(c.env).put(key, bytes, {
-      contentType: file.type || undefined,
-    });
-  } catch (error) {
-    logServerError("materials.upload", error);
-    await deleteMaterial(db, scope, material.id);
+  // Every put failure -- a StorageError, an unconfigured store
+  // (StorageNotConfiguredError), a network fault -- removes the row and
+  // answers here, so it is captured as a value rather than left to the
+  // bridge's generic 503.
+  const putFailure = yield* external(
+    "storage",
+    "putMaterial",
+    async () => storageFromEnv(c.env).put(key, bytes, { contentType: file.type || undefined }),
+    [StorageError],
+  ).pipe(
+    Effect.as(null),
+    Effect.catch((error) => Effect.succeed(error)),
+  );
+  if (putFailure) {
+    logServerError("materials.upload", putFailure._tag === "ExternalServiceError" ? putFailure.cause : putFailure);
+    yield* query("deleteMaterial", async (db) => deleteMaterial(db, scope, material.id));
     // StorageError carries the status structurally so a throttle is not
     // reported as a dead end. Neon answers 503 SlowDown under load; telling
     // an instructor "could not store the uploaded file" when trying again
     // would have worked is the failure this distinction exists to prevent.
-    if (error instanceof StorageError && error.retryable) {
+    if (putFailure._tag === "StorageError" && putFailure.retryable) {
       return c.json(
         { error: "Storage is busy right now. Try uploading again in a moment." },
         503,
       );
     }
+    // 502 is not one of the bridge's request outcomes, so it stays a Response.
     return c.json({ error: "Could not store the uploaded file." }, 502);
   }
-  await setMaterialStorageKey(db, scope, material.id, key);
+  yield* query("setMaterialStorageKey", async (db) => setMaterialStorageKey(db, scope, material.id, key));
 
   // Extraction runs off the request path: on Node there is no per-request
   // CPU cap, so this enqueues the write rather than making the instructor
@@ -167,6 +210,8 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
   // by queued upload bytes is bounded by what this instructor has uploaded
   // and not yet had extracted -- not, as before the queue, by every upload
   // being decompressed at once.
+  const db = yield* Database;
+  const knowledge = yield* knowledgeService(c);
   scheduleExtraction({
     db,
     courseId: scope,
@@ -175,79 +220,84 @@ export async function uploadMaterialHandler(c: Context<AppEnv>) {
     relativePath,
     bytes,
     ocr: ocrOptionsFromEnv(c.env),
-    knowledge: knowledgeServiceFromEnv(c.env),
+    knowledge,
     existingDocumentPath: null,
   });
 
   return c.json({ id: material.id, status: "pending" }, 201);
-}
+}));
 
-export async function deleteMaterialHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+export const deleteMaterialHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
 
   const materialId = c.req.param("materialId");
-  if (!materialId) return c.json({ error: "No such material." }, 404);
+  if (!materialId) return yield* noSuchMaterial();
 
-  const db = makeDb(c.env.DATABASE_URL);
-  return withMaterialLock(scope, materialId, async () => {
-    const material = await getMaterialForReingest(db, scope, materialId);
-    if (!material) return c.json({ error: "No such material." }, 404);
+  return yield* underMaterialLock(scope, materialId, Effect.gen(function* () {
+    const material = yield* query("getMaterialForReingest", async (db) => getMaterialForReingest(db, scope, materialId));
+    if (!material) return yield* noSuchMaterial();
     // Retrieval uses the filesystem, so remove grounding before deleting
     // its retry handle in Postgres. A failed removal must remain retryable.
-    if (material.documentPath) {
-      try {
-        await knowledgeServiceFromEnv(c.env).remove(scope, material.documentPath);
-      } catch (error) {
-        logServerError("materials.delete.concept", error);
+    const documentPath = material.documentPath;
+    if (documentPath) {
+      const removeFailure = yield* knowledgeService(c).pipe(
+        Effect.flatMap((knowledge) =>
+          external("knowledge", "removeConcept", async () => knowledge.remove(scope, documentPath))),
+        Effect.as(null),
+        Effect.catchTag("ExternalServiceError", (error) => Effect.succeed(error)),
+      );
+      if (removeFailure) {
+        logServerError("materials.delete.concept", removeFailure.cause);
         return c.json({ error: "Could not remove the knowledge document. Try deleting again." }, 503);
       }
     }
-    const removed = await deleteMaterial(db, scope, materialId);
-    if (!removed) return c.json({ error: "No such material." }, 404);
+    const removed = yield* query("deleteMaterial", async (db) => deleteMaterial(db, scope, materialId));
+    if (!removed) return yield* noSuchMaterial();
 
-    if (removed.storageKey) {
+    const storageKey = removed.storageKey;
+    if (storageKey) {
       // Best effort: the row is already gone, and a stranded object is a
       // cleanup problem rather than a correctness one.
-      try {
-        await storageFromEnv(c.env).delete(removed.storageKey);
-      } catch (error) {
-        logServerError("materials.delete.storage", error);
-      }
+      yield* external("storage", "deleteMaterial", async () => storageFromEnv(c.env).delete(storageKey)).pipe(
+        Effect.catchTag("ExternalServiceError", (error) =>
+          Effect.sync(() => logServerError("materials.delete.storage", error.cause))),
+      );
     }
     return c.body(null, 204);
-  });
-}
+  }));
+}));
 
 /** Re-runs tier-1 conversion against the stored bytes. For a format the
  *  pipeline still cannot extract this is honestly a no-op -- it re-reports
  *  `pending` with the same reason rather than pretending a retry helped,
  *  which is why the response says which happened. */
-export async function reingestMaterialHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+export const reingestMaterialHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
 
   const materialId = c.req.param("materialId");
-  if (!materialId) return c.json({ error: "No such material." }, 404);
+  if (!materialId) return yield* noSuchMaterial();
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const material = await getMaterialForReingest(db, scope, materialId);
+  const material = yield* query("getMaterialForReingest", async (db) => getMaterialForReingest(db, scope, materialId));
   if (!material || !material.storageKey || !material.originalFilename) {
-    return c.json({ error: "No such material." }, 404);
+    return yield* noSuchMaterial();
   }
+  const { storageKey, originalFilename } = material;
 
-  const bytes = await storageFromEnv(c.env).get(material.storageKey);
+  const bytes = yield* external("storage", "getMaterial", async () => storageFromEnv(c.env).get(storageKey));
   if (!bytes) {
-    await setMaterialStatus(db, scope, materialId, "failed", "The stored file is missing.");
-    return c.json({ error: "The stored file is missing." }, 404);
+    yield* query("setMaterialStatus", async (db) =>
+      setMaterialStatus(db, scope, materialId, "failed", "The stored file is missing."));
+    return yield* new NotFound({ message: "The stored file is missing." });
   }
 
   // OCR can take minutes. Return promptly and let the existing UI poll.
-  if (extensionOf(material.originalFilename) === "pdf") {
-    await setMaterialStatus(db, scope, materialId, "pending", null);
+  if (extensionOf(originalFilename) === "pdf") {
+    yield* query("setMaterialStatus", async (db) => setMaterialStatus(db, scope, materialId, "pending", null));
+    const db = yield* Database;
+    const knowledge = yield* knowledgeService(c);
     scheduleExtraction({ db, courseId: scope, materialId,
-      filename: material.originalFilename, relativePath: material.relativePath, bytes,
-      ocr: ocrOptionsFromEnv(c.env), knowledge: knowledgeServiceFromEnv(c.env),
+      filename: originalFilename, relativePath: material.relativePath, bytes,
+      ocr: ocrOptionsFromEnv(c.env), knowledge,
       existingDocumentPath: material.documentPath });
     return c.json({ status: "pending", documentCreated: false }, 202);
   }
@@ -255,22 +305,27 @@ export async function reingestMaterialHandler(c: Context<AppEnv>) {
   // Reingest runs synchronously (unlike upload's scheduleExtraction): the
   // instructor is waiting on this button and wants the outcome in the
   // response, not a pending status to poll.
-  const result = await extractMaterial({
+  //
+  // extractMaterial records its own extraction/knowledge failures on the row
+  // and resolves "failed"; only its database calls can reject, so it runs
+  // through query.
+  const knowledge = yield* knowledgeService(c);
+  const result = yield* query("extractMaterial", async (db) => extractMaterial({
     db,
     courseId: scope,
     materialId,
-    filename: material.originalFilename,
+    filename: originalFilename,
     relativePath: material.relativePath,
     bytes,
     ocr: ocrOptionsFromEnv(c.env),
-    knowledge: knowledgeServiceFromEnv(c.env),
+    knowledge,
     existingDocumentPath: material.documentPath,
-  });
+  }));
   return c.json({
     status: result.status,
     documentCreated: result.documentPath !== null && result.documentPath !== material.documentPath,
   });
-}
+}));
 
 /** RFC 6266 / 5987: an ASCII fallback plus the UTF-8 form, so a file named in
  *  another script or with spaces still downloads under its own name. */
@@ -280,20 +335,20 @@ function attachmentDisposition(filename: string): string {
 }
 
 /** The original upload, byte for byte, under its own name and type. */
-export async function downloadMaterialHandler(c: Context<AppEnv>) {
-  const scope = instructorScope(c);
-  if (!scope) return c.json({ error: "Not permitted." }, 403);
+export const downloadMaterialHandler = effectHandler((c) => Effect.gen(function* () {
+  const scope = yield* requireInstructorScope(c);
   const materialId = c.req.param("materialId");
-  if (!materialId) return c.json({ error: "No such material." }, 404);
-  const material = await getMaterialForReingest(makeDb(c.env.DATABASE_URL), scope, materialId);
+  if (!materialId) return yield* noSuchMaterial();
+  const material = yield* query("getMaterialForReingest", async (db) => getMaterialForReingest(db, scope, materialId));
   if (!material || !material.storageKey || !material.originalFilename) {
-    return c.json({ error: "No such material." }, 404);
+    return yield* noSuchMaterial();
   }
-  const bytes = await storageFromEnv(c.env).get(material.storageKey);
-  if (!bytes) return c.json({ error: "The stored file is missing." }, 404);
+  const { storageKey, originalFilename } = material;
+  const bytes = yield* external("storage", "getMaterial", async () => storageFromEnv(c.env).get(storageKey));
+  if (!bytes) return yield* new NotFound({ message: "The stored file is missing." });
   return c.body(bytes, 200, {
     "Content-Type": material.contentType ?? "application/octet-stream",
-    "Content-Disposition": attachmentDisposition(material.originalFilename),
+    "Content-Disposition": attachmentDisposition(originalFilename),
     "Cache-Control": "no-store",
   });
-}
+}));

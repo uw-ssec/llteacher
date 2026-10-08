@@ -1,5 +1,4 @@
-import { type Context } from "hono";
-import { makeDb } from "../../db/client";
+import { Effect } from "effect";
 import {
   listHomeworksForCourse,
   createHomework,
@@ -16,11 +15,12 @@ import { getOrgScopesForUser } from "../repositories/users";
 import { getOrgScopeForCourse } from "../repositories/organizations";
 import { llmConfigBelongsToOrg } from "../repositories/llmConfigs";
 import { courseScopeFromAuthContext } from "../repositories/scope";
+import { ContentDiffError } from "../repositories/sections";
 import { UUID_RE } from "../utils/uuid";
 import { AUDIT_ACTIONS, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
-import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
+import type { Context } from "hono";
 import type {
   HomeworkDetailResponse,
   HomeworkHideBody,
@@ -30,6 +30,9 @@ import type {
   HomeworkUpdateBody,
   SectionResponse,
 } from "../../shared/types";
+import { BadRequest, Forbidden, NotFound } from "../effect/errors";
+import { effectHandler, requireCourseAccess } from "../effect/http";
+import { query } from "../effect/services";
 
 interface CreateHomeworkBody {
   title?: unknown;
@@ -49,35 +52,40 @@ interface CreateHomeworkBody {
 // but there's no reason to invent a second number.
 const MAX_SECTION_CONTENT_LENGTH = 20_000;
 
-export async function listHomeworksHandler(c: Context<AppEnv>) {
-  const courseId = c.req.param("courseId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
+/** Every not-found answer in this file shares one body, so a malformed id,
+ *  a missing row and a hidden one are indistinguishable. */
+const homeworkNotFound = () => new NotFound({ message: "Homework not found" });
 
+/** A body that isn't JSON at all is a client error, not an outage. */
+function readJsonBody<T>(c: Context<AppEnv>): Effect.Effect<T, BadRequest> {
+  return Effect.tryPromise({
+    try: () => c.req.json<T>(),
+    catch: () => new BadRequest({ message: "Request body must be valid JSON" }),
+  });
+}
+
+export const listHomeworksHandler = effectHandler((c) => Effect.gen(function* () {
   // requireCourseMember already verified isMemberOf(courseId) when this
   // handler is reached via the guarded production route; guarded
   // defensively here too (mirrors createHomeworkHandler below) so the
   // handler is never reachable unauthorized even if wired up unguarded.
-  const scope = authContext && courseId ? courseScopeFromAuthContext(authContext, courseId) : null;
-  if (!scope) {
-    return c.json({ error: "Course access denied" }, 403);
-  }
+  const { authContext, courseId, scope } = yield* requireCourseAccess(c);
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const rows = await listHomeworksForCourse(db, scope);
+  const rows = yield* query("listHomeworksForCourse", (db) => listHomeworksForCourse(db, scope));
   // #166: instructors continue to see hidden/expired homeworks (labelled as
   // such); students never see them, same gate as draft/scheduled.
   // #172: now keyed on the unreleased-content capability rather than the
   // authoring role, so a TA granted `can_view_drafts` on this course sees
   // them too. Instructors/admins satisfy it unconditionally.
-  const visibleRows = authContext!.canViewDraftsIn(courseId!)
+  const visibleRows = authContext.canViewDraftsIn(courseId)
     ? rows
     : rows.filter((hw) => !isUnreleased(hw.status));
   return c.json({ homeworks: visibleRows });
-}
+}));
 
-export async function createHomeworkHandler(c: Context<AppEnv>) {
+export const createHomeworkHandler = effectHandler((c) => Effect.gen(function* () {
   const courseId = c.req.param("courseId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
+  const authContext = c.get("authContext");
 
   // requireInstructorOf already verified courseId is present and
   // authContext exists (it 403s otherwise); guarded again here -- mirrors
@@ -93,27 +101,24 @@ export async function createHomeworkHandler(c: Context<AppEnv>) {
   // time. It also makes true a comment in courseMemberships.ts that claimed
   // "every other instructor-gated handler" re-checks; four of five did.
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
-    return c.json({ error: "Course access denied" }, 403);
+    return yield* new Forbidden({ message: "Course access denied" });
   }
 
-  let body: CreateHomeworkBody;
-  try {
-    body = await c.req.json<CreateHomeworkBody>();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const body = yield* readJsonBody<CreateHomeworkBody>(c);
   if (
     typeof body.title !== "string" ||
     body.title.trim().length === 0 ||
     typeof body.description !== "string" ||
     typeof body.dueDate !== "string"
   ) {
-    return c.json({ error: "title, description, and dueDate are required" }, 400);
+    return yield* new BadRequest({ message: "title, description, and dueDate are required" });
   }
+  const title = body.title.trim();
+  const description = body.description;
 
   const dueDate = new Date(body.dueDate);
   if (Number.isNaN(dueDate.getTime())) {
-    return c.json({ error: "dueDate must be a valid date" }, 400);
+    return yield* new BadRequest({ message: "dueDate must be a valid date" });
   }
 
   const membership = authContext.memberships.find((m) => m.courseId === courseId);
@@ -123,34 +128,27 @@ export async function createHomeworkHandler(c: Context<AppEnv>) {
     // is derived from this same memberships list, so this should be
     // unreachable -- guarded defensively rather than trusting that
     // invariant silently.
-    return c.json({ error: "Course access denied" }, 403);
+    return yield* new Forbidden({ message: "Course access denied" });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const created = await createHomework(db, scope, {
+  const created = yield* query("createHomework", (db) => createHomework(db, scope, {
     createdById: membership.id,
-    title: body.title.trim(),
-    description: body.description,
+    title,
+    description,
     dueDate,
-  });
+  }));
 
   return c.json({ id: created.id }, 201);
-}
+}));
 
-export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
-  const courseId = c.req.param("courseId");
+export const getHomeworkDetailHandler = effectHandler((c) => Effect.gen(function* () {
   const homeworkId = c.req.param("homeworkId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
 
   // requireCourseMember already verified isMemberOf(courseId) when this
   // handler is reached via the guarded production route; guarded
   // defensively here too (mirrors listHomeworksHandler above).
-  const scope = authContext && courseId ? courseScopeFromAuthContext(authContext, courseId) : null;
-  if (!scope) {
-    return c.json({ error: "Course access denied" }, 403);
-  }
+  const { authContext, courseId, scope } = yield* requireCourseAccess(c);
 
-  const db = makeDb(c.env.DATABASE_URL);
   // #206 (#172 re-audit, SEC-020): shape-checked before the id reaches a
   // uuid-typed column comparison. Postgres raises `invalid input syntax for
   // type uuid` on a malformed value, app.onError maps any throw to a generic
@@ -163,12 +161,12 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
   // message here would distinguish "malformed" from "no such row" and hand
   // back an existence oracle.
   if (!homeworkId || !UUID_RE.test(homeworkId)) {
-    return c.json({ error: "Homework not found" }, 404);
+    return yield* homeworkNotFound();
   }
 
-  const result = await getHomeworkById(db, scope, homeworkId);
+  const result = yield* query("getHomeworkById", (db) => getHomeworkById(db, scope, homeworkId));
   if (!result) {
-    return c.json({ error: "Homework not found" }, 404);
+    return yield* homeworkNotFound();
   }
 
   // #155/#156: solutions and draft/scheduled homeworks are instructor-only.
@@ -183,16 +181,16 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
   //   canSeeUnreleased -- draft/scheduled/hidden visibility; TA opt-in
   //   canSeeSolutions  -- the answer key; TA opt-in, granted separately
   // Instructors/admins satisfy all three unconditionally.
-  const canEdit = authContext!.isInstructorOf(courseId!);
-  const canSeeUnreleased = authContext!.canViewDraftsIn(courseId!);
-  const canSeeSolutions = authContext!.canViewSolutionsIn(courseId!);
+  const canEdit = authContext.isInstructorOf(courseId);
+  const canSeeUnreleased = authContext.canViewDraftsIn(courseId);
+  const canSeeSolutions = authContext.canViewSolutionsIn(courseId);
 
   const status = deriveHomeworkStatus(result.homework);
   // #166: hidden/expired is the same gate as draft/scheduled for anyone
   // without unreleased-content access -- indistinguishable from not-found,
   // so a guessed/leaked UUID can't confirm a hidden/draft homework is real.
   if (!canSeeUnreleased && isUnreleased(status)) {
-    return c.json({ error: "Homework not found" }, 404);
+    return yield* homeworkNotFound();
   }
 
   const sectionsResponse: SectionResponse[] = result.sections.map((s) => ({
@@ -224,12 +222,19 @@ export async function getHomeworkDetailHandler(c: Context<AppEnv>) {
   };
 
   return c.json(body);
+}));
+
+/** SQLSTATE class 22 (data exception) or a NOT NULL (23502) / CHECK
+ *  (23514) violation: Postgres refusing a value the client supplied. */
+function isInvalidContentFailure(cause: unknown): boolean {
+  const code = typeof cause === "object" && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  return typeof code === "string" && (code.startsWith("22") || code === "23502" || code === "23514");
 }
 
-export async function updateHomeworkHandler(c: Context<AppEnv>) {
+export const updateHomeworkHandler = effectHandler((c) => Effect.gen(function* () {
   const courseId = c.req.param("courseId");
   const homeworkId = c.req.param("homeworkId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
+  const authContext = c.get("authContext");
 
   // requireInstructorOf already verified courseId is present and
   // isInstructorOf(courseId) when this handler is reached via the guarded
@@ -237,7 +242,7 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
   // so a dropped/reordered guard fails closed with a 403 instead of
   // throwing past this point into the generic 503 handler.
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
-    return c.json({ error: "Instructor access denied" }, 403);
+    return yield* new Forbidden({ message: "Instructor access denied" });
   }
 
   // #211 (review of #209): SEC-020 shape-checked :homeworkId on the three
@@ -253,23 +258,17 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
   // not-found body -- a distinct "malformed" message would separate it from
   // "no such row" and hand back an existence oracle.
   if (!homeworkId || !UUID_RE.test(homeworkId)) {
-    return c.json({ error: "Homework not found" }, 404);
+    return yield* homeworkNotFound();
   }
 
-  let body: HomeworkUpdateBody;
-  try {
-    body = await c.req.json<HomeworkUpdateBody>();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const body = yield* readJsonBody<HomeworkUpdateBody>(c);
 
   if (body.sections) {
     for (const section of body.sections) {
       if (typeof section.content === "string" && section.content.length > MAX_SECTION_CONTENT_LENGTH) {
-        return c.json(
-          { error: `Each section's content must be ${MAX_SECTION_CONTENT_LENGTH} characters or fewer` },
-          400,
-        );
+        return yield* new BadRequest({
+          message: `Each section's content must be ${MAX_SECTION_CONTENT_LENGTH} characters or fewer`,
+        });
       }
     }
   }
@@ -278,7 +277,7 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
   if (body.dueDate !== undefined) {
     dueDate = new Date(body.dueDate);
     if (Number.isNaN(dueDate.getTime())) {
-      return c.json({ error: "dueDate must be a valid date" }, 400);
+      return yield* new BadRequest({ message: "dueDate must be a valid date" });
     }
   }
 
@@ -298,7 +297,7 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
   let llmConfigId = body.llmConfigId;
   if (llmConfigId === "") llmConfigId = null;
   if (llmConfigId != null && !UUID_RE.test(llmConfigId)) {
-    return c.json({ error: "llmConfigId must be a valid UUID or null" }, 400);
+    return yield* new BadRequest({ message: "llmConfigId must be a valid UUID or null" });
   }
 
   const scope = courseScopeFromAuthContext(authContext, courseId);
@@ -307,10 +306,8 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
     // is derived from this same memberships list, so this should be
     // unreachable -- guarded defensively rather than trusting that
     // invariant silently.
-    return c.json({ error: "Course access denied" }, 403);
+    return yield* new Forbidden({ message: "Course access denied" });
   }
-
-  const db = makeDb(c.env.DATABASE_URL);
 
   // #161: the FK on homeworks.llm_config_id only requires the row to exist
   // somewhere, not that it belongs to this course's organization -- without
@@ -319,88 +316,94 @@ export async function updateHomeworkHandler(c: Context<AppEnv>) {
   // tenant's provider credentials). Scoped to this course's own org, not
   // every org the caller belongs to -- see getOrgScopeForCourse's docstring.
   if (llmConfigId != null) {
-    const courseOrgScope = await getOrgScopeForCourse(db, courseId);
-    const belongsToOrg = courseOrgScope ? await llmConfigBelongsToOrg(db, courseOrgScope, llmConfigId) : false;
+    const configId = llmConfigId;
+    const courseOrgScope = yield* query("getOrgScopeForCourse", (db) => getOrgScopeForCourse(db, courseId));
+    const belongsToOrg = courseOrgScope
+      ? yield* query("llmConfigBelongsToOrg", (db) => llmConfigBelongsToOrg(db, courseOrgScope, configId))
+      : false;
     if (!belongsToOrg) {
-      return c.json({ error: "llmConfigId does not belong to this course's organization" }, 400);
+      return yield* new BadRequest({ message: "llmConfigId does not belong to this course's organization" });
     }
   }
 
-  try {
-    const result = await updateHomework(db, scope, homeworkId!, {
+  return yield* query(
+    "updateHomework",
+    (db) => updateHomework(db, scope, homeworkId, {
       title: body.title,
       description: body.description,
       dueDate,
       llmConfigId,
       sections: body.sections,
       widgets: body.widgets,
-    });
-    if (!result) {
-      return c.json({ error: "Homework not found" }, 404);
-    }
-    return c.json(result);
-  } catch (err) {
-    // planSectionDiff/resolveSectionWrites (Task 2/3) throw a plain Error
-    // for two distinct client-input problems: a duplicate/out-of-range
-    // section order, and an unresolvable reorder cycle. Every message on
-    // that path contains "order" or "section" (see repositories/sections.ts
-    // and repositories/homeworks.ts's resolveSectionWrites) -- this regex
-    // maps both to a 422 with the underlying message surfaced to the
-    // client. Typed-error mapping is tracked separately (#141); anything
-    // that doesn't match falls through to app.onError's generic 503.
-    const message = err instanceof Error ? err.message : "Invalid section data";
-    if (/order|section/i.test(message)) {
-      return c.json({ error: message }, 422);
-    }
-    throw err;
-  }
-}
+    }),
+    [ContentDiffError],
+  ).pipe(
+    Effect.flatMap((result): Effect.Effect<Response, NotFound> =>
+      result ? Effect.succeed(c.json(result)) : Effect.fail(homeworkNotFound())),
+    Effect.catchTags({
+      // planSectionDiff/planWidgetDiff and the reorder resolvers (Task 2/3,
+      // #165) refuse client input they cannot apply: a duplicate or
+      // out-of-range order, an id outside this homework, an unresolvable
+      // reorder cycle. 422 with the underlying message surfaced to the
+      // client, as before. 422 has no HttpError outcome, so it is built
+      // here as a response rather than failed. This replaces the old
+      // /order|section/ message regex (#141), which also caught -- and
+      // leaked to the client -- unrelated Postgres errors that happened to
+      // mention a sections table; those are now a DatabaseError (503).
+      ContentDiffError: (err) => Effect.succeed(c.json({ error: err.message }, 422)),
+      // Section/widget fields the route does not validate itself (a null
+      // title, an unknown section type) are refused by Postgres as a data
+      // exception (SQLSTATE class 22) or a NOT NULL / CHECK violation. Those
+      // are the client's input, so they stay a 422 -- but with a fixed
+      // message, never the driver's text. Every other database failure is
+      // still an outage (503).
+      DatabaseError: (err) =>
+        isInvalidContentFailure(err.cause)
+          ? Effect.succeed(c.json({ error: "Section or widget content is invalid." }, 422))
+          : Effect.fail(err),
+    }),
+  );
+}));
 
-export async function deleteHomeworkHandler(c: Context<AppEnv>) {
+export const deleteHomeworkHandler = effectHandler((c) => Effect.gen(function* () {
   const courseId = c.req.param("courseId");
   const homeworkId = c.req.param("homeworkId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
+  const authContext = c.get("authContext");
 
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
-    return c.json({ error: "Instructor access denied" }, 403);
+    return yield* new Forbidden({ message: "Instructor access denied" });
   }
 
   // #211, same guard and same rationale as updateHomeworkHandler above.
   if (!homeworkId || !UUID_RE.test(homeworkId)) {
-    return c.json({ error: "Homework not found" }, 404);
+    return yield* homeworkNotFound();
   }
 
   const scope = courseScopeFromAuthContext(authContext, courseId);
-  if (!scope) return c.json({ error: "Course access denied" }, 403);
+  if (!scope) return yield* new Forbidden({ message: "Course access denied" });
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const deleted = await deleteHomework(db, scope, homeworkId!);
-  if (!deleted) return c.json({ error: "Homework not found" }, 404);
+  const deleted = yield* query("deleteHomework", (db) => deleteHomework(db, scope, homeworkId));
+  if (!deleted) return yield* homeworkNotFound();
   return c.body(null, 204);
-}
+}));
 
-export async function publishHomeworkHandler(c: Context<AppEnv>) {
+export const publishHomeworkHandler = effectHandler((c) => Effect.gen(function* () {
   const courseId = c.req.param("courseId");
   const homeworkId = c.req.param("homeworkId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
+  const authContext = c.get("authContext");
 
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
-    return c.json({ error: "Instructor access denied" }, 403);
+    return yield* new Forbidden({ message: "Instructor access denied" });
   }
 
   // #211, same guard and same rationale as updateHomeworkHandler above.
   if (!homeworkId || !UUID_RE.test(homeworkId)) {
-    return c.json({ error: "Homework not found" }, 404);
+    return yield* homeworkNotFound();
   }
 
-  let body: HomeworkPublishBody;
-  try {
-    body = await c.req.json<HomeworkPublishBody>();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const body = yield* readJsonBody<HomeworkPublishBody>(c);
   if (typeof body.publish !== "boolean") {
-    return c.json({ error: "publish (boolean) is required" }, 400);
+    return yield* new BadRequest({ message: "publish (boolean) is required" });
   }
 
   let releasedAt: Date | undefined;
@@ -414,17 +417,15 @@ export async function publishHomeworkHandler(c: Context<AppEnv>) {
     // already-past releasedAt from the loaded form state.
     releasedAt = new Date(body.releasedAt);
     if (Number.isNaN(releasedAt.getTime())) {
-      return c.json({ error: "releasedAt must be a valid date" }, 400);
+      return yield* new BadRequest({ message: "releasedAt must be a valid date" });
     }
     if (releasedAt.getTime() < Date.now()) {
-      return c.json({ error: "Release time must be in the future" }, 400);
+      return yield* new BadRequest({ message: "Release time must be in the future" });
     }
   }
 
   const scope = courseScopeFromAuthContext(authContext, courseId);
-  if (!scope) return c.json({ error: "Course access denied" }, 403);
-
-  const db = makeDb(c.env.DATABASE_URL);
+  if (!scope) return yield* new Forbidden({ message: "Course access denied" });
 
   // #94: unpublishing (publish=false) a homework that already has student
   // activity (conversations against its sections) needs an explicit
@@ -434,10 +435,15 @@ export async function publishHomeworkHandler(c: Context<AppEnv>) {
   // missing confirmation gate in front of it.
   let hadExistingActivity: boolean | undefined;
   if (body.publish === false) {
-    const existing = await getHomeworkById(db, scope, homeworkId!);
+    const existing = yield* query("getHomeworkById", (db) => getHomeworkById(db, scope, homeworkId));
     if (existing?.homework.publishedAt) {
-      hadExistingActivity = await homeworkHasStudentActivity(db, homeworkId!);
+      hadExistingActivity = yield* query(
+        "homeworkHasStudentActivity",
+        (db) => homeworkHasStudentActivity(db, homeworkId),
+      );
       if (hadExistingActivity && body.confirm !== true) {
+        // Built directly rather than failed as a Conflict: the client reads
+        // `hasStudentActivity` off this body, which Conflict cannot carry.
         return c.json(
           {
             error: "This homework has existing student activity. Pass confirm: true to unpublish anyway.",
@@ -449,23 +455,25 @@ export async function publishHomeworkHandler(c: Context<AppEnv>) {
     }
   }
 
-  const updated = await updateHomeworkPublishState(db, scope, homeworkId!, { publish: body.publish, releasedAt });
-  if (!updated) return c.json({ error: "Homework not found" }, 404);
+  const publish = body.publish;
+  const updated = yield* query(
+    "updateHomeworkPublishState",
+    (db) => updateHomeworkPublishState(db, scope, homeworkId, { publish, releasedAt }),
+  );
+  if (!updated) return yield* homeworkNotFound();
 
   // Best-effort (#147): an audit-write failure must not fail a
   // publish/unpublish that already succeeded -- mirrors profile.ts's
   // patchProfileHandler pattern.
-  try {
-    const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
-    await auditBestEffort(db, orgScopes, {
+  yield* query("getOrgScopesForUser", (db) => getOrgScopesForUser(db, authContext.session.userId)).pipe(
+    Effect.flatMap((orgScopes) => query("auditBestEffort", (db) => auditBestEffort(db, orgScopes, {
       actorUserId: authContext.session.userId,
-      action: body.publish ? AUDIT_ACTIONS.HOMEWORK_PUBLISHED : AUDIT_ACTIONS.HOMEWORK_UNPUBLISHED,
+      action: publish ? AUDIT_ACTIONS.HOMEWORK_PUBLISHED : AUDIT_ACTIONS.HOMEWORK_UNPUBLISHED,
       targetType: "homework",
       targetId: updated.id,
-    });
-  } catch (err) {
-    logServerError("publishHomeworkHandler", err);
-  }
+    }))),
+    Effect.catchTag("DatabaseError", (err) => Effect.sync(() => logServerError("publishHomeworkHandler", err.cause))),
+  );
 
   const responseBody: HomeworkPublishResponse = {
     id: updated.id,
@@ -474,30 +482,25 @@ export async function publishHomeworkHandler(c: Context<AppEnv>) {
     ...(hadExistingActivity !== undefined && { hadExistingActivity }),
   };
   return c.json(responseBody);
-}
+}));
 
-export async function updateHomeworkHideHandler(c: Context<AppEnv>) {
+export const updateHomeworkHideHandler = effectHandler((c) => Effect.gen(function* () {
   const courseId = c.req.param("courseId");
   const homeworkId = c.req.param("homeworkId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
+  const authContext = c.get("authContext");
 
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
-    return c.json({ error: "Instructor access denied" }, 403);
+    return yield* new Forbidden({ message: "Instructor access denied" });
   }
 
   // #211, same guard and same rationale as updateHomeworkHandler above.
   if (!homeworkId || !UUID_RE.test(homeworkId)) {
-    return c.json({ error: "Homework not found" }, 404);
+    return yield* homeworkNotFound();
   }
 
-  let body: HomeworkHideBody;
-  try {
-    body = await c.req.json<HomeworkHideBody>();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const body = yield* readJsonBody<HomeworkHideBody>(c);
   if (typeof body.isHidden !== "boolean") {
-    return c.json({ error: "isHidden (boolean) is required" }, 400);
+    return yield* new BadRequest({ message: "isHidden (boolean) is required" });
   }
 
   let expiresAt: Date | null | undefined;
@@ -510,30 +513,31 @@ export async function updateHomeworkHideHandler(c: Context<AppEnv>) {
     } else {
       expiresAt = new Date(body.expiresAt);
       if (Number.isNaN(expiresAt.getTime())) {
-        return c.json({ error: "expiresAt must be a valid date or null" }, 400);
+        return yield* new BadRequest({ message: "expiresAt must be a valid date or null" });
       }
     }
   }
 
   const scope = courseScopeFromAuthContext(authContext, courseId);
-  if (!scope) return c.json({ error: "Course access denied" }, 403);
+  if (!scope) return yield* new Forbidden({ message: "Course access denied" });
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const updated = await updateHomeworkHideState(db, scope, homeworkId!, { isHidden: body.isHidden, expiresAt });
-  if (!updated) return c.json({ error: "Homework not found" }, 404);
+  const isHidden = body.isHidden;
+  const updated = yield* query(
+    "updateHomeworkHideState",
+    (db) => updateHomeworkHideState(db, scope, homeworkId, { isHidden, expiresAt }),
+  );
+  if (!updated) return yield* homeworkNotFound();
 
   // Best-effort (#147), same pattern as publishHomeworkHandler.
-  try {
-    const orgScopes = await getOrgScopesForUser(db, authContext.session.userId);
-    await auditBestEffort(db, orgScopes, {
+  yield* query("getOrgScopesForUser", (db) => getOrgScopesForUser(db, authContext.session.userId)).pipe(
+    Effect.flatMap((orgScopes) => query("auditBestEffort", (db) => auditBestEffort(db, orgScopes, {
       actorUserId: authContext.session.userId,
-      action: body.isHidden ? AUDIT_ACTIONS.HOMEWORK_HIDDEN : AUDIT_ACTIONS.HOMEWORK_UNHIDDEN,
+      action: isHidden ? AUDIT_ACTIONS.HOMEWORK_HIDDEN : AUDIT_ACTIONS.HOMEWORK_UNHIDDEN,
       targetType: "homework",
       targetId: updated.id,
-    });
-  } catch (err) {
-    logServerError("updateHomeworkHideHandler", err);
-  }
+    }))),
+    Effect.catchTag("DatabaseError", (err) => Effect.sync(() => logServerError("updateHomeworkHideHandler", err.cause))),
+  );
 
   const responseBody: HomeworkHideResponse = {
     id: updated.id,
@@ -541,4 +545,4 @@ export async function updateHomeworkHideHandler(c: Context<AppEnv>) {
     expiresAt: updated.expiresAt?.toISOString() ?? null,
   };
   return c.json(responseBody);
-}
+}));

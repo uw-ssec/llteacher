@@ -92,3 +92,21 @@ describe("GET /api/courses/:courseId/sections/:sectionId/hints (#80)", () => {
     );
   });
 });
+
+describe("GET .../hints -- database failure", () => {
+  it("answers 503, not a routine 404, when getSectionHintStatus fails", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    getSectionHintStatusMock.mockReset().mockRejectedValue(new Error("Connection terminated unexpectedly"));
+    const authContext = fakeAuthContext({
+      memberships: [fakeMembership({ courseId: "course-1", role: "student", userId: "u1" })],
+      session: { userId: "u1" } as AuthContext["session"],
+    });
+    const res = await buildApp(authContext).request(
+      "/api/courses/course-1/sections/11111111-1111-1111-1111-111111111111/hints",
+      undefined,
+      TEST_ENV,
+    );
+    expect(res.status).toBe(503);
+    consoleSpy.mockRestore();
+  });
+});

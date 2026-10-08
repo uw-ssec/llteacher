@@ -23,7 +23,7 @@ import {
 } from "./materials";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
-import { memoryObjectStore, StorageError } from "../storage/objectStore";
+import { memoryObjectStore, StorageError, StorageNotConfiguredError } from "../storage/objectStore";
 
 const COURSE_ID = "11111111-2222-4333-8444-555555555555";
 const OTHER_MATERIAL_ID = "22222222-3333-4444-8555-666666666666";
@@ -534,6 +534,74 @@ describe("materials routes", () => {
       getMaterialForReingest.mockResolvedValue({ id: "m1", originalFilename: "gone.pdf", storageKey: "courses/c/materials/m1/gone.pdf", relativePath: null, documentPath: null, contentType: null });
       expect((await appWith("instructor").request(`/api/courses/${COURSE_ID}/materials/m1/download`, {}, TEST_ENV)).status).toBe(404);
       expect((await appWith("student").request(`/api/courses/${COURSE_ID}/materials/m1/download`, {}, TEST_ENV)).status).toBe(403);
+    });
+  });
+
+  describe("typed failures", () => {
+    const GENERIC = { error: "Something went wrong. Please try again later." };
+    const quiet = () => vi.spyOn(console, "error").mockImplementation(() => {});
+
+    it("400s a body that is not parseable multipart, instead of a 503", async () => {
+      const res = await appWith("instructor").request(
+        `/api/courses/${COURSE_ID}/materials`,
+        { method: "POST", headers: { "content-type": "multipart/form-data; boundary=zzz" }, body: "not multipart" },
+        TEST_ENV,
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "No file was uploaded." });
+      expect(insertMaterial).not.toHaveBeenCalled();
+    });
+
+    it("treats an unconfigured store on upload like a permanent storage failure: 502, row removed", async () => {
+      quiet();
+      vi.spyOn(store, "put").mockRejectedValueOnce(new StorageNotConfiguredError());
+      const res = await appWith("instructor").request(
+        `/api/courses/${COURSE_ID}/materials`,
+        upload("lecture1.vtt", "WEBVTT", "text/vtt"),
+        TEST_ENV,
+      );
+      expect(res.status).toBe(502);
+      expect(await res.json()).toEqual({ error: "Could not store the uploaded file." });
+      expect(deleteMaterial).toHaveBeenCalledWith(expect.anything(), COURSE_ID, "mat-1");
+      expect(setMaterialStorageKey).not.toHaveBeenCalled();
+    });
+
+    it("answers a storage outage on reingest and download with the generic 503", async () => {
+      quiet();
+      getMaterialForReingest.mockResolvedValue({
+        id: "m7", originalFilename: "a.vtt", storageKey: "courses/c/materials/m7/a.vtt",
+        relativePath: null, documentPath: null, contentType: null,
+      });
+      vi.spyOn(store, "get").mockRejectedValueOnce(new StorageError("get", 500));
+      const reingest = await appWith("instructor").request(`/api/courses/${COURSE_ID}/materials/m7/reingest`, { method: "POST" }, TEST_ENV);
+      expect(reingest.status).toBe(503);
+      expect(await reingest.json()).toEqual(GENERIC);
+      // An outage must not be recorded as "the stored file is missing".
+      expect(setMaterialStatus).not.toHaveBeenCalled();
+
+      vi.spyOn(store, "get").mockRejectedValueOnce(new StorageError("get", 500));
+      const download = await appWith("instructor").request(`/api/courses/${COURSE_ID}/materials/m7/download`, {}, TEST_ENV);
+      expect(download.status).toBe(503);
+      expect(await download.json()).toEqual(GENERIC);
+    });
+
+    it("answers a database failure with the generic 503", async () => {
+      quiet();
+      listMaterialsForCourse.mockRejectedValueOnce(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }));
+      const res = await appWith("instructor").request(`/api/courses/${COURSE_ID}/materials`, {}, TEST_ENV);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual(GENERIC);
+    });
+
+    it("keeps the material lock released when the delete fails, so a retry is not wedged", async () => {
+      quiet();
+      getMaterialForReingest.mockRejectedValueOnce(new Error("connection terminated"));
+      const failed = await appWith("instructor").request(`/api/courses/${COURSE_ID}/materials/mat-9`, { method: "DELETE" }, TEST_ENV);
+      expect(failed.status).toBe(503);
+      getMaterialForReingest.mockResolvedValue({ storageKey: null, documentPath: null });
+      deleteMaterial.mockResolvedValue({ storageKey: null, documentPath: null });
+      const retried = await appWith("instructor").request(`/api/courses/${COURSE_ID}/materials/mat-9`, { method: "DELETE" }, TEST_ENV);
+      expect(retried.status).toBe(204);
     });
   });
 });

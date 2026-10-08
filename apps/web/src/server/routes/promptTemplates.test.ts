@@ -4,6 +4,8 @@ import { getCoursePromptTemplateHandler, putCoursePromptTemplateHandler, deleteC
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
+import { PromptTemplateConflictError } from "../repositories/errors";
+import { SERVICE_UNAVAILABLE_MESSAGE } from "../utils/errors";
 
 const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
 
@@ -224,5 +226,38 @@ describe("deleteCoursePromptTemplateHandler", () => {
     const res = await app.request("/api/courses/c1/prompt-template", { method: "DELETE" }, TEST_ENV);
     expect(res.status).toBe(204);
     expect(deactivateCourseScopedPromptTemplateMock).toHaveBeenCalledWith(expect.anything(), "c1");
+  });
+});
+
+describe("prompt template failure paths (Effect migration)", () => {
+  const put = () =>
+    makeApp(instructorAuth()).request(
+      "/api/courses/c1/prompt-template",
+      { method: "PUT", body: JSON.stringify({ content: "Be great." }), headers: { "content-type": "application/json" } },
+      TEST_ENV,
+    );
+
+  beforeEach(() => {
+    upsertCourseScopedPromptTemplateMock.mockReset();
+    getCourseScopedPromptTemplateMock.mockReset();
+  });
+
+  it("409s the loser of a concurrent save with the repository's sentence", async () => {
+    upsertCourseScopedPromptTemplateMock.mockRejectedValue(
+      new PromptTemplateConflictError("This course's tutor prompt was just changed by someone else. Reload and try again."),
+    );
+    const res = await put();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: "This course's tutor prompt was just changed by someone else. Reload and try again.",
+    });
+  });
+
+  it("answers a database failure with the generic 503", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    getCourseScopedPromptTemplateMock.mockRejectedValue(new Error("connection terminated"));
+    const res = await makeApp(instructorAuth()).request("/api/courses/c1/prompt-template", {}, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: SERVICE_UNAVAILABLE_MESSAGE });
   });
 });

@@ -1,5 +1,5 @@
 import type { Context, Next } from "hono";
-import { makeDb } from "../../db/client";
+import { Effect } from "effect";
 import { courseMemberships, courseRoleEnum } from "../../db/schema";
 import { listMembershipsForUser, getUserActivationState } from "../repositories/users";
 import type { SessionPayload } from "../../lib/session";
@@ -14,6 +14,8 @@ import { PUBLIC_API_PATHS } from "./auth";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { SuperAdminService } from "../../lib/services/SuperAdminService";
+import { runEffect } from "../effect/http";
+import { query } from "../effect/services";
 
 // Re-exported for server/testing/authContext.ts, which must derive its
 // predicates from the same tiers rolesMiddleware uses. @llteacher/ui remains
@@ -98,12 +100,16 @@ export async function rolesMiddleware(c: Context<AppEnv>, next: Next) {
     return;
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const [memberships, activation, cipherKeys] = await Promise.all([
-    listMembershipsForUser(db, session.userId),
-    getUserActivationState(db, session.userId),
-    loadIdentityCipherKeys(c.env),
-  ]);
+  // Typed so a database outage here is classified and logged like any
+  // handler's (effect/http.ts), rather than reaching app.onError untyped.
+  // `next()` stays outside the Effect: downstream throws keep their own path.
+  const loaded = await runEffect(c, Effect.all([
+    query("listMembershipsForUser", (db) => listMembershipsForUser(db, session.userId)),
+    query("getUserActivationState", (db) => getUserActivationState(db, session.userId)),
+    Effect.promise(() => loadIdentityCipherKeys(c.env)),
+  ], { concurrency: "unbounded" }));
+  if (!loaded.ok) return loaded.response;
+  const [memberships, activation, cipherKeys] = loaded.value;
 
   // Deprovisioned (isActive=false), or this cookie predates the account's
   // current session_epoch (a WorkOS deprovisioning webhook bumped it since

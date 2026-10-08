@@ -68,6 +68,7 @@ function greetingParts(text: string) {
 export class SectionConversationError extends Error {}
 
 export class SectionConversationExistsError extends SectionConversationError {
+  readonly _tag = "SectionConversationExistsError" as const;
   constructor() {
     super("An active conversation already exists for this section");
     this.name = "SectionConversationExistsError";
@@ -78,6 +79,7 @@ export class SectionConversationExistsError extends SectionConversationError {
  *  Deliberately one class for both: the route must not let a caller tell
  *  those apart and use the difference to probe which sections exist. */
 export class SectionNotFoundError extends SectionConversationError {
+  readonly _tag = "SectionNotFoundError" as const;
   constructor(message = "Section not found") {
     super(message);
     this.name = "SectionNotFoundError";
@@ -88,6 +90,7 @@ export class SectionNotFoundError extends SectionConversationError {
  *  conversation. Distinct from SectionNotFoundError because reporting it as
  *  "not found" contradicts what the client already has on screen (#241). */
 export class SectionNotInteractiveError extends SectionConversationError {
+  readonly _tag = "SectionNotInteractiveError" as const;
   constructor() {
     super("Section is not interactive and cannot hold a conversation");
     this.name = "SectionNotInteractiveError";
@@ -99,6 +102,7 @@ export class SectionNotInteractiveError extends SectionConversationError {
  *  distinction (routes choose to collapse it); see the comment in
  *  restartSectionConversation. */
 export class ConversationNotFoundError extends SectionConversationError {
+  readonly _tag = "ConversationNotFoundError" as const;
   constructor() {
     super("Conversation not found or not accessible");
     this.name = "ConversationNotFoundError";
@@ -106,6 +110,7 @@ export class ConversationNotFoundError extends SectionConversationError {
 }
 
 export class NotConversationOwnerError extends SectionConversationError {
+  readonly _tag = "NotConversationOwnerError" as const;
   constructor() {
     super("Conversation is not owned by requester");
     this.name = "NotConversationOwnerError";

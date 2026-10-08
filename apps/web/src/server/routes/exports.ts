@@ -26,9 +26,10 @@
    -------------------------------------------------------------------------- */
 
 import { type Context } from "hono";
+import { Effect } from "effect";
 import { and, asc, desc, eq, inArray, or } from "drizzle-orm";
 import { UUID_RE } from "../utils/uuid";
-import { makeDb } from "../../db/client";
+import type { Db } from "../../db/client";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import {
@@ -50,6 +51,9 @@ import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { CourseScope } from "../repositories/scope";
 import type { ExportFormat, ExportSubject } from "@llteacher/ui/api";
+import { BadRequest, Forbidden, NotFound } from "../effect/errors";
+import { effectHandler } from "../effect/http";
+import { AppConfig, query } from "../effect/services";
 
 /** The synchronous ceiling. Rows for submissions/grades, messages for
  *  transcripts. Chosen to sit well inside a Worker's budget with decryption
@@ -59,11 +63,11 @@ const MAX_ROWS = 5_000;
 const SUBJECTS: ExportSubject[] = ["submissions", "grades", "transcripts"];
 const FORMATS: ExportFormat[] = ["csv", "json"];
 
-async function instructorContext(
+function instructorContext(
   c: Context<AppEnv>,
-): Promise<{ scope: CourseScope; courseId: string; authContext: AuthContext } | null> {
+): { scope: CourseScope; courseId: string; authContext: AuthContext } | null {
   const courseId = c.req.param("courseId");
-  const authContext = c.get("authContext") as AuthContext | undefined;
+  const authContext = c.get("authContext");
   if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) return null;
   const scope = courseScopeFromAuthContext(authContext, courseId);
   return scope ? { scope, courseId, authContext } : null;
@@ -92,93 +96,112 @@ function toCsv(headers: string[], rows: unknown[][]): string {
   return `﻿${body}\r\n`;
 }
 
-export async function createExportHandler(c: Context<AppEnv>) {
-  const ctx = await instructorContext(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+/** The identity cipher for this request. Missing or malformed key material
+ *  is a deployment fault, not a request outcome: it stays a defect, which
+ *  the bridge logs and answers 503 -- the same answer app.onError gave. */
+const identityCipher = Effect.gen(function* () {
+  const env = yield* AppConfig;
+  return new IdentityCipher(yield* Effect.promise(() => loadIdentityCipherKeys(env)));
+});
 
-  let body: { subject?: unknown; format?: unknown; studentId?: unknown };
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+export const createExportHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = instructorContext(c);
+  if (!ctx) return yield* new Forbidden({ message: "Instructor access denied" });
+
+  const body = yield* Effect.tryPromise({
+    try: () => c.req.json<{ subject?: unknown; format?: unknown; studentId?: unknown }>(),
+    catch: () => new BadRequest({ message: "Request body must be valid JSON" }),
+  });
 
   const subject = body.subject as ExportSubject;
   if (!SUBJECTS.includes(subject)) {
-    return c.json({ error: `Choose what to export: ${SUBJECTS.join(", ")}.` }, 400);
+    return yield* new BadRequest({ message: `Choose what to export: ${SUBJECTS.join(", ")}.` });
   }
   const format = body.format as ExportFormat;
   if (!FORMATS.includes(format)) {
-    return c.json({ error: `Choose a format: ${FORMATS.join(", ")}.` }, 400);
+    return yield* new BadRequest({ message: `Choose a format: ${FORMATS.join(", ")}.` });
   }
   const studentId = typeof body.studentId === "string" && body.studentId ? body.studentId : null;
   if (studentId && !UUID_RE.test(studentId)) {
-    return c.json({ error: "That student reference is not valid." }, 400);
+    return yield* new BadRequest({ message: "That student reference is not valid." });
   }
   // Transcripts as CSV would be one row per message with the text in a cell
   // -- technically expressible and useless to read. #91 records the scope
   // decision: transcripts are structured JSON.
   if (subject === "transcripts" && format === "csv") {
-    return c.json(
-      { error: "Transcripts export as JSON. A conversation is not a table." },
-      400,
-    );
+    return yield* new BadRequest({ message: "Transcripts export as JSON. A conversation is not a table." });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
+  const cipher = yield* identityCipher;
 
   // The student filter is applied as a course-scoped MEMBERSHIP lookup, not
   // as a bare user id in the data query: a user id from the request must not
   // select rows on its own, or a per-student export becomes a way to name
   // any user in the system and see whether they have work here.
   if (studentId) {
-    const [member] = await db
-      .select({ id: courseMemberships.id })
-      .from(courseMemberships)
-      .where(
-        and(eq(courseMemberships.userId, studentId), eq(courseMemberships.courseId, ctx.scope)),
-      );
-    if (!member) return c.json({ error: "That student is not on this course." }, 404);
+    const member = yield* query("findExportStudentMembership", async (db) => {
+      const [row] = await db
+        .select({ id: courseMemberships.id })
+        .from(courseMemberships)
+        .where(
+          and(eq(courseMemberships.userId, studentId), eq(courseMemberships.courseId, ctx.scope)),
+        );
+      return row;
+    });
+    if (!member) return yield* new NotFound({ message: "That student is not on this course." });
   }
 
-  try {
-    const artifact =
-      subject === "transcripts"
-        ? await exportTranscripts(db, ctx.scope, cipher, studentId, ctx.authContext.session.userId)
-        : subject === "grades"
-          ? await exportGrades(db, ctx.scope, cipher, studentId, format)
-          : await exportSubmissions(db, ctx.scope, cipher, studentId, format);
-
-    if (artifact === null) {
-      return c.json(
-        {
-          error: `That export is larger than this console can build in one request (over ${MAX_ROWS} rows). Export one student at a time, or contact an administrator.`,
-        },
-        413,
-      );
-    }
-
-    try {
-      const orgScope = await getOrgScopeForCourse(db, ctx.courseId);
-      await auditBestEffort(db, orgScope ? [orgScope] : [], {
-        actorUserId: ctx.authContext.session.userId,
-        action: AUDIT_ACTIONS.DATA_EXPORTED,
-        targetType: studentId ? AUDIT_TARGET_TYPES.USER : AUDIT_TARGET_TYPES.COURSE,
-        targetId: studentId ?? ctx.courseId,
-        // The SCOPE of what left, never the contents.
-        requestMetadata: { courseId: ctx.courseId, subject, format, scope: studentId ? "student" : "course" },
-      });
-    } catch (err) {
-      logServerError("createExportHandler", err);
-    }
-
-    return c.json(artifact);
-  } catch (err) {
-    logServerError("createExportHandler", err);
+  // Wrapped in `{ artifact }` so a refusal-too-large (null) and a failed
+  // build (undefined, below) stay distinguishable.
+  const built = yield* query(
+    `export.${subject}`,
+    (db) => subject === "transcripts"
+      ? exportTranscripts(db, ctx.scope, cipher, studentId, ctx.authContext.session.userId)
+      : subject === "grades"
+        ? exportGrades(db, ctx.scope, cipher, studentId, format)
+        : exportSubmissions(db, ctx.scope, cipher, studentId, format),
+  ).pipe(
+    Effect.map((artifact) => ({ artifact })),
+    // A build failure keeps its own 503 body ("Could not build that
+    // export"), which the console shows as-is, rather than the bridge's
+    // generic one. Still logged with the DatabaseError's classification.
+    Effect.catchTag("DatabaseError", (err) => Effect.sync(() => {
+      logServerError("createExportHandler", err.cause, { tag: err._tag, operation: err.operation, reason: err.reason });
+      return undefined;
+    })),
+  );
+  if (!built) {
     return c.json({ error: "Could not build that export. Please try again." }, 503);
   }
-}
+  const { artifact } = built;
+
+  // 413 has no HttpError outcome; it is a successful refusal with its own
+  // sentence, built directly.
+  if (artifact === null) {
+    return c.json(
+      {
+        error: `That export is larger than this console can build in one request (over ${MAX_ROWS} rows). Export one student at a time, or contact an administrator.`,
+      },
+      413,
+    );
+  }
+
+  // Best-effort: the export already succeeded; an audit failure is logged,
+  // never answered.
+  yield* query("getOrgScopeForCourse", (db) => getOrgScopeForCourse(db, ctx.courseId)).pipe(
+    Effect.flatMap((orgScope) => query("auditBestEffort", (db) => auditBestEffort(db, orgScope ? [orgScope] : [], {
+      actorUserId: ctx.authContext.session.userId,
+      action: AUDIT_ACTIONS.DATA_EXPORTED,
+      targetType: studentId ? AUDIT_TARGET_TYPES.USER : AUDIT_TARGET_TYPES.COURSE,
+      targetId: studentId ?? ctx.courseId,
+      // The SCOPE of what left, never the contents.
+      requestMetadata: { courseId: ctx.courseId, subject, format, scope: studentId ? "student" : "course" },
+    }))),
+    Effect.catchTag("DatabaseError", (err) => Effect.sync(() => logServerError("createExportHandler", err.cause))),
+  );
+
+  return c.json(artifact);
+}));
 
 interface Artifact {
   filename: string;
@@ -189,7 +212,7 @@ interface Artifact {
 /** Submissions: one row per submitted section, with the student's identity
  *  decrypted at generation time. */
 async function exportSubmissions(
-  db: ReturnType<typeof makeDb>,
+  db: Db,
   scope: CourseScope,
   cipher: IdentityCipher,
   studentId: string | null,
@@ -263,7 +286,7 @@ async function exportSubmissions(
  *  a dispute needs the history, and separating them into two exports would
  *  mean the dispute case is the one nobody built. */
 async function exportGrades(
-  db: ReturnType<typeof makeDb>,
+  db: Db,
   scope: CourseScope,
   cipher: IdentityCipher,
   studentId: string | null,
@@ -347,7 +370,7 @@ async function exportGrades(
 /** Transcripts: structured JSON, one object per conversation with its
  *  messages in order. Deliberately NOT tabular -- see the CSV refusal above. */
 async function exportTranscripts(
-  db: ReturnType<typeof makeDb>,
+  db: Db,
   scope: CourseScope,
   cipher: IdentityCipher,
   studentId: string | null,

@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 export class WriteLockTimeoutError extends Error {
+  readonly _tag = "WriteLockTimeoutError" as const;
   constructor(lockPath: string) {
     super(`Timed out waiting for knowledge write lock at ${lockPath}`);
     this.name = "WriteLockTimeoutError";

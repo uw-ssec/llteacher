@@ -11,6 +11,7 @@ import {
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
+import { SERVICE_UNAVAILABLE_MESSAGE } from "../utils/errors";
 
 const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
 
@@ -494,5 +495,15 @@ describe("POST /api/courses/:courseId/members (#316)", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ status: "role_conflict", existingRole: "student" });
     expect(auditBestEffortMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("course membership failure paths (Effect migration)", () => {
+  it("answers a database failure with the generic 503", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    listCourseTasMock.mockRejectedValue(new Error("connection terminated"));
+    const res = await buildApp(instructorOfA()).request("/api/courses/course-a/tas", undefined, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: SERVICE_UNAVAILABLE_MESSAGE });
   });
 });

@@ -151,4 +151,12 @@ describe("listLlmModelsHandler", () => {
     const res = await makeApp(instructor()).request("/api/courses/c1/llm-models", {}, ENV);
     expect(await res.json()).toEqual({ models: ["gpt-4o"] });
   });
+
+  it("502s with its own sentence on an unreadable gateway body", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("<html>not json</html>", { status: 200 })));
+    const res = await makeApp(instructor()).request("/api/courses/c1/llm-models", {}, ENV);
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "The model gateway returned an unreadable response." });
+  });
 });

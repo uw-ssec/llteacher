@@ -29,7 +29,11 @@ import {
   putKnowledgeInstructionDefaultHandler,
 } from "./knowledgeDocuments";
 import { KNOWLEDGE_INSTRUCTION } from "../../lib/prompts";
-import { memoryObjectStore } from "../storage/objectStore";
+import { memoryObjectStore, StorageError, StorageNotConfiguredError } from "../storage/objectStore";
+import { ConceptConflictError, ConceptIdError, KnowledgeNotConfiguredError } from "../knowledge/service";
+import { OkfError } from "../knowledge/okfCli";
+import { WriteLockTimeoutError } from "../knowledge/writeLock";
+import { CleanupError } from "../knowledge/cleanup";
 import type { AppEnv } from "../context";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
 
@@ -70,9 +74,12 @@ vi.mock("../repositories/materials", () => ({
   deleteAllMaterials: (...a: unknown[]) => deleteAllMaterials(...a),
 }));
 const store = memoryObjectStore();
+// Overridable per test, so an unconfigured store (storageFromEnv throwing)
+// can be exercised; defaults to the in-memory store.
+const storageFromEnv = vi.hoisted(() => vi.fn());
 vi.mock("../storage/objectStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../storage/objectStore")>();
-  return { ...actual, storageFromEnv: () => store };
+  return { ...actual, storageFromEnv: (...a: unknown[]) => storageFromEnv(...a) };
 });
 
 const CONCEPT = {
@@ -84,6 +91,7 @@ const ENC = encodeURIComponent(CONCEPT.id);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  storageFromEnv.mockImplementation(() => store);
   svc.list.mockResolvedValue([CONCEPT]);
   svc.show.mockResolvedValue(CONCEPT);
   svc.create.mockResolvedValue(CONCEPT);
@@ -356,5 +364,84 @@ describe("cleanup proposals", () => {
     expect(res.status).toBe(200);
     expect(cleanupMock).toHaveBeenCalledWith("unsaved draft", TEST_ENV);
     expect(svc.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("typed failures", () => {
+  const post = (body: unknown) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const quiet = () => vi.spyOn(console, "error").mockImplementation(() => {});
+
+  it("answers knowledge-service outages with the generic 503, whatever the cause", async () => {
+    quiet();
+    // KNOWLEDGE_ROOT unset, an okf CLI failure, and a write-lock timeout are
+    // dependency failures, not refusals: logged and answered 503, as before.
+    svc.list.mockRejectedValueOnce(new KnowledgeNotConfiguredError());
+    svc.search.mockRejectedValueOnce(new OkfError(["search"], 1, "boom"));
+    svc.create.mockRejectedValueOnce(new WriteLockTimeoutError("/x/.write.lock"));
+    for (const res of [
+      await app().request(base, {}, TEST_ENV),
+      await app().request(`/api/courses/${COURSE_ID}/knowledge/search?q=x`, {}, TEST_ENV),
+      await app().request(base, post({ path: "notes/x", kind: "concept", type: "t" }), TEST_ENV),
+    ]) {
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "Something went wrong. Please try again later." });
+    }
+  });
+
+  it("400s a path the service refuses as an invalid concept id", async () => {
+    svc.createDirectory.mockRejectedValueOnce(new ConceptIdError("Invalid directory: x"));
+    const dir = await app().request(base, post({ path: "readings", kind: "index" }), TEST_ENV);
+    expect(dir.status).toBe(400);
+    expect(await dir.json()).toEqual({ error: "Invalid path." });
+    svc.create.mockRejectedValueOnce(new ConceptIdError("Invalid concept id: x"));
+    const concept = await app().request(base, post({ path: "notes/x", kind: "concept", type: "t" }), TEST_ENV);
+    expect(concept.status).toBe(400);
+    expect(await concept.json()).toEqual({ error: "Invalid path." });
+  });
+
+  it("409s an update whose expected body is stale, with the service's sentence", async () => {
+    svc.update.mockRejectedValueOnce(new ConceptConflictError("The document changed. Reload it before applying cleanup."));
+    const res = await app().request(`${base}/${ENC}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ body: "n", expectedBody: "old" }) }, TEST_ENV);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "The document changed. Reload it before applying cleanup." });
+  });
+
+  it("502s a cleanup the model call could not complete, and 503s anything else", async () => {
+    cleanupMock.mockRejectedValueOnce(new CleanupError("Cleanup could not reach the model or timed out. Your document has not changed; try again."));
+    const res = await app().request(`${base}/${ENC}/cleanup`, post({ body: "draft" }), TEST_ENV);
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "Cleanup could not reach the model or timed out. Your document has not changed; try again." });
+    quiet();
+    cleanupMock.mockRejectedValueOnce(new TypeError("unexpected"));
+    expect((await app().request(`${base}/${ENC}/cleanup`, post({ body: "draft" }), TEST_ENV)).status).toBe(503);
+  });
+
+  it("400s a directory param that does not decode, instead of a 503", async () => {
+    // %25 reaches the handler as a bare "%" after Hono's own decode; the
+    // handler's second decode used to throw URIError into the generic 503.
+    const res = await app().request(`/api/courses/${COURSE_ID}/knowledge/directories/%25`, { method: "DELETE" }, TEST_ENV);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "Invalid directory." });
+    expect(svc.removeDirectory).not.toHaveBeenCalled();
+  });
+
+  it("keeps upload cleanup best effort when the store is unconfigured or failing", async () => {
+    quiet();
+    deleteMaterialByDocumentPath.mockResolvedValue({ storageKey: "k/one.pdf" });
+    // Previously storageFromEnv ran outside the guard, so an unconfigured
+    // store turned a completed delete into a 503.
+    storageFromEnv.mockImplementation(() => { throw new StorageNotConfiguredError(); });
+    expect((await app().request(`${base}/${ENC}?withUpload=1`, { method: "DELETE" }, TEST_ENV)).status).toBe(204);
+    storageFromEnv.mockImplementation(() => store);
+    vi.spyOn(store, "delete").mockRejectedValueOnce(new StorageError("delete", 500));
+    expect((await app().request(`${base}/${ENC}?withUpload=1`, { method: "DELETE" }, TEST_ENV)).status).toBe(204);
+  });
+
+  it("answers a database failure with the generic 503", async () => {
+    quiet();
+    getKnowledgeInstructionParts.mockRejectedValueOnce(Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }));
+    const res = await app().request(`/api/courses/${COURSE_ID}/knowledge/instruction`, {}, TEST_ENV);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "Something went wrong. Please try again later." });
   });
 });

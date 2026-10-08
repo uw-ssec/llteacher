@@ -44,6 +44,7 @@ import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
  *  SectionConversationExistsError, PromptTemplateConflictError) so the
  *  route layer can catch exactly this and nothing else. */
 export class ResponseAlreadyFlaggedError extends Error {
+  readonly _tag = "ResponseAlreadyFlaggedError" as const;
   constructor() {
     super("You've already flagged this response");
     this.name = "ResponseAlreadyFlaggedError";

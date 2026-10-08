@@ -3,6 +3,20 @@ import type { Db } from "../../db/client";
 import { homeworkProgressWidgets, homeworks, courses, courseMemberships, homeworkProgressWidgetResponses } from "../../db/schema";
 import type { OrgScope } from "./scope";
 import { isHomeworkHidden } from "./homeworks";
+import { assertOrderInRange, ContentDiffError } from "./sections";
+
+/** submitWidgetResponse's refusal: the widget is absent, in another org, the
+ *  caller holds no live student membership in its course, or (#177) its
+ *  homework is hidden/expired -- one class because the repository already
+ *  gave them one message. Typed (it was a plain Error) so the route can
+ *  translate exactly this and let a dropped connection reach the 503 path. */
+export class WidgetNotFoundError extends Error {
+  readonly _tag = "WidgetNotFoundError" as const;
+  constructor() {
+    super("Widget not found in this org scope");
+    this.name = "WidgetNotFoundError";
+  }
+}
 
 export interface ExistingWidget {
   id: string;
@@ -50,8 +64,9 @@ export function planWidgetDiff(
 ): WidgetDiffPlan {
   const orders = new Set<number>();
   for (const w of incoming) {
+    assertOrderInRange(w.order, "widget");
     if (orders.has(w.order)) {
-      throw new Error(`duplicate order ${w.order} in incoming widgets`);
+      throw new ContentDiffError(`duplicate order ${w.order} in incoming widgets`);
     }
     orders.add(w.order);
   }
@@ -69,7 +84,7 @@ export function planWidgetDiff(
     }
     const prior = existingById.get(w.id);
     if (!prior) {
-      throw new Error(`unknown widget id "${w.id}" -- not part of this homework`);
+      throw new ContentDiffError(`unknown widget id "${w.id}" -- not part of this homework`);
     }
 
     const prePromptChanged = prior.prePrompt !== w.prePrompt;
@@ -125,10 +140,10 @@ export async function submitWidgetResponse(
     )
     .where(and(eq(homeworkProgressWidgets.id, widgetId), eq(courses.organizationId, scope)));
   if (!owned) {
-    throw new Error("Widget not found in this org scope");
+    throw new WidgetNotFoundError();
   }
   if (isHomeworkHidden(owned)) {
-    throw new Error("Widget not found in this org scope");
+    throw new WidgetNotFoundError();
   }
 
   const [existing] = await db

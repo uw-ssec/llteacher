@@ -11,8 +11,8 @@
 
 import { type Context } from "hono";
 import { and, desc, eq } from "drizzle-orm";
+import { Effect } from "effect";
 import { UUID_RE } from "../utils/uuid";
-import { makeDb } from "../../db/client";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import {
@@ -32,7 +32,6 @@ import {
 } from "../repositories/grades";
 import { getOrgScopeForCourse, getOrgScopeAndLlmConfigForCourse } from "../repositories/organizations";
 import { resolveLlmConfig } from "../repositories/llmConfigs";
-import { courseScopeFromAuthContext } from "../repositories/scope";
 import { draftGrade } from "../../lib/services/GradingEvaluator";
 import {
   loadLLMConfigById,
@@ -40,14 +39,17 @@ import {
   buildProviderClient,
   LLMCredentialMissingError,
   UnsupportedLLMProviderError,
+  type LlmProvider,
 } from "../../lib/llm-config";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 import { logServerError } from "../utils/errors";
 import { messageTextOf } from "../utils/messageText";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
-import type { CourseScope } from "../repositories/scope";
 import type { GradeDraftPayload, GradeListPayload } from "@llteacher/ui/api";
+import { BadRequest, Conflict, ExternalServiceError, Forbidden, NotFound } from "../effect/errors";
+import { effectHandler, requireCourseAccess, type CourseAccess } from "../effect/http";
+import { external, query } from "../effect/services";
 
 const MAX_FEEDBACK_CHARS = 20_000;
 /** The scale a draft is asked for when the instructor has not yet chosen
@@ -57,14 +59,14 @@ const DEFAULT_MAX_SCORE = 100;
 /** The platform-default LLMoxie model used when no org config resolves. */
 const DEFAULT_DRAFT_MODEL_NAME = "gpt-5.3-codex";
 
-async function instructorContext(
-  c: Context<AppEnv>,
-): Promise<{ scope: CourseScope; courseId: string; authContext: AuthContext } | null> {
+/** Instructor-of-course, then the CourseScope for that course. Both refusals
+ *  carry the same body, as they always have. */
+function instructorContext(c: Context<AppEnv>): Effect.Effect<CourseAccess, Forbidden> {
   const courseId = c.req.param("courseId");
   const authContext = c.get("authContext") as AuthContext | undefined;
-  if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) return null;
-  const scope = courseScopeFromAuthContext(authContext, courseId);
-  return scope ? { scope, courseId, authContext } : null;
+  return authContext && courseId && authContext.isInstructorOf(courseId)
+    ? requireCourseAccess(c, "courseId", "Instructor access denied")
+    : Effect.fail(new Forbidden({ message: "Instructor access denied" }));
 }
 
 function submissionIdParam(c: Context<AppEnv>): string | null {
@@ -72,44 +74,43 @@ function submissionIdParam(c: Context<AppEnv>): string | null {
   return id && UUID_RE.test(id) ? id : null;
 }
 
-export async function listGradesHandler(c: Context<AppEnv>) {
-  const ctx = await instructorContext(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
-  const submissionId = submissionIdParam(c);
-  if (!submissionId) return c.json({ error: "That submission no longer exists." }, 404);
+const submissionGone = () => new NotFound({ message: "That submission no longer exists." });
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-  try {
-    const grades = await listGradesForSubmission(db, ctx.scope, submissionId, cipher);
-    const body: GradeListPayload = { grades };
-    return c.json(body);
-  } catch (err) {
-    if (err instanceof SubmissionNotInCourseError) {
-      return c.json({ error: "That submission no longer exists." }, 404);
-    }
-    throw err;
-  }
-}
+/** The cipher keys are process configuration, not request input: a missing
+ *  key is a deployment fault, answered as a logged 503 defect. */
+const identityCipher = (c: Context<AppEnv>) =>
+  Effect.promise(() => loadIdentityCipherKeys(c.env)).pipe(Effect.map((keys) => new IdentityCipher(keys)));
+
+export const listGradesHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* instructorContext(c);
+  const submissionId = submissionIdParam(c);
+  if (!submissionId) return yield* submissionGone();
+
+  const cipher = yield* identityCipher(c);
+  const grades = yield* query(
+    "listGradesForSubmission",
+    (db) => listGradesForSubmission(db, ctx.scope, submissionId, cipher),
+    [SubmissionNotInCourseError],
+  ).pipe(Effect.catchTag("SubmissionNotInCourseError", () => Effect.fail(submissionGone())));
+  const body: GradeListPayload = { grades };
+  return c.json(body);
+}));
 
 /** Saves a human grade. Always an insert -- a regrade supersedes rather than
  *  overwrites, so the history a dispute needs survives. */
-export async function saveGradeHandler(c: Context<AppEnv>) {
-  const ctx = await instructorContext(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const saveGradeHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* instructorContext(c);
   const submissionId = submissionIdParam(c);
-  if (!submissionId) return c.json({ error: "That submission no longer exists." }, 404);
+  if (!submissionId) return yield* submissionGone();
 
-  let body: { score?: unknown; maxScore?: unknown; feedback?: unknown; supersedesGradeId?: unknown };
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: "Request body must be valid JSON" }, 400);
-  }
+  const body = yield* Effect.tryPromise({
+    try: () => c.req.json<{ score?: unknown; maxScore?: unknown; feedback?: unknown; supersedesGradeId?: unknown }>(),
+    catch: () => new BadRequest({ message: "Request body must be valid JSON" }),
+  });
 
   const feedback = typeof body.feedback === "string" ? body.feedback : "";
   if (feedback.length > MAX_FEEDBACK_CHARS) {
-    return c.json({ error: "That feedback is too long." }, 400);
+    return yield* new BadRequest({ message: "That feedback is too long." });
   }
 
   // A score needs a scale, and vice versa -- the same rule
@@ -119,7 +120,7 @@ export async function saveGradeHandler(c: Context<AppEnv>) {
   const hasScore = body.score !== null && body.score !== undefined;
   const hasMax = body.maxScore !== null && body.maxScore !== undefined;
   if (hasScore !== hasMax) {
-    return c.json({ error: "Enter both a score and the total it is out of, or neither." }, 400);
+    return yield* new BadRequest({ message: "Enter both a score and the total it is out of, or neither." });
   }
 
   let score: number | null = null;
@@ -130,54 +131,50 @@ export async function saveGradeHandler(c: Context<AppEnv>) {
     // Finiteness checked explicitly: JSON admits 1e999, which parses to
     // Infinity and slips past a naive range comparison into a double column.
     if (!Number.isFinite(score) || !Number.isFinite(maxScore) || maxScore <= 0) {
-      return c.json({ error: "Enter a score and a total greater than zero." }, 400);
+      return yield* new BadRequest({ message: "Enter a score and a total greater than zero." });
     }
     if (score < 0 || score > maxScore) {
-      return c.json({ error: `Score must be between 0 and ${maxScore}.` }, 400);
+      return yield* new BadRequest({ message: `Score must be between 0 and ${maxScore}.` });
     }
   }
   if (!hasScore && !feedback.trim()) {
-    return c.json({ error: "Enter a score, written feedback, or both." }, 400);
+    return yield* new BadRequest({ message: "Enter a score, written feedback, or both." });
   }
 
   const supersedesGradeId =
     typeof body.supersedesGradeId === "string" && body.supersedesGradeId ? body.supersedesGradeId : null;
   if (supersedesGradeId && !UUID_RE.test(supersedesGradeId)) {
-    return c.json({ error: "That draft reference is not valid." }, 400);
+    return yield* new BadRequest({ message: "That draft reference is not valid." });
   }
 
-  const db = makeDb(c.env.DATABASE_URL);
-  const orgScope = await getOrgScopeForCourse(db, ctx.courseId);
-  if (!orgScope) return c.json({ error: "Instructor access denied" }, 403);
+  const orgScope = yield* query("getOrgScopeForCourse", (db) => getOrgScopeForCourse(db, ctx.courseId));
+  if (!orgScope) return yield* new Forbidden({ message: "Instructor access denied" });
 
   // The grade is attributed to the caller's OWN membership, never to an id
   // from the request: a grader field the client supplies is a grader field
   // the client can forge.
-  const graderMembershipId = await graderMembershipFor(
-    db,
-    ctx.scope,
-    ctx.authContext.session.userId,
+  const graderMembershipId = yield* query(
+    "graderMembershipFor",
+    (db) => graderMembershipFor(db, ctx.scope, ctx.authContext.session.userId),
   );
-  if (!graderMembershipId) return c.json({ error: "Instructor access denied" }, 403);
+  if (!graderMembershipId) return yield* new Forbidden({ message: "Instructor access denied" });
 
-  try {
-    await recordHumanGrade(db, ctx.scope, orgScope, {
+  yield* query(
+    "recordHumanGrade",
+    (db) => recordHumanGrade(db, ctx.scope, orgScope, {
       submissionId,
       graderMembershipId,
       score,
       maxScore,
       feedback,
       supersedesGradeId,
-    });
-  } catch (err) {
-    if (err instanceof SubmissionNotInCourseError) {
-      return c.json({ error: "That submission no longer exists." }, 404);
-    }
-    throw err;
-  }
+    }),
+    [SubmissionNotInCourseError],
+  ).pipe(Effect.catchTag("SubmissionNotInCourseError", () => Effect.fail(submissionGone())));
 
-  try {
-    await auditBestEffort(db, [orgScope], {
+  yield* query(
+    "auditBestEffort",
+    (db) => auditBestEffort(db, [orgScope], {
       actorUserId: ctx.authContext.session.userId,
       action: AUDIT_ACTIONS.GRADE_RECORDED,
       targetType: AUDIT_TARGET_TYPES.SUBMISSION,
@@ -186,25 +183,41 @@ export async function saveGradeHandler(c: Context<AppEnv>) {
       // named student are the education record itself, and the audit log is
       // for who-did-what, not a second copy of the content.
       requestMetadata: { courseId: ctx.courseId, score, maxScore, fromDraft: supersedesGradeId !== null },
-    });
-  } catch (err) {
-    logServerError("saveGradeHandler", err);
-  }
+    }),
+  ).pipe(Effect.catchTag("DatabaseError", (err) => Effect.sync(() => logServerError("saveGradeHandler", err.cause))));
 
-  const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-  const grades = await listGradesForSubmission(db, ctx.scope, submissionId, cipher);
+  const cipher = yield* identityCipher(c);
+  // Same refusal as the write above: the submission can only have left the
+  // course in the instant between the two statements.
+  const grades = yield* query(
+    "listGradesForSubmission",
+    (db) => listGradesForSubmission(db, ctx.scope, submissionId, cipher),
+    [SubmissionNotInCourseError],
+  ).pipe(Effect.catchTag("SubmissionNotInCourseError", () => Effect.fail(submissionGone())));
   const responseBody: GradeListPayload = { grades };
   return c.json(responseBody, 201);
+}));
+
+/** Builds the model client for one provider. Only UnsupportedLLMProviderError
+ *  is a documented refusal; anything else the factory throws is a gateway
+ *  fault. */
+function providerModel(c: Context<AppEnv>, provider: LlmProvider, apiKey: string, modelName: string) {
+  return Effect.try({
+    try: () => buildProviderClient(provider, apiKey, { llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL })(modelName),
+    catch: (err) =>
+      err instanceof UnsupportedLLMProviderError
+        ? err
+        : new ExternalServiceError({ service: "llm", operation: "buildProviderClient", cause: err }),
+  });
 }
 
 /** Produces an AI draft. The draft is stored as `graded_by_ai = true`, which
  *  is inert by construction -- it becomes a grade only when an instructor
  *  writes their own row citing it. See repositories/grades.ts. */
-export async function draftGradeHandler(c: Context<AppEnv>) {
-  const ctx = await instructorContext(c);
-  if (!ctx) return c.json({ error: "Instructor access denied" }, 403);
+export const draftGradeHandler = effectHandler((c) => Effect.gen(function* () {
+  const ctx = yield* instructorContext(c);
   const submissionId = submissionIdParam(c);
-  if (!submissionId) return c.json({ error: "That submission no longer exists." }, 404);
+  if (!submissionId) return yield* submissionGone();
 
   // #365: the up-front `if (!c.env.OPENROUTER_API_KEY) 503` that used to sit
   // here is gone, for the same reason chat.ts dropped its own (#26): WHICH
@@ -214,33 +227,34 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
   // are all `llmoxie` -- every organization's default since migration 0035 --
   // and would have sent an LLMOxie model id to openrouter.ai on one that had
   // both keys set.
-  const db = makeDb(c.env.DATABASE_URL);
-  const found = await getSubmissionInCourse(db, ctx.scope, submissionId);
-  if (!found) return c.json({ error: "That submission no longer exists." }, 404);
+  const found = yield* query("getSubmissionInCourse", (db) => getSubmissionInCourse(db, ctx.scope, submissionId));
+  if (!found) return yield* submissionGone();
 
   // The section this submission belongs to, its prompt, and its model
   // solution. Joined through the submission's conversation so the whole
   // lookup is course-scoped in one query -- there is no point at which a
   // section id from elsewhere could be substituted.
-  const [context] = await db
-    .select({
-      sectionContent: sections.content,
-      sectionId: sections.id,
-      solution: sectionSolutions.content,
-    })
-    .from(submissions)
-    .innerJoin(conversations, eq(submissions.conversationId, conversations.id))
-    .innerJoin(sections, eq(conversations.sectionId, sections.id))
-    .leftJoin(sectionSolutions, eq(sectionSolutions.sectionId, sections.id))
-    .where(and(eq(submissions.id, submissionId), eq(conversations.courseId, ctx.scope)));
+  const context = yield* query("selectDraftContext", async (db) => {
+    const [row] = await db
+      .select({
+        sectionContent: sections.content,
+        sectionId: sections.id,
+        solution: sectionSolutions.content,
+      })
+      .from(submissions)
+      .innerJoin(conversations, eq(submissions.conversationId, conversations.id))
+      .innerJoin(sections, eq(conversations.sectionId, sections.id))
+      .leftJoin(sectionSolutions, eq(sectionSolutions.sectionId, sections.id))
+      .where(and(eq(submissions.id, submissionId), eq(conversations.courseId, ctx.scope)));
+    return row;
+  });
 
   if (!context) {
     // A tutor conversation rather than a section one: there is no prompt and
     // no solution to judge against, so there is nothing to draft from.
-    return c.json(
-      { error: "This submission is not attached to a homework section, so it cannot be drafted." },
-      409,
-    );
+    return yield* new Conflict({
+      message: "This submission is not attached to a homework section, so it cannot be drafted.",
+    });
   }
 
   /* #362: the TAIL, bounded, rather than every message in the conversation.
@@ -253,30 +267,35 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
      per message. A conversation whose messages are shorter simply sends
      fewer characters than the budget allows, which costs nothing. */
   const TRANSCRIPT_MESSAGE_LIMIT = 240;
-  const rows = await db
-    .select({ role: messages.role, parts: messages.parts })
-    .from(messages)
-    .where(eq(messages.conversationId, found.conversationId))
-    .orderBy(desc(messages.seq))
-    .limit(TRANSCRIPT_MESSAGE_LIMIT);
+  const rows = yield* query("selectTranscriptTail", async (db) =>
+    db
+      .select({ role: messages.role, parts: messages.parts })
+      .from(messages)
+      .where(eq(messages.conversationId, found.conversationId))
+      .orderBy(desc(messages.seq))
+      .limit(TRANSCRIPT_MESSAGE_LIMIT),
+  );
   rows.reverse();
 
   const transcript = rows.map((r) => ({ role: r.role as string, text: messageTextOf(r.parts) }));
   if (transcript.every((t) => t.text.trim() === "")) {
-    return c.json({ error: "This conversation has no content to assess." }, 409);
+    return yield* new Conflict({ message: "This conversation has no content to assess." });
   }
 
   /* #421: the course's own llm_config_id comes back with the scope, in the
      same round-trip, and is passed into the walk -- otherwise this path skips
      the course tier and can draft a grade on a different model than the one
      that produced the conversation being graded. */
-  const courseScope = await getOrgScopeAndLlmConfigForCourse(db, ctx.courseId);
+  const courseScope = yield* query(
+    "getOrgScopeAndLlmConfigForCourse",
+    (db) => getOrgScopeAndLlmConfigForCourse(db, ctx.courseId),
+  );
   const orgScope = courseScope?.orgScope ?? null;
   const config = orgScope
-    ? await resolveLlmConfig(db, orgScope, {
+    ? yield* query("resolveLlmConfig", (db) => resolveLlmConfig(db, orgScope, {
         sectionId: context.sectionId,
         courseLlmConfigId: courseScope?.courseLlmConfigId ?? null,
-      })
+      }))
     : null;
 
   // #365: build the client from the resolved config's OWN provider and
@@ -289,38 +308,51 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
   // server needs. `activeOnly: false` because resolveLlmConfig has already
   // applied its own is_active rule at every tier it walked.
   const resolvedConfig =
-    orgScope && config ? await loadLLMConfigById(db, orgScope, config.id, { activeOnly: false }) : null;
+    orgScope && config
+      ? yield* query(
+          "loadLLMConfigById",
+          (db) => loadLLMConfigById(db, orgScope, config.id, { activeOnly: false }),
+        )
+      : null;
 
-  let model;
-  try {
-    if (resolvedConfig && orgScope) {
-      const apiKey = await resolveApiKey(c.env, db, orgScope, resolvedConfig);
-      model = buildProviderClient(resolvedConfig.provider, apiKey, {
-        llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
-      })(resolvedConfig.modelName);
-    } else {
-      if (!c.env.LLMOXIE_API_KEY) {
-        logServerError("draftGradeHandler", new Error("LLMOXIE_API_KEY is not configured"));
-        return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
-      }
-      model = buildProviderClient("llmoxie", c.env.LLMOXIE_API_KEY, {
-        llmoxieBaseUrl: c.env.LLMOXIE_BASE_URL,
-      })(DEFAULT_DRAFT_MODEL_NAME);
-    }
-  } catch (err) {
-    if (err instanceof LLMCredentialMissingError || err instanceof UnsupportedLLMProviderError) {
-      logServerError("draftGradeHandler", err);
-      return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
-    }
-    /* #425: same reasoning as testLlmConfigHandler -- resolveApiKey reads
-       organization_credentials, so a transient DB failure is reachable here
-       and should not escape as an unhandled 500 on an instructor-initiated
-       action. */
+  const gatewayNotConfigured = (err: unknown) => {
+    logServerError("draftGradeHandler", err);
+    return c.json({ error: "The model gateway is not configured. Contact an administrator." }, 503);
+  };
+  /* #425: same reasoning as testLlmConfigHandler -- resolveApiKey reads
+     organization_credentials, so a transient DB failure is reachable here
+     and should not escape as an unhandled 500 on an instructor-initiated
+     action. */
+  const gatewayUnreachable = (err: unknown) => {
     logServerError("draftGradeHandler", err);
     return c.json({ error: "The model gateway could not be reached. Try again shortly." }, 503);
-  }
+  };
+  const model = yield* Effect.gen(function* () {
+    if (resolvedConfig && orgScope) {
+      const apiKey = yield* query(
+        "resolveApiKey",
+        (db) => resolveApiKey(c.env, db, orgScope, resolvedConfig),
+        [LLMCredentialMissingError],
+      );
+      return yield* providerModel(c, resolvedConfig.provider, apiKey, resolvedConfig.modelName);
+    }
+    if (!c.env.LLMOXIE_API_KEY) {
+      return yield* Effect.fail(new LLMCredentialMissingError("LLMOXIE_API_KEY is not configured"));
+    }
+    return yield* providerModel(c, "llmoxie", c.env.LLMOXIE_API_KEY, DEFAULT_DRAFT_MODEL_NAME);
+  }).pipe(Effect.catchTags({
+    // These 503s carry their own sentences, not the generic one: an
+    // instructor pressed a button and the next step is an administrator.
+    LLMCredentialMissingError: (err) => Effect.succeed(gatewayNotConfigured(err)),
+    UnsupportedLLMProviderError: (err) => Effect.succeed(gatewayNotConfigured(err)),
+    DatabaseError: (err) => Effect.succeed(gatewayUnreachable(err.cause)),
+    ExternalServiceError: (err) => Effect.succeed(gatewayUnreachable(err.cause)),
+  }));
+  if (model instanceof Response) return model;
 
-  const draft = await draftGrade({
+  // draftGrade never throws for a model-side failure (it answers null);
+  // anything it does throw is an LLM-gateway fault, answered 503.
+  const draft = yield* external("llm", "draftGrade", () => draftGrade({
     sectionContent: context.sectionContent,
     solutionContent: context.solution ?? null,
     transcript,
@@ -332,7 +364,7 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
     // enough, since this used to be handed to getOpenRouter regardless.
     modelName: resolvedConfig?.modelName ?? DEFAULT_DRAFT_MODEL_NAME,
     model,
-  });
+  }));
 
   if (!draft) {
     // An ordinary outcome for an optional assistant, not a server fault: the
@@ -340,26 +372,29 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
     return c.json({ error: "Could not draft a grade for this submission. Grade it directly." }, 502);
   }
 
-  if (!orgScope) return c.json({ error: "Instructor access denied" }, 403);
-  const draftGradeId = await recordAiDraft(db, ctx.scope, orgScope, {
-    submissionId,
-    score: draft.score,
-    maxScore: draft.maxScore,
-    rationale: draft.rationale,
-    modelName: draft.modelName,
-  });
+  if (!orgScope) return yield* new Forbidden({ message: "Instructor access denied" });
+  const draftGradeId = yield* query(
+    "recordAiDraft",
+    (db) => recordAiDraft(db, ctx.scope, orgScope, {
+      submissionId,
+      score: draft.score,
+      maxScore: draft.maxScore,
+      rationale: draft.rationale,
+      modelName: draft.modelName,
+    }),
+    [SubmissionNotInCourseError],
+  ).pipe(Effect.catchTag("SubmissionNotInCourseError", () => Effect.fail(submissionGone())));
 
-  try {
-    await auditBestEffort(db, [orgScope], {
+  yield* query(
+    "auditBestEffort",
+    (db) => auditBestEffort(db, [orgScope], {
       actorUserId: ctx.authContext.session.userId,
       action: AUDIT_ACTIONS.GRADE_DRAFTED,
       targetType: AUDIT_TARGET_TYPES.SUBMISSION,
       targetId: submissionId,
       requestMetadata: { courseId: ctx.courseId, modelName: draft.modelName },
-    });
-  } catch (err) {
-    logServerError("draftGradeHandler", err);
-  }
+    }),
+  ).pipe(Effect.catchTag("DatabaseError", (err) => Effect.sync(() => logServerError("draftGradeHandler", err.cause))));
 
   const body: GradeDraftPayload = {
     draftGradeId,
@@ -369,5 +404,4 @@ export async function draftGradeHandler(c: Context<AppEnv>) {
     modelName: draft.modelName,
   };
   return c.json(body, 201);
-}
-
+}));

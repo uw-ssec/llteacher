@@ -1,6 +1,7 @@
-import { Hono, type Context } from "hono";
+import { Hono } from "hono";
+import { Cause, Effect } from "effect";
+import { SignatureVerificationException } from "@workos-inc/node";
 import { getWorkOS } from "../../lib/workos";
-import { makeDb } from "../../db/client";
 import { deactivateByWorkosUserId } from "../repositories/users";
 import { recordAuditEvent } from "../repositories/auditEvents";
 import { claimWebhookEvent, recordWebhookEvent } from "../repositories/webhookEvents";
@@ -10,6 +11,9 @@ import { UserIdentityService } from "../../lib/services/UserIdentityService";
 import { AUDIT_ACTIONS } from "../utils/audit";
 import { logServerError } from "../utils/errors";
 import type { AppEnv } from "../context";
+import { BadRequest, DatabaseError } from "../effect/errors";
+import { effectHandler } from "../effect/http";
+import { external, query } from "../effect/services";
 
 /** Handles WorkOS lifecycle webhooks (issue #95, extended by #142). v0
  *  scope was deprovisioning only (`user.deleted`); this also handles
@@ -47,7 +51,10 @@ import type { AppEnv } from "../context";
  *  Dedup is an atomic claim (#151, claimWebhookEvent), not a separate
  *  find-then-later-insert -- two concurrent identical deliveries can't
  *  both pass the check before either has written anything. */
-export async function workosWebhookHandler(c: Context<AppEnv>) {
+export const workosWebhookHandler = effectHandler((c) => Effect.gen(function* () {
+  // 401s here carry their own sentence ("Missing signature" / "Invalid
+  // signature"), which WorkOS's delivery log shows an operator -- so they
+  // are answered directly rather than as Unauthorized's fixed body.
   const sigHeader = c.req.header("workos-signature");
   if (!sigHeader) {
     return c.json({ error: "Missing signature" }, 401);
@@ -59,7 +66,8 @@ export async function workosWebhookHandler(c: Context<AppEnv>) {
   // an operator has no way to tell "misconfigured" from "someone's
   // hammering this endpoint with garbage." Logged distinctly so it shows
   // up as a config problem, not routine auth noise; still 401 either way.
-  if (!c.env.WORKOS_WEBHOOK_SECRET) {
+  const secret = c.env.WORKOS_WEBHOOK_SECRET;
+  if (!secret) {
     logServerError("workosWebhookHandler", new Error("WORKOS_WEBHOOK_SECRET is not configured"));
     return c.json({ error: "Invalid signature" }, 401);
   }
@@ -68,63 +76,76 @@ export async function workosWebhookHandler(c: Context<AppEnv>) {
   // before any JSON parsing, and reuse the result. constructEvent expects a
   // parsed object (it does its own JSON.stringify internally to compute the
   // signature), not the raw string.
-  const rawBody = await c.req.text();
-  let payload: unknown;
-  try {
-    payload = JSON.parse(rawBody);
-  } catch {
-    return c.json({ error: "Invalid JSON" }, 400);
-  }
+  const rawBody = yield* Effect.promise(() => c.req.text());
+  const payload = yield* Effect.try({
+    try: (): unknown => JSON.parse(rawBody),
+    catch: () => new BadRequest({ message: "Invalid JSON" }),
+  });
 
-  const workos = getWorkOS(c.env.WORKOS_API_KEY);
-  let event: Awaited<ReturnType<typeof workos.webhooks.constructEvent>>;
-  try {
-    event = await workos.webhooks.constructEvent({
-      payload,
-      sigHeader,
-      secret: c.env.WORKOS_WEBHOOK_SECRET,
-    });
-  } catch {
-    // Bad signature, stale timestamp, or malformed sigHeader -- all the
-    // same "this request isn't trusted" outcome (401), never a 500. Not
-    // logged as a server error: an invalid signature is a routine, expected
-    // occurrence (misconfiguration, retries against a rotated secret, or a
-    // genuine forgery attempt), not a bug in this code.
-    return c.json({ error: "Invalid signature" }, 401);
-  }
-
-  const db = makeDb(c.env.DATABASE_URL);
+  // Constructing the client is its own step: a missing WORKOS_API_KEY is a
+  // deployment fault (ExternalServiceError -> 503), not an untrusted request.
+  const workos = yield* external("workos", "getWorkOS", async () => getWorkOS(c.env.WORKOS_API_KEY));
+  const verified = yield* external(
+    "workos",
+    "webhooks.constructEvent",
+    () => workos.webhooks.constructEvent({ payload, sigHeader, secret }),
+    [SignatureVerificationException],
+  ).pipe(
+    Effect.map((event) => ({ event })),
+    Effect.catch((err) => {
+      // Bad signature, stale timestamp, or malformed sigHeader -- all the
+      // same "this request isn't trusted" outcome (401), never a 5xx. Not
+      // logged as a server error: an invalid signature is a routine, expected
+      // occurrence (misconfiguration, retries against a rotated secret, or a
+      // genuine forgery attempt), not a bug in this code. Anything else
+      // constructEvent throws (it verifies locally, then deserializes the
+      // payload) is still answered 401 as before, but logged: it is not
+      // routine.
+      if (!(err instanceof SignatureVerificationException)) {
+        logServerError("workosWebhookHandler", err.cause, { tag: err._tag, service: err.service, operation: err.operation });
+      }
+      return Effect.succeed({ response: c.json({ error: "Invalid signature" }, 401) });
+    }),
+  );
+  if ("response" in verified) return verified.response;
+  const { event } = verified;
 
   // #151: atomic claim replaces a separate find-then-later-insert dedup
   // check, which left a TOCTOU window where two concurrent identical
   // deliveries could both pass the check before either had written
   // anything. See claimWebhookEvent's doc comment for the exact race it
-  // closes and why a "claimed" status exists.
-  const claimed = await claimWebhookEvent(db, { id: event.id, eventType: event.event });
+  // closes and why a "claimed" status exists. A DatabaseError here is the
+  // generic 503, which WorkOS retries.
+  const claimed = yield* query(
+    "claimWebhookEvent",
+    (db) => claimWebhookEvent(db, { id: event.id, eventType: event.event }),
+  );
   if (!claimed) {
     return c.json({ received: true, duplicate: true });
   }
 
-  let status: "processed" | "skipped" = "processed";
-  try {
+  return yield* Effect.gen(function* () {
+    let status: "processed" | "skipped" = "processed";
     if (event.event === "user.deleted") {
       // #151: deactivateByWorkosUserId no longer short-circuits to null
       // just because the user was already inactive -- a retry (this
       // delivery, after a prior attempt's audit write failed) still needs
       // real org scopes back so the audit actually gets written this time.
-      const result = await deactivateByWorkosUserId(db, event.data.id);
+      const result = yield* query("deactivateByWorkosUserId", (db) => deactivateByWorkosUserId(db, event.data.id));
       if (result) {
         // The webhook payload carries no org context -- audit against
         // every org this user actually belonged to, discovered via their
         // course memberships.
-        await Promise.all(
-          result.orgScopes.map((scope) =>
-            recordAuditEvent(db, scope, {
-              actorUserId: null,
-              action: AUDIT_ACTIONS.USER_DEPROVISIONED,
-              targetType: "user",
-              targetId: result.userId,
-            }),
+        yield* query("recordAuditEvent", (db) =>
+          Promise.all(
+            result.orgScopes.map((scope) =>
+              recordAuditEvent(db, scope, {
+                actorUserId: null,
+                action: AUDIT_ACTIONS.USER_DEPROVISIONED,
+                targetType: "user",
+                targetId: result.userId,
+              }),
+            ),
           ),
         );
       }
@@ -135,11 +156,15 @@ export async function workosWebhookHandler(c: Context<AppEnv>) {
       // 500 -> "failed" -> WorkOS retries the exact same poison payload
       // until its retry schedule exhausts, never succeeding. Treated as
       // out-of-scope-for-this-handler (skipped), not a processing error.
-      if (typeof event.data.email === "string" && event.data.email.trim().length > 0) {
-        const cipher = new IdentityCipher(await loadIdentityCipherKeys(c.env));
-        await new UserIdentityService(cipher, db).handleEmailUpdated(
-          event.data.id,
-          event.data.email,
+      const email = event.data.email;
+      if (typeof email === "string" && email.trim().length > 0) {
+        // A missing/malformed ENCRYPTION_KEY is a defect -- caught below
+        // with every other processing failure, so it is still the 500
+        // WorkOS retries rather than a dropped event.
+        const cipher = yield* Effect.promise(async () => new IdentityCipher(await loadIdentityCipherKeys(c.env)));
+        yield* query(
+          "handleEmailUpdated",
+          (db) => new UserIdentityService(cipher, db).handleEmailUpdated(event.data.id, email),
         );
       } else {
         console.log(
@@ -155,30 +180,41 @@ export async function workosWebhookHandler(c: Context<AppEnv>) {
       status = "skipped";
     }
 
-    await recordWebhookEvent(db, {
-      id: event.id,
-      eventType: event.event,
-      payload: event.data,
-      status,
-    });
-  } catch (err) {
-    // A genuine failure processing a *verified* event (DB down, etc.) --
-    // the one case that should surface as a server error and let WorkOS's
-    // retry-on-failure behavior do its job. Recording "failed" is
-    // best-effort: if even that write fails, don't let it mask the real
-    // 500 the caller needs to see.
-    logServerError("workosWebhookHandler", err);
-    await recordWebhookEvent(db, {
-      id: event.id,
-      eventType: event.event,
-      payload: event.data,
-      status: "failed",
-    }).catch(() => {});
-    return c.json({ error: "Internal error" }, 500);
-  }
-
-  return c.json({ received: true });
-}
+    yield* query("recordWebhookEvent", (db) =>
+      recordWebhookEvent(db, {
+        id: event.id,
+        eventType: event.event,
+        payload: event.data,
+        status,
+      }),
+    );
+    return c.json({ received: true });
+  }).pipe(
+    // A genuine failure processing a *verified* event (DB down, a missing
+    // key, etc.) -- the one case that should surface as a server error and
+    // let WorkOS's retry-on-failure behavior do its job. Answered 500 (not
+    // the generic 503) as before. catchCause rather than catchTag: a defect
+    // here must be retried by WorkOS too, not swallowed into the bridge's
+    // 503 without the "failed" record. Recording "failed" is best-effort:
+    // if even that write fails, don't let it mask the real 500 the caller
+    // needs to see.
+    Effect.catchCause((cause) =>
+      Effect.gen(function* () {
+        const failure = Cause.squash(cause);
+        logServerError("workosWebhookHandler", failure instanceof DatabaseError ? failure.cause : failure);
+        yield* query("recordWebhookEvent", (db) =>
+          recordWebhookEvent(db, {
+            id: event.id,
+            eventType: event.event,
+            payload: event.data,
+            status: "failed",
+          }),
+        ).pipe(Effect.ignore);
+        return c.json({ error: "Internal error" }, 500);
+      }),
+    ),
+  );
+}));
 
 // Sub-app preserved for direct unit testing; production routing happens via
 // app.post("/api/webhooks/workos", workosWebhookHandler) in server/index.ts.
