@@ -362,34 +362,65 @@ git commit -m "docs: add super-admin onboarding runbook"
 
 - Modify only if verification reveals an in-scope defect; return to the owning task's red-green cycle before fixing it.
 
-- [ ] **Step 1: Run static and repository checks**
+- [x] **Step 1: Run static and repository checks**
 
 Run: `npm run typecheck && npm test && git diff --check && git status --short`
 
 Expected: all checks pass and the worktree contains no uncommitted product changes.
 
-- [ ] **Step 2: Review the implementation against the approved spec and review-focus cases**
+- [x] **Step 2: Review the implementation against the approved spec and review-focus cases**
 
 Inspect the branch diff from `862bb38`. Confirm all five Review Focus cases have direct automated coverage and that no WorkOS mutation or Canvas content import was introduced.
 
-- [ ] **Step 3: Create an isolated, empty Floci environment**
+- [x] **Step 3: Create an isolated, empty Floci environment**
 
 Start a second Floci container with a unique name, host ports, Docker volume or empty state directory, and network identity. Create a new Pulumi stack named for this feature. Do not point at, stop, prune, reset, mount, or reuse the existing `llteacher-floci` container, `.floci/data`, Pulumi `local` stack, RDS Docker volume, or database.
 
-- [ ] **Step 4: Deploy a new application and new database**
+- [x] **Step 4: Deploy a new application and new database**
 
 Build the branch image, deploy the infrastructure to the isolated Floci endpoint, run every migration against the newly created database, and bring up the web/admin services using the existing development secrets without changing WorkOS configuration.
 
-- [ ] **Step 5: Prove the database starts empty**
+- [x] **Step 5: Prove the database starts empty**
 
 Before using the UI, query counts for `organizations`, `courses`, and `course_memberships`; capture evidence that each is zero. Do not seed an organization or course.
 
-- [ ] **Step 6: Smoke-test the complete first-run flow**
+- [x] **Step 6: Smoke-test the complete first-run flow**
 
 Open the deployed admin URL and verify: super-admin sign-in reaches institution setup; create the UW institution; Course Setup becomes available; create a course for an instructor; sign in as that instructor; verify the course switcher/context; optionally connect their Canvas account and link the course; import roster only; add a TA; upload materials through Knowledge.
 
 If human WorkOS credentials or a real Canvas token are required, stop at the login/token boundary and hand the isolated deployment URL plus exact remaining clicks to the user. The automated/API portions, clean-database proof, health checks, and deployment diagnostics must already be complete.
 
-- [ ] **Step 7: Commit any deployment documentation or fixes, then report**
+- [x] **Step 7: Commit any deployment documentation or fixes, then report**
 
 Include the branch name, commit list, verification evidence, isolated Floci container/stack/database identifiers, deployment URL, and any user-only acceptance step. Do not claim the manual flow passed unless it was actually completed.
+
+### Acceptance record (2026-10-08)
+
+- Static checks passed: all five workspace typechecks, all production builds,
+  and `git diff --check`.
+- Package tests passed sequentially: UI 310; web 2,013 with 544 environment-
+  gated skips; admin 457; evals 47 with 6 dataset skips; infrastructure 152
+  (56 Vitest plus 96 Node tests) with 1 production-only skip.
+- The five review-focus cases have direct coverage, including real-PostgreSQL
+  races/rollback and instructor/legacy Canvas credential boundaries.
+- Isolated emulator: `llteacher-floci-super-admin-org-course`; isolated state:
+  `.floci/super-admin-org-course/data`; isolated Pulumi backend:
+  `.pulumi/super-admin-org-course`; scratch RDS container:
+  `floci-rds-db-7CA4016B0BCB434D9DD51BD3-45755a`.
+- Final image:
+  `000000000000.dkr.ecr.us-west-2.amazonaws.com/llteacher-local/app:super-admin-org-course-v2`
+  at `sha256:136a2de5b906736833a7a3adb50dacb14e0b3453c7801695b7f6a8f1b25ad450`.
+- All 58 migrations are applied. Immediately before handoff,
+  `organizations`, `courses`, `course_memberships`, and `users` each contained
+  zero rows.
+- `GET /api/health` returned that final image SHA, `/admin` returned 200, and
+  `/api/auth/login` redirected to AuthKit with the already-registered
+  `http://localhost:8080/api/auth/callback`. No WorkOS setting or object was
+  changed.
+- Human acceptance stops at the WorkOS login boundary as allowed by Step 6.
+  The remaining clicks are documented in `docs/super-admin-onboarding.md`.
+- Port deviation: the existing `llteacher-floci` container was stopped but not
+  deleted because WorkOS accepts the existing localhost:8080 callback and the
+  user explicitly prohibited changing WorkOS. Its state and database were not
+  mounted, reset, pruned, or reused. The isolated acceptance stack temporarily
+  owns ports 4566/8080/8443; the original container and its data remain intact.
