@@ -10,7 +10,12 @@ import {
   listCourseFeedback,
   ResponseAlreadyFlaggedError,
 } from "../repositories/responseFeedback";
-import { reserveRateLimitSlot, RATE_LIMIT_MAX_PER_MINUTE, RATE_LIMIT_WINDOW_MS } from "../repositories/rateLimits";
+import {
+  reserveRateLimitSlot,
+  retryAfterSeconds,
+  RATE_LIMIT_MAX_PER_MINUTE,
+  RATE_LIMIT_WINDOW_MS,
+} from "../repositories/rateLimits";
 import { MAX_COMMENT_CHARS } from "../../shared/chat-limits";
 import { courseScopeFromAuthContext } from "../repositories/scope";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
@@ -102,7 +107,11 @@ export const flagResponseHandler = effectHandler((c) => Effect.gen(function* () 
     return c.json(
       { error: "You're sending requests too quickly. Please wait a moment and try again." },
       429,
-      { "Retry-After": String(Math.ceil(RATE_LIMIT_WINDOW_MS / 1000)) },
+      /* #310: the time REMAINING in this fixed window, not its length -- a
+         request refused at 12:00:59.5 is free again at 12:01:00.0. The
+         client disables Retry for this long (#286), so an overstatement
+         locks a control that would actually work. */
+      { "Retry-After": String(retryAfterSeconds(new Date(), RATE_LIMIT_WINDOW_MS)) },
     );
   }
 

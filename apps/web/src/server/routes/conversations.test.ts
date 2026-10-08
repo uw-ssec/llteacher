@@ -47,6 +47,9 @@ vi.mock("../repositories/conversations", async (importOriginal) => ({
 const reserveRateLimitSlotMock = vi.fn();
 vi.mock("../repositories/rateLimits", () => ({
   reserveRateLimitSlot: (...args: unknown[]) => reserveRateLimitSlotMock(...args),
+  // #310: the 429 handler derives Retry-After from this; fixed so the
+  // assertions can name an exact header value.
+  retryAfterSeconds: () => 42,
   RATE_LIMIT_MAX_PER_MINUTE: 20,
   RATE_LIMIT_WINDOW_MS: 60_000,
 }));
@@ -378,7 +381,7 @@ describe("POST /api/conversations", () => {
     });
 
     expect(res.status).toBe(429);
-    expect(res.headers.get("Retry-After")).toBeTruthy();
+    expect(res.headers.get("Retry-After")).toBe("42");
     expect(createConversationMock).not.toHaveBeenCalled();
   });
 
