@@ -12,7 +12,7 @@
    -------------------------------------------------------------------------- */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import {
@@ -29,7 +29,9 @@ import {
   insertAutoSubmission,
   submitSection,
   OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT,
+  selectOverdueCandidateRows,
 } from "../repositories/submissions";
+import { deriveHomeworkStatus, isPastDueHomeworkSql } from "../repositories/homeworks";
 import { getStudentHomeworksForUser } from "../repositories/studentHomeworks";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
@@ -509,17 +511,97 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
       // whichever one happened to be queried in isolation.
       expect(candidatesByOrg.get(org.scope)).toHaveLength(OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT);
     }
-    // The point of the fix, stated as a single number: the returned,
-    // per-org-grouped Map this function hands back stays bounded at
-    // batchSize * the per-org cap even though the real backlog behind it
-    // (3 * overCap) is larger -- NOT a claim about the underlying SELECT's
-    // own row count, which has no SQL-level LIMIT and still fetches every
-    // matching row before this truncation runs (see
-    // OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT's own doc comment,
-    // repositories/submissions.ts).
+    // The returned, per-org-grouped Map stays bounded at batchSize * the
+    // per-org cap even though the real backlog behind it (3 * overCap) is
+    // larger.
     const totalReturned = [...candidatesByOrg.values()].reduce((n, c) => n + c.length, 0);
     expect(totalReturned).toBe(3 * OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT);
+
+    // #442: and so does the SELECT itself -- Postgres hands back at most the
+    // cap per org, not every org's full backlog for JS to truncate.
+    const rawRows = await selectOverdueCandidateRows(
+      db,
+      inArrayOrgs(heavyOrgs.map((o) => o.orgId)),
+      OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT,
+    );
+    expect(rawRows).toHaveLength(3 * OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT);
+    for (const org of heavyOrgs) {
+      expect(rawRows.filter((r) => r.organizationId === org.orgId)).toHaveLength(OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT);
+    }
   }, 60_000);
+
+  it("isPastDueHomeworkSql agrees with deriveHomeworkStatus on every combination of release-state inputs (#442)", async () => {
+    // The SQL predicate restates deriveHomeworkStatus so the per-org window
+    // can bound rows AFTER release-state filtering. If the two ever drift,
+    // the window can count rows the JS filter then drops -- the starvation
+    // failure the bound must never reintroduce. Seed every combination of the
+    // five inputs and require identical answers. Offsets are days, not
+    // seconds, so the database's now() and JS's Date.now() cannot straddle a
+    // boundary between them.
+    const org = await seedOrg("parity");
+    const past = new Date(Date.now() - 2 * DAY);
+    const future = new Date(Date.now() + 2 * DAY);
+    const ids: string[] = [];
+    for (const isHidden of [false, true]) {
+      for (const expiresAt of [null, past, future]) {
+        for (const publishedAt of [null, past]) {
+          for (const releasedAt of [null, past, future]) {
+            for (const dueDate of [past, future]) {
+              const { homeworkId } = await seedHomeworkWithSection(org, {
+                isHidden,
+                expiresAt,
+                publishedAt,
+                releasedAt,
+                dueDate,
+              });
+              ids.push(homeworkId);
+            }
+          }
+        }
+      }
+    }
+    expect(ids).toHaveLength(72);
+
+    const all = await db.select().from(homeworks).where(eq(homeworks.courseId, org.courseId));
+    const pastDueInJs = new Set(all.filter((hw) => deriveHomeworkStatus(hw) === "past_due").map((hw) => hw.id));
+    const pastDueInSql = new Set(
+      (
+        await db
+          .select({ id: homeworks.id })
+          .from(homeworks)
+          .where(and(eq(homeworks.courseId, org.courseId), isPastDueHomeworkSql()))
+      ).map((r) => r.id),
+    );
+
+    // Not vacuous: some rows really are past due, and most are not.
+    expect(pastDueInJs.size).toBeGreaterThan(0);
+    expect(pastDueInJs.size).toBeLessThan(all.length);
+    expect([...pastDueInSql].sort()).toEqual([...pastDueInJs].sort());
+  }, 60_000);
+
+  it("does not starve: older rows that are not really past due never take a slot in the SQL bound (#442)", async () => {
+    // Four decoys with OLDER due dates than the one real candidate -- hidden,
+    // expired, unpublished and still-scheduled -- each with a conversation
+    // the student wrote in. A bound applied before release-state filtering
+    // would fill a window of 2 with decoys and return nothing, every run.
+    const org = await seedOrg("starve");
+    const student = await seedStudent(org.courseId, `starve-${crypto.randomUUID()}@test.example`);
+    const old = (days: number) => new Date(Date.now() - days * DAY);
+    const decoys = [
+      await seedHomeworkWithSection(org, { dueDate: old(40), isHidden: true, title: "hidden" }),
+      await seedHomeworkWithSection(org, { dueDate: old(39), expiresAt: old(1), title: "expired" }),
+      await seedHomeworkWithSection(org, { dueDate: old(38), publishedAt: null, title: "draft" }),
+      await seedHomeworkWithSection(org, { dueDate: old(37), releasedAt: new Date(Date.now() + DAY), title: "scheduled" }),
+    ];
+    const real = await seedHomeworkWithSection(org, { dueDate: old(1), title: "real" });
+    for (const { sectionId } of [...decoys, real]) {
+      await seedConversation({ userId: student, courseId: org.courseId, sectionId });
+    }
+
+    const rawRows = await selectOverdueCandidateRows(db, eq(courses.organizationId, org.orgId), 2);
+    expect(rawRows.map((r) => r.sectionId)).toEqual([real.sectionId]);
+    expect((await findOverdueSubmissionCandidates(db, org.scope, 2)).map((c) => c.sectionId)).toEqual([real.sectionId]);
+  });
 
   it("counts submitted, skipped and failed accurately across a mixed batch, and logs one summary line", async () => {
     const org = await seedOrg("counts");
@@ -780,6 +862,10 @@ describe.skipIf(!DATABASE_URL)("autoSubmitOverdueSections (real DB, #167)", () =
  *  enforces it -- must stay real, because those are the parts under test.
  *  Only the two events that cannot be scheduled deterministically from
  *  outside are injected. */
+function inArrayOrgs(orgIds: string[]) {
+  return inArray(courses.organizationId, orgIds);
+}
+
 function withFailures(
   real: Db,
   opts: { failInsertFor: string; beforeFirstInsert: () => Promise<void> },
