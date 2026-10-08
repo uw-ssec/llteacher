@@ -301,7 +301,7 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
-          "default": false
+          "default": true
         },
         "last_synced_at": {
           "name": "last_synced_at",
@@ -1007,7 +1007,7 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
-          "default": true
+          "default": false
         },
         "slug": {
           "name": "slug",
