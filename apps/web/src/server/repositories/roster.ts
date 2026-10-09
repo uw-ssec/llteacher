@@ -368,10 +368,16 @@ export async function upsertCourseMembers(
     // succeed with the same identity. The FK from course_memberships means
     // the re-read has to happen before the memberships are written, which is
     // why it is here rather than deferred.
+    //
+    // No conflict target, as in findOrCreatePendingUser: a UW address also
+    // writes netid_blind_index, and Postgres only suppresses conflicts on the
+    // arbiter index, so naming the email index alone let the netid index
+    // still raise and fail the whole statement. A row that conflicted only on
+    // the NetID is not re-read below and is reported on its own in pass 4.
     const created = await db
       .insert(users)
       .values(values)
-      .onConflictDoNothing({ target: users.emailBlindIndex })
+      .onConflictDoNothing()
       .returning({ id: users.id, emailBlindIndex: users.emailBlindIndex });
     for (const row of created) userIdByIndex.set(hex(row.emailBlindIndex), row.id);
 
