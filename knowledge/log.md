@@ -5,6 +5,31 @@
 * **Update**: Updated concept `decisions/generative-figures-computed.md` (subject packs opt-in per LLM config; clinical informatics replaces bioinformatics; statistics pack and knowledge check).
 * **Update**: Linked `decisions/generative-figures-computed.md` to `decisions/messages-parts-jsonb.md` (Figures persist as tool-<name> parts in messages.parts and replay through output-available; RENDERABLE_TOOL_NAMES gates which parts count as renderable on replay.).
 * **Creation**: Documented concept `decisions/generative-figures-computed.md` (Subject figures compute what they assert; the model supplies only arguments).
+* **Update**: Linked `bugs/hint-test-initial-hydration-race.md` to `bugs/chat-rerender-per-token.md` (Both depend on the lifecycle and rendering of the real streaming chat surface.).
+* **Creation**: Documented concept `bugs/hint-test-initial-hydration-race.md` (Hint suppression tests must wait for initial history).
+* **Update**: Updated concept `decisions/design-system-lint.md`.
+* **Update**: Linked `project/current-state.md` to `facts/check-for-concurrent-work.md` (Read before picking up open work).
+* **Update**: Linked `facts/code-test-suite-quirks.md` to `decisions/org-admin-role-and-course-scoped-configs.md` (The change that surfaced these quirks).
+* **Update**: Linked `facts/code-test-suite-quirks.md` to `facts/code-typescript-and-install.md` (The other verification trap from the same session).
+* **Update**: Linked `facts/check-for-concurrent-work.md` to `facts/integrating-stale-prs.md` (The same staleness, before and after a PR).
+* **Update**: Linked `facts/integrating-stale-prs.md` to `decisions/retry-after-remaining-window.md` (The one piece of #435 that was integrated).
+* **Update**: Linked `facts/integrating-stale-prs.md` to `decisions/llm-provider-gateway-and-failover.md` (Where the #412 AWS gap is recorded).
+* **Update**: Linked `decisions/retry-after-remaining-window.md` to `architecture/llm-tutor-pipeline.md` (The chat route's 429 path).
+* **Creation**: Documented concept `facts/code-test-suite-quirks.md` (Test-suite quirks that cost time: auth middleware mocks, jsdom fieldsets, a parallel-run flake).
+* **Creation**: Documented concept `facts/check-for-concurrent-work.md` (Several sessions work this repository at once; re-check staging before and during an issue).
+* **Creation**: Documented concept `facts/integrating-stale-prs.md` (Integrating long-open PRs: find what already landed before resolving conflicts).
+* **Creation**: Documented concept `decisions/retry-after-remaining-window.md` (Retry-After reports the time left in the rate-limit window).
+* **Update**: Updated concept `project/milestones.md`.
+* **Update**: Updated concept `project/milestones.md`.
+* **Update**: Updated concept `project/current-state.md`.
+* **Update**: Updated concept `decisions/design-system-lint.md`.
+* **Update**: Updated concept `decisions/llm-provider-gateway-and-failover.md`.
+* **Update**: Updated concept `bugs/overdue-sweep-budget-and-races.md`.
+* **Update**: Updated concept `facts/code-typescript-and-install.md`.
+* **Update**: Updated concept `facts/authority-and-provisioning-gaps.md`.
+* **Update**: Linked `decisions/course-membership-roles.md` to `decisions/org-admin-role-and-course-scoped-configs.md` (Adds the first organization-level role beside course roles).
+* **Update**: Linked `facts/authority-and-provisioning-gaps.md` to `decisions/org-admin-role-and-course-scoped-configs.md` (#367 closed the org-level LLM config gap with an Org Admin role).
+* **Creation**: Documented concept `decisions/org-admin-role-and-course-scoped-configs.md` (Org Admin owns the shared LLM config pool; course instructors own course-scoped configs).
 * **Update**: Linked `decisions/effect-typed-request-pipeline.md` to `bugs/partial-stream-persisted-as-complete.md` (Same chat turn-finalization path: the Effect migration found that a provider rejection before any stream existed left the turn unfinalized and its lock held, returning false 409 in_progress on retry.).
 * **Creation**: Documented concept `decisions/effect-typed-request-pipeline.md` (API handlers run as Effect 4 programs with typed errors).
 

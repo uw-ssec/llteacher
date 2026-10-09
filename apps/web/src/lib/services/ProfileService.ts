@@ -98,11 +98,11 @@ export class ProfileService {
     // below, so `primaryRole` and `courseCount` stop counting memberships a
     // user no longer holds -- a dropped TA was passing the console's role
     // gate and landing on an empty-course state instead of a 403.
-    const memberships = await this.db.query.courseMemberships.findMany({
+    const memberships = (await this.db.query.courseMemberships.findMany({
       where: and(eq(courseMemberships.userId, userId), isNull(courseMemberships.droppedAt)),
       with: { course: true },
       orderBy: (m, { desc, asc }) => [desc(m.enrolledAt), asc(m.id)],
-    });
+    })).filter((membership) => membership.course?.isActive !== false);
     const primaryRole =
       ROLE_PRIORITY.find((role) => memberships.some((m) => m.role === role)) ?? null;
 
@@ -169,6 +169,8 @@ export class ProfileService {
         .map((m) => ({
           id: m.course.id,
           title: m.course.title,
+          code: m.course.code,
+          term: m.course.term,
           role: m.role,
           ...resolveTaCapabilities(m),
         }))

@@ -54,6 +54,8 @@ export interface ProfileResponse extends ProfileWithStats {
 export interface CourseMembershipSummary {
   id: string;
   title: string;
+  code: string;
+  term: string;
   role: CourseRole;
   canViewSolutions: boolean;
   canViewDrafts: boolean;
@@ -131,13 +133,13 @@ export type AddCourseMemberResponse = ProvisionResult;
 
 /* -- #316: courseless platform-instructor grant ----------------------------- */
 
-import type { GrantPlatformInstructorResult } from "../server/repositories/users";
-
 export interface GrantPlatformInstructorBody {
   email: string;
 }
 
-export type GrantPlatformInstructorResponse = GrantPlatformInstructorResult;
+export type GrantPlatformInstructorResponse =
+  | { status: "granted"; userId: string; grantedAt: Date }
+  | { status: "invalid_email" | "disallowed_domain"; message: string };
 
 /* -- #31 / #98 / #170: LLM configuration authoring ------------------------- */
 
@@ -147,7 +149,12 @@ export type { LlmConfigRecord };
 
 export interface LlmConfigListResponse {
   configs: LlmConfigRecord[];
+  /** #367: see @llteacher/ui/api's LlmConfigListPayload. */
+  canManageOrgPool: boolean;
 }
+
+/** #367: where a created or cloned configuration lives. */
+export type LlmConfigScope = "course" | "organization";
 
 /** The create/update body. Deliberately has no credential field: the
  *  platform gateway needs no key from an instructor, and an
@@ -164,10 +171,14 @@ export interface LlmConfigBody {
   fallbackLlmConfigId: string | null;
   isActive: boolean;
   isDefault: boolean;
+  /** #367: create only; see LlmConfigScope. */
+  scope?: LlmConfigScope;
 }
 
 export interface LlmConfigCloneBody {
   name: string;
+  /** #367: see LlmConfigScope. */
+  scope?: LlmConfigScope;
 }
 
 export interface LlmConfigTestBody {
@@ -537,6 +548,7 @@ export interface CanvasCredentialResponse {
     expiresAt: string | null;
     rotatedAt: string | null;
   } | null;
+  reconnectRequired?: boolean;
 }
 
 export interface CanvasCredentialBody {
@@ -593,6 +605,10 @@ declare global {
     DATABASE_URL: string;
     WORKOS_API_KEY: string;
     WORKOS_CLIENT_ID: string;
+    /** Comma-separated first-run policy. Deployments should override both
+     *  values for their institution; UW values preserve existing installs. */
+    BOOTSTRAP_ALLOWED_DOMAINS?: string;
+    SUPER_ADMIN_EMAILS?: string;
     OPENROUTER_API_KEY?: string;
     /* #178's gateway. Required, not optional (#317 review, #343): migration
        0035 moves the platform-default llm_configs row for every org to

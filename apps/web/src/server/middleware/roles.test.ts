@@ -41,6 +41,7 @@ let MEMBERSHIPS: Array<Record<string, unknown>> = DEFAULT_MEMBERSHIPS;
 
 let findManyCalls = 0;
 let findFirstCalls = 0;
+let orgAdminRows: { organizationId: string }[] = [];
 let userRow:
   | { isActive: boolean; sessionEpoch: number; emailBlindIndex: BlindIndex; platformInstructorGrantedAt: Date | null }
   | undefined;
@@ -58,6 +59,10 @@ vi.mock("../../db/client", () => ({
           findFirstCalls++;
           return userRow;
         },
+      },
+      // #367: no Org Admin grants unless a test sets them.
+      organizationMemberships: {
+        findMany: async () => orgAdminRows,
       },
     },
   }),
@@ -93,6 +98,29 @@ describe("rolesMiddleware", () => {
     findFirstCalls = 0;
     userRow = { isActive: true, sessionEpoch: 0, emailBlindIndex: nonAdminBlindIndex, platformInstructorGrantedAt: null };
     MEMBERSHIPS = DEFAULT_MEMBERSHIPS;
+    orgAdminRows = [];
+  });
+
+  // #367: org-level authority comes from organization_memberships, and is
+  // NOT implied by being an instructor of a course in the organization.
+  it("exposes isOrgAdminOf from Org Admin grants only", async () => {
+    const probe = async () => {
+      const app = new Hono<AppEnv>();
+      app.use("*", async (c, next) => {
+        c.set("session", sessionFor(0));
+        await next();
+      });
+      app.use("*", rolesMiddleware);
+      app.get("/api/x", (c) => {
+        const ctx = c.get("authContext")!;
+        return c.json({ orgA: ctx.isOrgAdminOf("org-a"), orgB: ctx.isOrgAdminOf("org-b") });
+      });
+      return (await app.request("/api/x", {}, TEST_ENV)).json();
+    };
+    // An instructor (DEFAULT_MEMBERSHIPS) with no grant: no org authority.
+    expect(await probe()).toEqual({ orgA: false, orgB: false });
+    orgAdminRows = [{ organizationId: "org-a" }];
+    expect(await probe()).toEqual({ orgA: true, orgB: false });
   });
 
   it("resolves memberships and exposes role-check helpers", async () => {

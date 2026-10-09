@@ -134,7 +134,8 @@ describe("LLMConfigFormView — knowledge base access", () => {
         initialConfig={{
           id: "cfg", recordNumber: 1, name: "Closed book", provider: "openrouter", modelName: "m", basePrompt: "",
           temperature: 0.7, maxCompletionTokens: 1000, fallbackLlmConfigId: null, isDefault: false, isActive: true,
-          knowledgeEnabled: false, genuiToolkits: [], createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z",
+          knowledgeEnabled: false, genuiToolkits: [],
+          scopeCourseId: null, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z",
         }}
       />,
     );
@@ -169,7 +170,7 @@ describe("LLMConfigFormView — subject figures", () => {
         initialConfig={{
           id: "cfg", recordNumber: 1, name: "Nursing", provider: "openrouter", modelName: "m", basePrompt: "Teach.",
           temperature: 0.7, maxCompletionTokens: 1000, fallbackLlmConfigId: null, isDefault: false, isActive: true,
-          knowledgeEnabled: true, genuiToolkits: ["clinical-informatics", "statistics"],
+          knowledgeEnabled: true, genuiToolkits: ["clinical-informatics", "statistics"], scopeCourseId: null,
           createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z",
         }}
       />,

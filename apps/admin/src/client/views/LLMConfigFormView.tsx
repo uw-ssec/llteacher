@@ -72,6 +72,14 @@ export interface LLMConfigFormViewProps {
    *  being edited is excluded by the picker itself -- a config cannot be
    *  its own fallback, and the schema refuses it too. */
   siblings?: { id: string; name: string; modelName: string; isActive: boolean }[];
+  /** #367: a shared organization configuration this caller cannot change
+   *  (they are not an Org Admin). Shown for reference and testing; every
+   *  editable control is disabled and there is no save. */
+  readOnly?: boolean;
+  /** #367: whether to offer "Organization default" at all. Only an Org Admin
+   *  editing or creating a SHARED configuration may move the default; for
+   *  anyone else the control would only ever be refused. */
+  canSetDefault?: boolean;
   onSave: (values: LLMConfigFormValues) => Promise<void>;
   onCancel: () => void;
   /** #31: "Test configuration". Absent when creating -- there is nothing
@@ -117,6 +125,8 @@ export function LLMConfigFormView({
   initialConfig,
   availableModels = [],
   siblings = [],
+  readOnly = false,
+  canSetDefault = false,
   onSave,
   onCancel,
   onTest,
@@ -216,12 +226,23 @@ export function LLMConfigFormView({
       </button>
 
       <PageHeader
-        eyebrow="LLM CONFIG"
-        title={isEdit ? "Edit configuration" : "New configuration"}
-        subtitle="The model, voice, and limits behind the AI tutor for this course."
+        eyebrow={readOnly ? "LLM CONFIG · SHARED" : "LLM CONFIG"}
+        title={readOnly ? "Shared configuration" : isEdit ? "Edit configuration" : "New configuration"}
+        subtitle={
+          readOnly
+            ? "Shared across your organization and managed by its admins. You can test it here, or copy it from the list to make a version for this course."
+            : "The model, voice, and limits behind the AI tutor for this course."
+        }
       />
 
       <form className="admin-form" onSubmit={submit} noValidate>
+        {/* #367: a native disabled fieldset, so every control inside is
+            inert and announced as unavailable without per-input wiring.
+            `admin-form-lock` is `display: contents`: it adds no box of its
+            own, so the form lays out the same either way. The test panel
+            sits between the two locks on purpose -- testing a shared
+            configuration is allowed even when changing it is not. */}
+        <fieldset className="admin-form-lock" disabled={readOnly}>
         <div className="admin-form-field">
           <label htmlFor="cfg-name">Name</label>
           <input
@@ -458,27 +479,36 @@ export function LLMConfigFormView({
           </div>
         </fieldset>
 
+        </fieldset>
+
         {onTest && (
           <TestConfigPanel onTest={onTest} />
         )}
 
+        <fieldset className="admin-form-lock" disabled={readOnly}>
         <fieldset className="admin-form-group">
           <legend>Availability</legend>
 
-          <label className="admin-form-check">
-            <input
-              type="checkbox"
-              checked={values.isDefault}
-              onChange={(e) => set("isDefault", e.target.checked)}
-            />
-            <span className="admin-form-check__label">
-              Course default
-              <span>
-                Used by any homework that doesn&apos;t pick its own. Setting this moves the default
-                off whichever configuration currently holds it.
+          {/* #367: the organization default -- what every course and
+              homework without its own choice runs on. It was labelled
+              "Course default", which understated its reach; and it is now
+              offered only to someone who may actually move it. */}
+          {canSetDefault && (
+            <label className="admin-form-check">
+              <input
+                type="checkbox"
+                checked={values.isDefault}
+                onChange={(e) => set("isDefault", e.target.checked)}
+              />
+              <span className="admin-form-check__label">
+                Organization default
+                <span>
+                  Used by every course and homework in your organization that doesn&apos;t pick its
+                  own. Setting this moves the default off whichever configuration currently holds it.
+                </span>
               </span>
-            </span>
-          </label>
+            </label>
+          )}
 
           <label className="admin-form-check">
             <input
@@ -509,6 +539,7 @@ export function LLMConfigFormView({
               </span>
             </span>
           </label>
+        </fieldset>
         </fieldset>
 
         <fieldset className="admin-form-group">
@@ -541,11 +572,13 @@ export function LLMConfigFormView({
 
         {saveError && <AdminNotice eyebrow="Not saved" title={saveError} />}
 
-        <div className="admin-form-actions">
-          <button type="submit" className="admin-button admin-button--primary" disabled={saving}>
-            {saving ? "Saving…" : isEdit ? "Save changes" : "Create configuration"}
-          </button>
-        </div>
+        {!readOnly && (
+          <div className="admin-form-actions">
+            <button type="submit" className="admin-button admin-button--primary" disabled={saving}>
+              {saving ? "Saving…" : isEdit ? "Save changes" : "Create configuration"}
+            </button>
+          </div>
+        )}
       </form>
     </div>
   );

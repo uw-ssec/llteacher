@@ -28,6 +28,53 @@
  *  was a Date or a string. */
 export type IsoDateTime = string;
 
+/* -- Deployment institution and course setup ------------------------------ */
+
+export interface OrganizationPayload {
+  id: string;
+  name: string;
+  slug: string;
+  allowedDomains: string[];
+}
+
+export interface OrganizationResponse {
+  organization: OrganizationPayload | null;
+}
+
+export interface CreateOrganizationBody {
+  name: string;
+  slug: string;
+  allowedDomains: string[];
+}
+
+export interface ProvisionCourseBody {
+  instructorEmail: string;
+  title: string;
+  code: string;
+  term: string;
+}
+
+export interface ProvisionedCoursePayload {
+  id: string;
+  title: string;
+  code: string;
+  term: string;
+}
+
+export interface ProvisionCourseResponse {
+  course: ProvisionedCoursePayload;
+  instructor: { userId: string; email: string };
+}
+
+export interface PlatformCourseListItem extends ProvisionedCoursePayload {
+  status: "active" | "inactive";
+  instructors: Array<{ userId: string; email: string }>;
+}
+
+export interface PlatformCourseListResponse {
+  courses: PlatformCourseListItem[];
+}
+
 /* -- LLM configuration (#31, #98, #170) ------------------------------------ */
 
 export type LlmProvider =
@@ -63,12 +110,20 @@ export interface LlmConfigPayload {
   /** Subject figure packs enabled on this config (ids from
    *  @llteacher/ui/generative/toolkits). Empty means none. */
   genuiToolkits: string[];
+  /** #367: null for the organization's shared pool (changed only by an Org
+   *  Admin), or the one course that owns this configuration. */
+  scopeCourseId: string | null;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
 }
 
 export interface LlmConfigListPayload {
   configs: LlmConfigPayload[];
+  /** #367: whether the caller may create, edit, deactivate, or set the
+   *  default among the organization's SHARED configurations. A course's own
+   *  configurations (`scopeCourseId === courseId`) are editable by its
+   *  instructors regardless. */
+  canManageOrgPool: boolean;
 }
 
 export interface LlmConfigWriteBody {
@@ -83,6 +138,11 @@ export interface LlmConfigWriteBody {
   isDefault: boolean;
   knowledgeEnabled: boolean;
   genuiToolkits: string[];
+  /** #367: create/clone only -- where the new configuration lives. Omitted:
+   *  the shared pool for an Org Admin, this course for anyone else. A course
+   *  instructor asking for "organization" is refused. Ignored on update; a
+   *  configuration's owner never changes. */
+  scope?: "course" | "organization";
 }
 
 /** The test button's result. 200 either way: a model that refuses is a
@@ -138,6 +198,18 @@ export interface GrantPlatformInstructorResultPayload {
   userId?: string;
   grantedAt?: IsoDateTime;
   message?: string;
+}
+
+export interface PlatformInstructorListItem {
+  userId: string;
+  email: string;
+  status: "pending" | "signed_in";
+  grantedAt: IsoDateTime;
+  assignedCourseCount: number;
+}
+
+export interface PlatformInstructorListResponse {
+  instructors: PlatformInstructorListItem[];
 }
 
 /* -- Roster (#32, #86) ----------------------------------------------------- */
@@ -438,6 +510,7 @@ export interface CanvasCredentialSummary {
 
 export interface CanvasCredentialResponse {
   credential: CanvasCredentialSummary | null;
+  reconnectRequired?: boolean;
 }
 
 export interface CanvasCredentialBody {

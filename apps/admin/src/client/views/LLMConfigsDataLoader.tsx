@@ -185,6 +185,17 @@ export function LLMConfigsDataLoader({
 
   const all = configs.data?.configs ?? [];
   const editing = screen.kind === "edit" ? all.find((c) => c.id === screen.configId) : undefined;
+  // #367: the server's own rule, restated so the console never offers an
+  // action it would refuse -- this course's configurations always, shared
+  // ones only for an Org Admin. The server still enforces it either way.
+  const canManageOrgPool = configs.data?.canManageOrgPool ?? false;
+  const canChange = (cfg: LlmConfigPayload) =>
+    cfg.scopeCourseId === courseId || (cfg.scopeCourseId === null && canManageOrgPool);
+  // A shared configuration may only fall back to another shared one (the
+  // server refuses a course-owned fallback for it); a course's own may use
+  // either. A new configuration is shared exactly when an Org Admin makes it.
+  const editingShared = editing ? editing.scopeCourseId === null : canManageOrgPool;
+  const fallbackChoices = editingShared ? all.filter((c) => c.scopeCourseId === null) : all;
 
   if (screen.kind === "edit" && !editing) {
     // The list loaded and this id is not in it: deleted, or belonging to
@@ -207,7 +218,9 @@ export function LLMConfigsDataLoader({
         {actionError && <AdminNotice eyebrow="Not saved" title={actionError} />}
         <LLMConfigFormView
           initialConfig={editing}
-          siblings={all}
+          siblings={fallbackChoices}
+          readOnly={editing !== undefined && !canChange(editing)}
+          canSetDefault={canManageOrgPool && editingShared}
           onSave={(values) => save(values, editing?.id ?? null)}
           onCancel={() => onScreenChange({ kind: "list" })}
           // Editing only: there is nothing saved to test when creating, and
@@ -229,6 +242,8 @@ export function LLMConfigsDataLoader({
         onNewConfig={() => onScreenChange({ kind: "create" })}
         onCloneConfig={clone}
         onDeactivateConfig={deactivate}
+        canChange={canChange}
+        canManageOrgPool={canManageOrgPool}
       />
     </>
   );

@@ -51,6 +51,12 @@ export const courseRoleEnum = pgEnum("course_role", [
 
 export const lmsProviderEnum = pgEnum("lms_provider", ["canvas"]);
 
+/** #367: organization-level roles. Only `admin` exists: an Org Admin owns
+ *  org-level configuration (the shared LLM config pool and the org default).
+ *  A separate enum, not a course_role value, because the authority is keyed
+ *  to an organization, not to any one course. */
+export const organizationRoleEnum = pgEnum("organization_role", ["admin"]);
+
 export const credentialProviderEnum = pgEnum("credential_provider", [
   "openai",
   "anthropic",
@@ -112,9 +118,11 @@ export const organizations = pgTable(
   "organizations",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    /** Database-enforced single institution per deployed LLTeacher stack. */
+    deploymentSingleton: boolean("deployment_singleton").notNull().default(false),
     slug: text("slug").notNull(),
     name: text("name").notNull(),
-    workosOrganizationId: text("workos_organization_id").notNull(),
+    workosOrganizationId: text("workos_organization_id"),
     canvasAccountId: text("canvas_account_id"),
     /** The organisation's own default "when to search the knowledge base"
      *  guidance, used by any course without its own. Null means the
@@ -136,7 +144,12 @@ export const organizations = pgTable(
   },
   (t) => [
     uniqueIndex("organizations_slug_uq").on(t.slug),
-    uniqueIndex("organizations_workos_org_uq").on(t.workosOrganizationId),
+    uniqueIndex("organizations_singleton_uq")
+      .on(t.deploymentSingleton)
+      .where(sql`${t.deploymentSingleton} = true`),
+    uniqueIndex("organizations_workos_org_uq")
+      .on(t.workosOrganizationId)
+      .where(sql`${t.workosOrganizationId} IS NOT NULL`),
   ],
 );
 
@@ -276,12 +289,45 @@ export const courses = pgTable(
     uniqueIndex("courses_org_canvas_course_uq")
       .on(t.organizationId, t.canvasCourseId)
       .where(sql`${t.canvasCourseId} IS NOT NULL`),
+    uniqueIndex("courses_org_code_term_uq").on(
+      t.organizationId,
+      sql`lower(btrim(${t.code}))`,
+      sql`lower(btrim(${t.term}))`,
+    ),
   ],
 );
 
 // ---------- CourseMembership ----------
 // User <-> Course with a role. Replaces Django's Teacher/Student profiles.
 // Projection of a Canvas enrollment when canvas_enrollment_id is present.
+
+/** #367: user x organization x role. The honest model for an org-level
+ *  authority -- course_memberships.role = 'admin' would put an org-wide grant
+ *  on a row keyed to a single course. Granted by a super admin or an existing
+ *  Org Admin of the same organization (routes/organizationAdmins.ts); never
+ *  backfilled from course roles, because promoting every instructor would
+ *  preserve exactly the widening this role exists to remove. */
+export const organizationMemberships = pgTable(
+  "organization_memberships",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    role: organizationRoleEnum("role").notNull(),
+    grantedByUserId: uuid("granted_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("organization_memberships_user_org_uq").on(t.userId, t.organizationId),
+    index("organization_memberships_org_idx").on(t.organizationId),
+  ],
+);
 
 export const courseMemberships = pgTable(
   "course_memberships",
@@ -395,6 +441,10 @@ export const organizationCredentials = pgTable(
     organizationId: uuid("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
+    /** Canvas tokens are owned by the instructor who entered them. Null is
+     *  retained only for legacy organization-scoped rows, which must be
+     *  reconnected rather than assigned by guesswork. */
+    ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "cascade" }),
     provider: credentialProviderEnum("provider").notNull(),
     label: text("label").notNull(),
     secretRef: text("secret_ref"),
@@ -429,11 +479,12 @@ export const organizationCredentials = pgTable(
   },
   (t) => [
     index("organization_credentials_org_idx").on(t.organizationId),
-    uniqueIndex("organization_credentials_org_provider_label_uq").on(
-      t.organizationId,
-      t.provider,
-      t.label,
-    ),
+    uniqueIndex("organization_credentials_owner_provider_label_uq")
+      .on(t.ownerUserId, t.provider, t.label)
+      .where(sql`${t.ownerUserId} IS NOT NULL`),
+    uniqueIndex("organization_credentials_legacy_org_provider_label_uq")
+      .on(t.organizationId, t.provider, t.label)
+      .where(sql`${t.ownerUserId} IS NULL`),
     check(
       "organization_credentials_exactly_one_secret_shape_chk",
       sql`(${t.secretRef} IS NOT NULL) <> (${t.encryptedSecret} IS NOT NULL)`,

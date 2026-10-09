@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { homeworks, sections, sectionSolutions, conversations, homeworkProgressWidgets } from "../../db/schema";
 import type { CourseScope } from "./scope";
@@ -118,6 +118,38 @@ export function deriveHomeworkStatus(hw: {
   if (!hw.publishedAt) return "draft";
   if (hw.releasedAt && hw.releasedAt.getTime() > now.getTime()) return "scheduled";
   return hw.dueDate.getTime() > now.getTime() ? "active" : "past_due";
+}
+
+/** #442: `deriveHomeworkStatus(hw) === "past_due"`, as a SQL predicate over
+ *  the `homeworks` table, evaluated against the database's own `now()`.
+ *
+ *  Exists so a query can apply a row bound (a LIMIT or a per-org window)
+ *  AFTER release-state filtering rather than before it. A bound taken before
+ *  the filter starves: hidden, expired, unpublished or scheduled homeworks
+ *  with old due dates sort to the front, fill the bound, and are then
+ *  dropped in JS, so an organization carrying enough of them gets zero
+ *  candidates on every run (see findOverdueSubmissionCandidates's own doc
+ *  comment, submissions.ts).
+ *
+ *  It restates deriveHomeworkStatus branch for branch, which is exactly the
+ *  drift risk that function's doc comment warns about -- so it lives here,
+ *  beside it, and a real-DB parity test (autoSubmitOverdue.db.test.ts,
+ *  "isPastDueHomeworkSql agrees with deriveHomeworkStatus") seeds every
+ *  combination of the five inputs and fails if the two ever disagree.
+ *  Changing either one means changing both. Callers still re-check with
+ *  deriveHomeworkStatus in JS; this narrows, it does not replace that gate. */
+export function isPastDueHomeworkSql(): SQL {
+  return and(
+    // not hidden: isHomeworkHidden's two conditions, negated
+    eq(homeworks.isHidden, false),
+    or(isNull(homeworks.expiresAt), gt(homeworks.expiresAt, sql`now()`)),
+    // not draft
+    isNotNull(homeworks.publishedAt),
+    // not scheduled
+    or(isNull(homeworks.releasedAt), lte(homeworks.releasedAt, sql`now()`)),
+    // past_due rather than active
+    lte(homeworks.dueDate, sql`now()`),
+  )!;
 }
 
 export async function getHomeworkById(db: Db, scope: CourseScope, id: string) {

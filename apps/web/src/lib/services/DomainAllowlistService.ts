@@ -13,10 +13,18 @@ export interface DomainCheckResult {
  *  (apps/accounts/src/accounts/utils.py) plus grandfathering for
  *  existing users whose domain is no longer allowed. */
 export class DomainAllowlistService {
-  /** v0 single-tenant fallback: used when the WorkOS org has no matching
+  /** Backward-compatible UW fallback: used when the WorkOS org has no matching
    *  `organizations` row (e.g. local dev with no org provisioned) or its
-   *  organizationId wasn't present on the authentication response. */
+   *  organizationId wasn't present on the authentication response and the
+   *  deployment did not configure BOOTSTRAP_ALLOWED_DOMAINS. */
   static readonly DEFAULT_ALLOWED_DOMAINS = ["uw.edu"];
+
+  static bootstrapAllowedDomains(configured?: string): string[] {
+    if (!configured) return [...DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS];
+    const domains = [...new Set(configured.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))];
+    if (domains.length === 0) throw new Error("BOOTSTRAP_ALLOWED_DOMAINS must contain at least one domain");
+    return domains;
+  }
 
   static validateEmailDomain(email: string, allowedDomains: string[]): DomainCheckResult {
     const atIndex = email.lastIndexOf("@");
@@ -64,10 +72,9 @@ export class DomainAllowlistService {
   }
 
   /** Resolves the allowed-domains policy for the organization the WorkOS
-   *  user authenticated into. Falls back to DEFAULT_ALLOWED_DOMAINS only for
-   *  the legitimate "no policy configured" cases: no organizationId was
-   *  present on the auth response, or no local `organizations` row matches
-   *  it yet (single-tenant v0 dev path).
+   *  user authenticated into. A matching WorkOS organization is preferred;
+   *  otherwise this single-institution deployment uses its singleton row.
+   *  Bootstrap domains apply only before that row exists.
    *
    *  An org row with `allowedDomains = []` is an explicit "block all
    *  provisioning for this org" and is returned as-is -- validateEmailDomain
@@ -83,20 +90,27 @@ export class DomainAllowlistService {
   static async resolveAllowedDomains(
     organizationId: string | undefined,
     db: Db,
+    bootstrapDomains?: string,
   ): Promise<string[]> {
-    if (!organizationId) return DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS;
-
-    let org;
+    const fallback = DomainAllowlistService.bootstrapAllowedDomains(bootstrapDomains);
+    let org: { allowedDomains: string[] } | undefined;
     try {
-      org = await db.query.organizations.findFirst({
-        where: eq(organizations.workosOrganizationId, organizationId),
+      if (organizationId) {
+        org = await db.query.organizations.findFirst({
+          where: eq(organizations.workosOrganizationId, organizationId),
+          columns: { allowedDomains: true },
+        });
+      }
+      org ??= await db.query.organizations.findFirst({
+        where: eq(organizations.deploymentSingleton, true),
+        columns: { allowedDomains: true },
       });
     } catch (err) {
       logServerError("DomainAllowlistService.resolveAllowedDomains", err);
       throw err;
     }
 
-    if (!org) return DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS;
+    if (!org) return fallback;
     return org.allowedDomains;
   }
 }

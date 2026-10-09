@@ -13,7 +13,9 @@ import { logServerError } from "./errors";
  *  makes `WHERE target_type = ...` a reliable query for the #50 audit
  *  viewer. */
 export const AUDIT_TARGET_TYPES = {
+  ORGANIZATION: "organization",
   USER: "user",
+  MEMBERSHIP: "membership",
   /** #31: an LLM configuration. Org-level blast radius -- the default is what
    *  every course without an explicit choice runs on. */
   LLM_CONFIG: "llm_config",
@@ -33,11 +35,17 @@ export const AUDIT_TARGET_TYPES = {
 /** The action vocabulary for audit_events (#147). One place so M3+ handlers
  *  reuse these instead of ad-hoc strings drifting apart. */
 export const AUDIT_ACTIONS = {
+  ORGANIZATION_INITIALIZED: "organization.initialized",
   USER_LOGIN: "user.login",
   USER_LOGOUT: "user.logout",
   USER_PROVISIONED: "user.provisioned",
   USER_DEPROVISIONED: "user.deprovisioned",
   PROFILE_UPDATED: "profile.updated",
+  /** A super admin created a local course shell and assigned its initial
+   *  instructor. Canvas linking is deliberately a separate, optional event. */
+  COURSE_CREATED: "course.created",
+  PLATFORM_INSTRUCTOR_GRANTED: "user.platform_instructor_granted",
+  COURSE_INSTRUCTOR_ADDED: "membership.course_instructor_added",
   HOMEWORK_PUBLISHED: "homework.published",
   HOMEWORK_UNPUBLISHED: "homework.unpublished",
   HOMEWORK_HIDDEN: "homework.hidden",
@@ -84,17 +92,22 @@ export const AUDIT_ACTIONS = {
    *  role can be instructor/admin, not just TA. */
   COURSE_MEMBER_ADDED: "membership.course_member_added",
   /** #31: LLM configuration lifecycle. Audited because a config decides which
-   *  model every student in the organization talks to and what it is told to
-   *  be -- and because the default is changeable by any instructor in the
-   *  org, so "who repointed us at this model" is a question that will be
-   *  asked. Deactivation rather than deletion is the sanctioned removal, so
-   *  there is no delete action here. */
+   *  model students talk to and what it is told to be, so "who repointed us
+   *  at this model" is a question that will be asked. #367: requestMetadata
+   *  carries `level` ("organization" for the shared pool, "course" for one
+   *  course's own) so an org-level change is distinguishable from a
+   *  course-level one. Deactivation rather than deletion is the sanctioned
+   *  removal, so there is no delete action here. */
   LLM_CONFIG_CREATED: "llm_config.created",
   LLM_CONFIG_UPDATED: "llm_config.updated",
   LLM_CONFIG_DEACTIVATED: "llm_config.deactivated",
   /** Audited because it spends money and reaches a third-party provider,
    *  even though it persists nothing else. */
   LLM_CONFIG_TESTED: "llm_config.tested",
+  /** #367: an Org Admin grant or revocation. Org-level authority over shared
+   *  configuration, so audited like a course capability grant. */
+  ORG_ADMIN_GRANTED: "membership.org_admin_granted",
+  ORG_ADMIN_REVOKED: "membership.org_admin_revoked",
   /** #32/#86: roster changes. Enrolment decides who can see a course's work
    *  at all, so it is audited with the same seriousness as a capability
    *  grant. The import writes ONE event for the whole file rather than one

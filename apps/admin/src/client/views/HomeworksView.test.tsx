@@ -33,6 +33,8 @@ describe("HomeworksView", () => {
   it("renders the real list payload shape without crashing on the removed fixture fields", () => {
     render(
       <HomeworksView
+        courseCode="BIO 180"
+        term="Winter 2027"
         homeworks={HOMEWORKS}
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
@@ -44,11 +46,14 @@ describe("HomeworksView", () => {
 
     expect(screen.getByText("Homework 1")).toBeTruthy();
     expect(screen.getByText("Homework 2")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "BIO 180 · Winter 2027" })).toBeTruthy();
   });
 
   it("renders only the Records and Active stat cards", () => {
     render(
       <HomeworksView
+        courseCode="BIO 180"
+        term="Winter 2027"
         homeworks={HOMEWORKS}
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
@@ -66,6 +71,8 @@ describe("HomeworksView", () => {
   it("derives the Active count from status and the record badge index from array position", () => {
     render(
       <HomeworksView
+        courseCode="BIO 180"
+        term="Winter 2027"
         homeworks={HOMEWORKS}
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
@@ -87,6 +94,8 @@ describe("HomeworksView", () => {
   it("renders sectionCount instead of a submissions-count chip", () => {
     render(
       <HomeworksView
+        courseCode="BIO 180"
+        term="Winter 2027"
         homeworks={HOMEWORKS}
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
@@ -110,6 +119,8 @@ describe("HomeworksView", () => {
     ];
     render(
       <HomeworksView
+        courseCode="BIO 180"
+        term="Winter 2027"
         homeworks={homeworks}
         onOpenHomework={vi.fn()}
         onOpenSubmissions={vi.fn()}
@@ -136,6 +147,8 @@ describe("HomeworksView", () => {
  *  not, so a TA could not tell "not granted" from "never saved". */
 describe("HomeworksView unreleased-content notice (#172, USE-022)", () => {
   const props = {
+    courseCode: "BIO 180",
+    term: "Winter 2027",
     homeworks: HOMEWORKS,
     onOpenHomework: vi.fn(),
     onOpenSubmissions: vi.fn(),

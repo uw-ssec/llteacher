@@ -3,7 +3,7 @@ import type { Db } from "../../db/client";
 import { submissions, grades, conversations, courses, courseMemberships, homeworks, messages, sections, users, sectionAnswers, type SubmissionSource } from "../../db/schema";
 import { unsafeOrgScope, type OrgScope, type CourseScope } from "./scope";
 import type { IdentityCipher } from "../../lib/crypto/identity-cipher";
-import { deriveHomeworkStatus, isHomeworkHidden, type HomeworkStatus } from "./homeworks";
+import { deriveHomeworkStatus, isHomeworkHidden, isPastDueHomeworkSql, type HomeworkStatus } from "./homeworks";
 
 export async function createSubmission(db: Db, scope: OrgScope, conversationId: string) {
   // The conversation isn't guaranteed to belong to `scope`'s org just
@@ -588,19 +588,17 @@ export const OVERDUE_SUBMISSION_CANDIDATE_LIMIT = 500;
  *  student has actually written in, and has no submission yet -- at most
  *  `limit` of them, oldest due date first.
  *
- *  The bound is applied AFTER the release-state filter below, not as a SQL
- *  `LIMIT`. A SQL limit can only order on columns, and the rows it would
- *  keep are not necessarily the ones that survive deriveHomeworkStatus: a
- *  hidden or expired homework with an old due date sorts to the front of
- *  the window and is then dropped in JS, so an org carrying `limit` worth
- *  of such rows would return zero candidates every run, forever. Slicing
- *  the derived list cannot starve that way, and it bounds the quantity that
- *  actually costs subrequests -- the inserts.
+ *  The bound is applied AFTER release-state filtering. A bound taken before
+ *  it starves: a hidden or expired homework with an old due date sorts to
+ *  the front of the window and is then dropped, so an org carrying `limit`
+ *  worth of such rows would return zero candidates every run, forever.
  *
- *  What stays unbounded is the SELECT's own result set, which is one
- *  subrequest whatever its size. The `due_date <= now()` predicate below
- *  keeps it from including every in-progress conversation in the org, which
- *  is the bulk of a healthy system's rows.
+ *  #442: the bound now lives in the SQL as well, as a per-organization
+ *  ROW_NUMBER() window, so Postgres returns at most `limit` rows per org
+ *  rather than the whole backlog. That is safe only because the query also
+ *  filters on isPastDueHomeworkSql (homeworks.ts) -- the release-state rule
+ *  restated in SQL, with a parity test against deriveHomeworkStatus -- so
+ *  no row the JS filter would drop can occupy a slot in the window.
  *
  *  The structural conditions are SQL predicates; the release-state one is
  *  not. Whether a homework counts as "past due" is deriveHomeworkStatus's
@@ -634,11 +632,18 @@ export const OVERDUE_SUBMISSION_CANDIDATE_LIMIT = 500;
  *  is identical either way. Returns raw rows (including `organizationId`,
  *  unused by the single-org caller but load-bearing for the batched one,
  *  which has to know which org each row came from) -- the release-state
- *  filter and the `limit` bound are applied by each caller separately,
- *  because a single org and a batch of them bound the result differently
- *  (see findOverdueSubmissionCandidatesForOrgs's own comment). */
-async function selectOverdueCandidateRows(db: Db, orgFilter: SQL) {
-  return db
+ *  filter is re-applied by each caller as a backstop.
+ *
+ *  #442: `perOrgLimit` bounds the rows Postgres returns for EACH
+ *  organization, via `ROW_NUMBER() OVER (PARTITION BY organization_id ORDER
+ *  BY due_date, conversation id)` in a subquery filtered `<= perOrgLimit`.
+ *  A partition (not a plain `.limit()`) because one org's backlog must not
+ *  crowd another org in the same batch out of the result, and one shared
+ *  body for both paths because the single-org path is just a batch of one:
+ *  its partition is the whole result, so the window is its LIMIT.
+ *  Exported for the real-DB tests that assert the SQL itself is bounded. */
+export async function selectOverdueCandidateRows(db: Db, orgFilter: SQL, perOrgLimit: number) {
+  const ranked = db
     .select({
       conversationId: conversations.id,
       userId: conversations.ownerUserId,
@@ -649,6 +654,11 @@ async function selectOverdueCandidateRows(db: Db, orgFilter: SQL) {
       releasedAt: homeworks.releasedAt,
       isHidden: homeworks.isHidden,
       expiresAt: homeworks.expiresAt,
+      // conversations.id breaks due-date ties so the window, and therefore
+      // which rows a partial run takes, is deterministic.
+      rowInOrg: sql<number>`row_number() over (partition by ${courses.organizationId} order by ${homeworks.dueDate} asc, ${conversations.id} asc)`.as(
+        "row_in_org",
+      ),
     })
     .from(conversations)
     .innerJoin(courses, eq(conversations.courseId, courses.id))
@@ -685,6 +695,10 @@ async function selectOverdueCandidateRows(db: Db, orgFilter: SQL) {
         // drift that the note above warns about -- it has no say over which
         // surviving rows are candidates.
         lte(homeworks.dueDate, sql`now()`),
+        // #442: the rest of the release-state rule, so the per-org window
+        // below only ever counts rows that are really past due. Implies the
+        // due-date narrowing above, which stays as the comment's anchor.
+        isPastDueHomeworkSql(),
         // #167 review: the conversation must contain at least one message
         // the STUDENT wrote. "Has a live conversation" is not the same
         // question as "did any work", and since #318 the client eagerly
@@ -715,13 +729,30 @@ async function selectOverdueCandidateRows(db: Db, orgFilter: SQL) {
         ),
       ),
     )
-    // Oldest backlog first, so the bound below drains a backlog in a
-    // predictable order rather than an arbitrary one, and so the same run
-    // twice over the same data picks the same rows. For the batched query
-    // this orders GLOBALLY across every org in the batch, which is what
-    // lets findOverdueSubmissionCandidatesForOrgs's per-org cap keep "oldest
-    // first" true within each org despite the rows arriving interleaved.
-    .orderBy(asc(homeworks.dueDate));
+    .as("ranked_candidates");
+
+  return (
+    db
+      .select({
+        conversationId: ranked.conversationId,
+        userId: ranked.userId,
+        sectionId: ranked.sectionId,
+        organizationId: ranked.organizationId,
+        dueDate: ranked.dueDate,
+        publishedAt: ranked.publishedAt,
+        releasedAt: ranked.releasedAt,
+        isHidden: ranked.isHidden,
+        expiresAt: ranked.expiresAt,
+      })
+      .from(ranked)
+      .where(lte(ranked.rowInOrg, perOrgLimit))
+      // Oldest backlog first, so a bounded run drains a backlog in a
+      // predictable order, and the same run twice over the same data picks
+      // the same rows. For the batched query this orders GLOBALLY across
+      // every org in the batch; each org's own rows are already its oldest
+      // `perOrgLimit`, by the window above.
+      .orderBy(asc(ranked.dueDate), asc(ranked.conversationId))
+  );
 }
 
 export async function findOverdueSubmissionCandidates(
@@ -729,7 +760,7 @@ export async function findOverdueSubmissionCandidates(
   scope: OrgScope,
   limit: number = OVERDUE_SUBMISSION_CANDIDATE_LIMIT,
 ): Promise<OverdueSubmissionCandidate[]> {
-  const rows = await selectOverdueCandidateRows(db, eq(courses.organizationId, scope));
+  const rows = await selectOverdueCandidateRows(db, eq(courses.organizationId, scope), limit);
 
   return rows
     .filter((row) => deriveHomeworkStatus(row) === "past_due")
@@ -768,28 +799,14 @@ export async function findOverdueSubmissionCandidates(
  *  any of those rows end up inserted this run. This cap is therefore fixed
  *  and independent of run duration or organization count.
  *
- *  IMPORTANT -- this bounds the returned, per-org-grouped result this
- *  function hands back, NOT the underlying SELECT's own row count.
- *  selectOverdueCandidateRows (below) has no SQL-level LIMIT -- it never
- *  did, for either this path or the single-org one -- so for a batch of
- *  organizations that are ALL genuinely over 50 candidates, Postgres still
- *  returns every matching row for the batch, and this function truncates
- *  to 50/org only after that full result set has already been fetched
- *  into the Worker. This constant therefore bounds Worker-side memory
- *  and downstream processing (the "5,000 rows retained" arithmetic below),
- *  not the Postgres round-trip payload or query latency an adversarial
- *  batch could still produce. Closing that gap for real would need a
- *  SQL-level per-org bound (e.g. a ROW_NUMBER() OVER (PARTITION BY
- *  organization_id ...) window, filtered in a subquery/CTE) -- not
- *  attempted here, since it would mean forking selectOverdueCandidateRows
- *  away from the single-org path it deliberately shares with (see that
- *  function's own doc comment on why one shared query body matters for
- *  scoping-drift safety), and the single-org path already accepts the
- *  identical no-SQL-LIMIT characteristic today without a window function.
- *  Filed as a follow-up rather than expanded here.
+ *  #442: this bounds the SELECT itself, not just what this function hands
+ *  back. selectOverdueCandidateRows applies it as a per-organization
+ *  ROW_NUMBER() window in SQL, so Postgres returns at most this many rows
+ *  per org for the batch. Before #442 the cap was a JS truncation applied
+ *  after Postgres had already returned every org's full backlog.
  *
- *  50 * AUTO_SUBMIT_ORG_BATCH_SIZE (100) = 5,000 rows retained/processed
- *  worst case per batch, after the fetch: an order of magnitude below the
+ *  50 * AUTO_SUBMIT_ORG_BATCH_SIZE (100) = 5,000 rows fetched and processed
+ *  worst case per batch: an order of magnitude below the
  *  naive 50,000 a fully-unbounded per-org grouping would keep, and about
  *  10x a single org's own already-accepted 500-row worst case. The
  *  tradeoff: a genuinely first-run-backlogged organization swept through
@@ -802,9 +819,8 @@ export async function findOverdueSubmissionCandidates(
  *  on for a single org's backlog exceeding 500. */
 export const OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT = 50;
 
-/** Every scoped candidate the current, deliberately unbounded, matching set
- *  produces, grouped by the organization it belongs to, each group capped
- *  at `perOrgLimit` (default OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT, NOT
+/** Every scoped candidate the matching set produces, grouped by the
+ *  organization it belongs to, each group capped at `perOrgLimit` (default OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT, NOT
  *  OVERDUE_SUBMISSION_CANDIDATE_LIMIT -- see that constant's own doc comment
  *  for why the batched path needs a smaller, separate one) -- the same
  *  per-tenant fairness cap the single-org query enforces, so one org's
@@ -826,7 +842,7 @@ export async function findOverdueSubmissionCandidatesForOrgs(
   const result = new Map<OrgScope, OverdueSubmissionCandidate[]>();
   if (scopes.length === 0) return result;
 
-  const rows = await selectOverdueCandidateRows(db, inArray(courses.organizationId, scopes));
+  const rows = await selectOverdueCandidateRows(db, inArray(courses.organizationId, scopes), perOrgLimit);
 
   const perOrgCount = new Map<string, number>();
   for (const row of rows) {

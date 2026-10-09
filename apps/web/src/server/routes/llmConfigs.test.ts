@@ -39,6 +39,7 @@ const CONFIG = {
   fallbackLlmConfigId: null,
   isDefault: true,
   isActive: true,
+  scopeCourseId: null as string | null,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
@@ -136,6 +137,16 @@ function buildApp(authContext: AuthContext | undefined) {
 
 const instructorOfA = () =>
   fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })] });
+/** #367: an instructor of course A who is also an Org Admin of its
+ *  organization ("org-1", what getOrgScopeForCourseMock resolves). Before
+ *  #367 every instructor held this authority, so the pre-#367 suites below
+ *  run as this caller to keep asserting exactly what they always did; the
+ *  #367 suite at the bottom covers the plain instructor. */
+const orgAdminOfA = () =>
+  fakeAuthContext({
+    memberships: [fakeMembership({ courseId: "course-a", role: "instructor" })],
+    orgAdminOrgIds: ["org-1"],
+  });
 const taOfA = () =>
   fakeAuthContext({ memberships: [fakeMembership({ courseId: "course-a", role: "ta" })] });
 
@@ -219,7 +230,7 @@ describe("LLM config authorization (#31)", () => {
 
 describe("POST/PATCH validation (#31)", () => {
   const post = (body: unknown) =>
-    buildApp(instructorOfA()).request(url(), json("POST", body), TEST_ENV);
+    buildApp(orgAdminOfA()).request(url(), json("POST", body), TEST_ENV);
 
   const bad: [string, Record<string, unknown>][] = [
     ["a blank name", { name: "   " }],
@@ -246,7 +257,7 @@ describe("POST/PATCH validation (#31)", () => {
   it("rejects a non-finite temperature", async () => {
     // JSON admits 1e999, which parses to Infinity, passes a naive
     // `>= 0 && <= 2` for the wrong reason, and reaches a double column.
-    const res = await buildApp(instructorOfA()).request(
+    const res = await buildApp(orgAdminOfA()).request(
       url(),
       {
         method: "POST",
@@ -278,7 +289,7 @@ describe("POST/PATCH validation (#31)", () => {
   });
 
   it("rejects a config naming itself as its fallback", async () => {
-    const res = await buildApp(instructorOfA()).request(
+    const res = await buildApp(orgAdminOfA()).request(
       url(`/${CONFIG_ID}`),
       json("PATCH", { ...VALID_BODY, fallbackLlmConfigId: CONFIG_ID }),
       TEST_ENV,
@@ -332,7 +343,7 @@ describe("POST/PATCH validation (#31)", () => {
 describe("DELETE deactivates (#31)", () => {
   it("refuses to deactivate the default, naming the unblocking step", async () => {
     deactivateMock.mockResolvedValue("is_default");
-    const res = await buildApp(instructorOfA()).request(
+    const res = await buildApp(orgAdminOfA()).request(
       url(`/${CONFIG_ID}`),
       { method: "DELETE" },
       TEST_ENV,
@@ -346,7 +357,7 @@ describe("DELETE deactivates (#31)", () => {
   });
 
   it("404s a malformed config id without reaching the database", async () => {
-    const res = await buildApp(instructorOfA()).request(
+    const res = await buildApp(orgAdminOfA()).request(
       url("/not-a-uuid"),
       { method: "DELETE" },
       TEST_ENV,
@@ -358,7 +369,7 @@ describe("DELETE deactivates (#31)", () => {
 
 describe("POST clone (#170)", () => {
   it("requires a name for the copy", async () => {
-    const res = await buildApp(instructorOfA()).request(
+    const res = await buildApp(orgAdminOfA()).request(
       url(`/${CONFIG_ID}/clone`),
       json("POST", { name: "  " }),
       TEST_ENV,
@@ -370,7 +381,7 @@ describe("POST clone (#170)", () => {
   it("404s a source in another organization, disclosing nothing", async () => {
     // Cloning must not become a way to learn that an id exists elsewhere.
     cloneMock.mockResolvedValue(null);
-    const res = await buildApp(instructorOfA()).request(
+    const res = await buildApp(orgAdminOfA()).request(
       url(`/${CONFIG_ID}/clone`),
       json("POST", { name: "Copy" }),
       TEST_ENV,
@@ -379,7 +390,7 @@ describe("POST clone (#170)", () => {
   });
 
   it("returns the copy and audits it as a creation", async () => {
-    const res = await buildApp(instructorOfA()).request(
+    const res = await buildApp(orgAdminOfA()).request(
       url(`/${CONFIG_ID}/clone`),
       json("POST", { name: "Experiment" }),
       TEST_ENV,
@@ -394,7 +405,7 @@ describe("POST clone (#170)", () => {
 
 describe("POST test (#31)", () => {
   const test = (body: unknown) =>
-    buildApp(instructorOfA()).request(url(`/${CONFIG_ID}/test`), json("POST", body), TEST_ENV);
+    buildApp(orgAdminOfA()).request(url(`/${CONFIG_ID}/test`), json("POST", body), TEST_ENV);
 
   it("sends the config's own prompt and settings, and returns usage", async () => {
     const res = await test({ message: "Explain a p-value." });
@@ -613,7 +624,7 @@ describe("dependency failures (Effect error channel)", () => {
   it("503s with the generic body when the course->org lookup fails, never a 403", async () => {
     getOrgScopeForCourseMock.mockRejectedValue(new Error("connect ECONNREFUSED"));
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const res = await buildApp(instructorOfA()).request(url(), undefined, TEST_ENV);
+    const res = await buildApp(orgAdminOfA()).request(url(), undefined, TEST_ENV);
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: "Something went wrong. Please try again later." });
     consoleSpy.mockRestore();
@@ -622,7 +633,7 @@ describe("dependency failures (Effect error channel)", () => {
   it("503s (not 409) when a create fails on anything other than the default race", async () => {
     createMock.mockRejectedValue(new Error('violates check constraint "llm_configs_temperature_range_chk"'));
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const res = await buildApp(instructorOfA()).request(url(), json("POST", VALID_BODY), TEST_ENV);
+    const res = await buildApp(orgAdminOfA()).request(url(), json("POST", VALID_BODY), TEST_ENV);
     expect(res.status).toBe(503);
     consoleSpy.mockRestore();
   });
@@ -631,7 +642,7 @@ describe("dependency failures (Effect error channel)", () => {
     updateMock.mockRejectedValue(
       new Error('duplicate key value violates unique constraint "llm_configs_org_default_uq"'),
     );
-    const res = await buildApp(instructorOfA()).request(
+    const res = await buildApp(orgAdminOfA()).request(
       url(`/${CONFIG_ID}`),
       json("PATCH", { ...VALID_BODY, isDefault: true }),
       TEST_ENV,
@@ -643,7 +654,7 @@ describe("dependency failures (Effect error channel)", () => {
   it("does not fail a save that landed when the audit write fails", async () => {
     auditBestEffortMock.mockRejectedValue(new Error("audit table unavailable"));
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const res = await buildApp(instructorOfA()).request(url(), json("POST", VALID_BODY), TEST_ENV);
+    const res = await buildApp(orgAdminOfA()).request(url(), json("POST", VALID_BODY), TEST_ENV);
     expect(res.status).toBe(201);
     consoleSpy.mockRestore();
   });
@@ -651,7 +662,7 @@ describe("dependency failures (Effect error channel)", () => {
   it("answers the test button 200 ok:false (not 5xx) when the LLM gateway is down", async () => {
     generateTextMock.mockRejectedValue(new TypeError("fetch failed"));
     const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const res = await buildApp(instructorOfA()).request(
+    const res = await buildApp(orgAdminOfA()).request(
       url(`/${CONFIG_ID}/test`),
       json("POST", { message: "hi" }),
       TEST_ENV,
@@ -663,7 +674,7 @@ describe("dependency failures (Effect error channel)", () => {
   });
 
   it("400s an unparseable JSON body on create without a write", async () => {
-    const res = await buildApp(instructorOfA()).request(
+    const res = await buildApp(orgAdminOfA()).request(
       url(),
       { method: "POST", headers: { "content-type": "application/json" }, body: "{not json" },
       TEST_ENV,
@@ -671,5 +682,134 @@ describe("dependency failures (Effect error channel)", () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "Request body must be valid JSON" });
     expect(createMock).not.toHaveBeenCalled();
+  });
+});
+
+/* #367: Org Admin owns the organization's shared pool and its default; a
+   course instructor owns only their course's configurations. */
+describe("Org Admin and course-scoped configurations (#367)", () => {
+  const COURSE_OWNED = { ...CONFIG, id: OTHER_ID, isDefault: false, scopeCourseId: "course-a" };
+  const OTHER_COURSES = { ...CONFIG, id: OTHER_ID, isDefault: false, scopeCourseId: "course-b" };
+  const POOL_NON_DEFAULT = { ...CONFIG, isDefault: false };
+
+  it("tells the console whether the caller may manage the shared pool, and lists only what this course can see", async () => {
+    const asInstructor = await buildApp(instructorOfA()).request(url(), undefined, TEST_ENV);
+    expect(((await asInstructor.json()) as { canManageOrgPool: boolean }).canManageOrgPool).toBe(false);
+    expect(listMock).toHaveBeenLastCalledWith(expect.anything(), "org-1", "course-a");
+
+    const asAdmin = await buildApp(orgAdminOfA()).request(url(), undefined, TEST_ENV);
+    expect(((await asAdmin.json()) as { canManageOrgPool: boolean }).canManageOrgPool).toBe(true);
+  });
+
+  it("refuses a course instructor editing or deactivating a shared configuration", async () => {
+    getMock.mockResolvedValue(POOL_NON_DEFAULT);
+    const patch = await buildApp(instructorOfA()).request(url(`/${CONFIG_ID}`), json("PATCH", VALID_BODY), TEST_ENV);
+    expect(patch.status).toBe(403);
+    expect(((await patch.json()) as { error: string }).error).toMatch(/organization admin/);
+    const del = await buildApp(instructorOfA()).request(url(`/${CONFIG_ID}`), { method: "DELETE" }, TEST_ENV);
+    expect(del.status).toBe(403);
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(deactivateMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a course instructor changing the organization default", async () => {
+    // Directly, by promoting a shared config...
+    getMock.mockResolvedValue(POOL_NON_DEFAULT);
+    const promote = await buildApp(instructorOfA()).request(
+      url(`/${CONFIG_ID}`),
+      json("PATCH", { ...VALID_BODY, isDefault: true }),
+      TEST_ENV,
+    );
+    expect(promote.status).toBe(403);
+    // ...or by creating a new default.
+    const create = await buildApp(instructorOfA()).request(url(), json("POST", { ...VALID_BODY, isDefault: true }), TEST_ENV);
+    expect(create.status).toBe(400);
+    expect(((await create.json()) as { error: string }).error).toMatch(/shared organization configuration/);
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it("lets an Org Admin change a shared configuration and the default", async () => {
+    getMock.mockResolvedValue(POOL_NON_DEFAULT);
+    const res = await buildApp(orgAdminOfA()).request(
+      url(`/${CONFIG_ID}`),
+      json("PATCH", { ...VALID_BODY, isDefault: true }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(200);
+    expect(updateMock).toHaveBeenCalledWith(expect.anything(), "org-1", CONFIG_ID, expect.objectContaining({ isDefault: true }), "organization");
+  });
+
+  it("lets a course instructor edit their own course's configuration, scoped to that course in the write itself", async () => {
+    getMock.mockResolvedValue(COURSE_OWNED);
+    updateMock.mockResolvedValue(COURSE_OWNED);
+    const res = await buildApp(instructorOfA()).request(url(`/${OTHER_ID}`), json("PATCH", VALID_BODY), TEST_ENV);
+    expect(res.status).toBe(200);
+    expect(updateMock).toHaveBeenCalledWith(expect.anything(), "org-1", OTHER_ID, expect.anything(), { courseId: "course-a" });
+  });
+
+  it("treats another course's own configuration as missing, on every route", async () => {
+    getMock.mockResolvedValue(OTHER_COURSES);
+    loadLlmConfigByIdMock.mockResolvedValue({ ...RESOLVED_CONFIG, id: OTHER_ID, scopeCourseId: "course-b" });
+    for (const [init, path] of [
+      [undefined, url(`/${OTHER_ID}`)],
+      [json("PATCH", VALID_BODY), url(`/${OTHER_ID}`)],
+      [{ method: "DELETE" }, url(`/${OTHER_ID}`)],
+      [json("POST", { message: "hi" }), url(`/${OTHER_ID}/test`)],
+    ] as const) {
+      // Even an Org Admin: course-owned configs belong to their course.
+      const res = await buildApp(orgAdminOfA()).request(path, init, TEST_ENV);
+      expect(res.status).toBe(404);
+    }
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(deactivateMock).not.toHaveBeenCalled();
+    expect(generateTextMock).not.toHaveBeenCalled();
+  });
+
+  it("creates a course instructor's configuration in their course, and refuses them the shared pool", async () => {
+    createMock.mockResolvedValue(COURSE_OWNED);
+    const res = await buildApp(instructorOfA()).request(url(), json("POST", VALID_BODY), TEST_ENV);
+    expect(res.status).toBe(201);
+    expect(createMock).toHaveBeenCalledWith(expect.anything(), "org-1", expect.anything(), { courseId: "course-a" });
+
+    const pool = await buildApp(instructorOfA()).request(url(), json("POST", { ...VALID_BODY, scope: "organization" }), TEST_ENV);
+    expect(pool.status).toBe(403);
+    expect(createMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates into the shared pool by default for an Org Admin", async () => {
+    await buildApp(orgAdminOfA()).request(url(), json("POST", VALID_BODY), TEST_ENV);
+    expect(createMock).toHaveBeenLastCalledWith(expect.anything(), "org-1", expect.anything(), "organization");
+  });
+
+  it("clones a shared configuration into the instructor's own course", async () => {
+    const res = await buildApp(instructorOfA()).request(url(`/${CONFIG_ID}/clone`), json("POST", { name: "Mine" }), TEST_ENV);
+    expect(res.status).toBe(201);
+    expect(cloneMock).toHaveBeenCalledWith(expect.anything(), "org-1", CONFIG_ID, "Mine", "course-a", { courseId: "course-a" });
+  });
+
+  it("refuses a course-owned fallback on a shared configuration", async () => {
+    getMock.mockImplementation(async (_db: unknown, _scope: unknown, id: string) =>
+      id === OTHER_ID ? COURSE_OWNED : POOL_NON_DEFAULT,
+    );
+    const res = await buildApp(orgAdminOfA()).request(
+      url(`/${CONFIG_ID}`),
+      json("PATCH", { ...VALID_BODY, fallbackLlmConfigId: OTHER_ID }),
+      TEST_ENV,
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/only fall back to another shared/);
+  });
+
+  it("records which level of configuration changed", async () => {
+    getMock.mockResolvedValue(COURSE_OWNED);
+    updateMock.mockResolvedValue(COURSE_OWNED);
+    await buildApp(instructorOfA()).request(url(`/${OTHER_ID}`), json("PATCH", VALID_BODY), TEST_ENV);
+    expect(auditBestEffortMock.mock.calls.at(-1)![2].requestMetadata).toMatchObject({ level: "course" });
+
+    getMock.mockResolvedValue(POOL_NON_DEFAULT);
+    updateMock.mockResolvedValue(POOL_NON_DEFAULT);
+    await buildApp(orgAdminOfA()).request(url(`/${CONFIG_ID}`), json("PATCH", VALID_BODY), TEST_ENV);
+    expect(auditBestEffortMock.mock.calls.at(-1)![2].requestMetadata).toMatchObject({ level: "organization" });
   });
 });

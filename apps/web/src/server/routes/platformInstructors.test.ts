@@ -1,16 +1,30 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { grantPlatformInstructorHandler } from "./platformInstructors";
+import { grantPlatformInstructorHandler, listPlatformInstructorsHandler } from "./platformInstructors";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext } from "../testing/authContext";
 import { SERVICE_UNAVAILABLE_MESSAGE } from "../utils/errors";
 
-const TEST_ENV = { DATABASE_URL: "ignored" } as Env;
+const TEST_ENV = { DATABASE_URL: "ignored", BOOTSTRAP_ALLOWED_DOMAINS: "example.edu" } as Env;
 
 const grantPlatformInstructorMock = vi.fn();
+const listPlatformInstructorsMock = vi.fn();
+const getDeploymentOrganizationMock = vi.fn();
+const auditBestEffortMock = vi.fn();
 vi.mock("../repositories/users", () => ({
   grantPlatformInstructor: (...a: unknown[]) => grantPlatformInstructorMock(...a),
+}));
+vi.mock("../repositories/platformListings", () => ({
+  listPlatformInstructors: (...a: unknown[]) => listPlatformInstructorsMock(...a),
+}));
+vi.mock("../repositories/organizations", () => ({
+  getDeploymentOrganization: (...a: unknown[]) => getDeploymentOrganizationMock(...a),
+}));
+vi.mock("../utils/audit", () => ({
+  AUDIT_ACTIONS: { PLATFORM_INSTRUCTOR_GRANTED: "user.platform_instructor_granted" },
+  AUDIT_TARGET_TYPES: { USER: "user" },
+  auditBestEffort: (...a: unknown[]) => auditBestEffortMock(...a),
 }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
 vi.mock("../../lib/secrets-loader", () => ({ loadIdentityCipherKeys: async () => ({}) }));
@@ -23,7 +37,12 @@ function buildApp(authContext: AuthContext | undefined) {
     await next();
   });
   app.post("/api/platform/instructors", (c) => grantPlatformInstructorHandler(c));
+  app.get("/api/platform/instructors", (c) => listPlatformInstructorsHandler(c));
   return app;
+}
+
+function get(authContext: AuthContext | undefined) {
+  return buildApp(authContext).request("/api/platform/instructors", {}, TEST_ENV);
 }
 
 const superAdmin = () => fakeAuthContext({ isSuperAdmin: true });
@@ -42,7 +61,11 @@ beforeEach(() => {
     status: "granted",
     userId: "u-new",
     grantedAt: new Date("2026-01-01T00:00:00Z"),
+    grantCreated: true,
   });
+  listPlatformInstructorsMock.mockReset().mockResolvedValue([]);
+  getDeploymentOrganizationMock.mockReset().mockResolvedValue({ id: "org-1" });
+  auditBestEffortMock.mockReset().mockResolvedValue(undefined);
 });
 
 describe("POST /api/platform/instructors (#316)", () => {
@@ -59,6 +82,45 @@ describe("POST /api/platform/instructors (#316)", () => {
       expect.anything(),
       "u1",
       "new-instructor@uw.edu",
+      "example.edu",
+    );
+    expect(auditBestEffortMock).toHaveBeenCalledWith(expect.anything(), ["org-1"], {
+      actorUserId: "u1",
+      action: "user.platform_instructor_granted",
+      targetType: "user",
+      targetId: "u-new",
+    });
+  });
+
+  it("does not invent another grant audit when access already existed", async () => {
+    grantPlatformInstructorMock.mockResolvedValue({
+      status: "granted",
+      userId: "u-existing",
+      grantedAt: new Date("2026-01-01T00:00:00Z"),
+      grantCreated: false,
+    });
+    expect((await post(superAdmin(), { email: "existing@uw.edu" })).status).toBe(200);
+    expect(auditBestEffortMock).not.toHaveBeenCalled();
+  });
+
+  it("requires the deployment institution before granting access", async () => {
+    getDeploymentOrganizationMock.mockResolvedValue(null);
+    const response = await post(superAdmin(), { email: "early@example.edu" });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "Create the institution first" });
+    expect(grantPlatformInstructorMock).not.toHaveBeenCalled();
+    expect(auditBestEffortMock).not.toHaveBeenCalled();
+  });
+
+  it("passes a non-UW deployment allowlist to first-run instructor provisioning", async () => {
+    const res = await post(superAdmin(), { email: "prof@example.edu" });
+    expect(res.status).toBe(200);
+    expect(grantPlatformInstructorMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "u1",
+      "prof@example.edu",
+      "example.edu",
     );
   });
 
@@ -117,5 +179,18 @@ describe("POST /api/platform/instructors failure paths (Effect migration)", () =
     const res = await post(superAdmin(), { email: "new@uw.edu" });
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: SERVICE_UNAVAILABLE_MESSAGE });
+  });
+});
+
+describe("GET /api/platform/instructors", () => {
+  it("returns every platform-approved instructor to a super admin", async () => {
+    listPlatformInstructorsMock.mockResolvedValueOnce([{ userId: "u1", email: "ada@uw.edu", status: "signed_in", grantedAt: "2026-01-01T00:00:00.000Z", assignedCourseCount: 2 }]);
+    const response = await get(superAdmin());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ instructors: [{ userId: "u1", email: "ada@uw.edu", status: "signed_in", grantedAt: "2026-01-01T00:00:00.000Z", assignedCourseCount: 2 }] });
+  });
+
+  it("denies instructor listing to a non-super-admin", async () => {
+    expect((await get(instructor())).status).toBe(403);
   });
 });

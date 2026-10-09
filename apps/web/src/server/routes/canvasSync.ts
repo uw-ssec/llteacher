@@ -2,11 +2,9 @@
    #74: linking a course to Canvas, and syncing its roster.
 
    Course-scoped (requireInstructorOf on THIS course), unlike
-   canvasCredentials.ts's org-wide token -- linking and syncing are things
-   an instructor does to their own course, even though the token they're
-   spent against is shared org-wide. #courseScopeFromAuthContext is the
-   sanctioned way to mint that scope from the request's own membership
-   check (see repositories/scope.ts).
+   canvasCredentials.ts's instructor-scoped token. An instructor can reuse
+   one credential across the courses they run, while each course remains
+   independently linked and synced.
    -------------------------------------------------------------------------- */
 
 import { type Context } from "hono";
@@ -15,7 +13,7 @@ import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { listCanvasCourses, CanvasApiError, CanvasRateLimitedError } from "../../lib/canvas-api";
 import { syncCanvasRoster } from "../../lib/services/CanvasRosterSyncService";
-import { getDecryptedCanvasCredential } from "../repositories/organizationCredentials";
+import { getDecryptedCanvasCredential, getDecryptedCanvasCredentialById } from "../repositories/organizationCredentials";
 import {
   beginSync,
   getLmsIntegrationForCourse,
@@ -61,7 +59,7 @@ const loadCipher = (env: Env) =>
   Effect.promise(async () => new IdentityCipher(await loadIdentityCipherKeys(env)));
 
 const NO_CREDENTIAL_MESSAGE =
-  "Set up your organization's Canvas API token first (Canvas Integration settings).";
+  "Connect your Canvas account first (Canvas Integration settings).";
 
 const noCredential = () => new Conflict({ message: NO_CREDENTIAL_MESSAGE });
 
@@ -73,8 +71,8 @@ function canvasFailureCause(err: CanvasApiError | ExternalServiceError): unknown
   return err._tag === "ExternalServiceError" ? err.cause : err;
 }
 
-/** #74's course picker / #3's visibility check: every course the org's
- *  stored token's own account can see. A failure is answered here with an
+/** #74's course picker / #3's visibility check: every course the instructor's
+ *  stored token's account can see. A failure is answered here with an
  *  actionable sentence at 503 (the instructor's next step depends on
  *  whether Canvas rejected the token, rate-limited, or was unreachable),
  *  not the generic 503 body. */
@@ -98,7 +96,7 @@ function visibleCanvasCourses(
   );
 }
 
-/** #74's course picker: every course the org's stored token's own account
+/** #74's course picker: every course the instructor's stored token's account
  *  can see. */
 export const listCanvasCoursesHandler = effectHandler((c) => Effect.gen(function* () {
   const ctx = yield* instructorCourseScope(c);
@@ -106,7 +104,7 @@ export const listCanvasCoursesHandler = effectHandler((c) => Effect.gen(function
   const cipher = yield* loadCipher(c.env);
   const credential = yield* query(
     "getDecryptedCanvasCredential",
-    (db) => getDecryptedCanvasCredential(db, cipher, ctx.orgScope),
+    (db) => getDecryptedCanvasCredential(db, cipher, ctx.orgScope, ctx.authContext.session.userId),
   );
   if (!credential) return yield* noCredential();
 
@@ -142,23 +140,20 @@ export const linkCanvasCourseHandler = effectHandler((c) => Effect.gen(function*
   const cipher = yield* loadCipher(c.env);
   const credential = yield* query(
     "getDecryptedCanvasCredential",
-    (db) => getDecryptedCanvasCredential(db, cipher, ctx.orgScope),
+    (db) => getDecryptedCanvasCredential(db, cipher, ctx.orgScope, ctx.authContext.session.userId),
   );
   if (!credential) return yield* noCredential();
 
   // #3 (security review, PR #457): canvasCourseId arrives from the request
-  // body, not from a value this handler itself resolved. The credential is
-  // shared org-wide (canvasCredentials.ts's own header), so without this
-  // check an instructor of ANY course in the org could supply an arbitrary
-  // Canvas course id and pull a colleague's roster -- names, emails, role
-  // -- onto their own course. Cross-checking against this same token's own
+  // body, not from a value this handler itself resolved. Cross-checking
+  // against this same instructor-owned token's own
   // listCanvasCourses() result -- the same list the course picker itself
   // shows -- confirms the id is actually one the token's owner teaches.
   const listed = yield* visibleCanvasCourses(c, "linkCanvasCourseHandler", credential);
   if ("response" in listed) return listed.response;
   const matchedCourse = listed.courses.find((course) => course.canvasCourseId === canvasCourseId);
   if (!matchedCourse) {
-    return yield* new Forbidden({ message: "That Canvas course isn't visible to this organization's Canvas token." });
+    return yield* new Forbidden({ message: "That Canvas course isn't visible to your Canvas account." });
   }
 
   // #8 (usability review, PR #457): the picker already knows this course's
@@ -211,10 +206,16 @@ export const syncCanvasCourseHandler = effectHandler((c) => Effect.gen(function*
   }
 
   const cipher = yield* loadCipher(c.env);
-  const credential = yield* query(
-    "getDecryptedCanvasCredential",
-    (db) => getDecryptedCanvasCredential(db, cipher, ctx.orgScope),
-  );
+  const credential = integration.apiCredentialId
+    ? yield* query("getDecryptedCanvasCredentialById", (db) =>
+        getDecryptedCanvasCredentialById(
+          db,
+          cipher,
+          ctx.orgScope,
+          ctx.authContext.session.userId,
+          integration.apiCredentialId!,
+        ))
+    : null;
   if (!credential) {
     // Release the "syncing" claim taken above -- without this, a course
     // that loses its credential between linking and syncing would stay

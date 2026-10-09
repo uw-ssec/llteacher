@@ -3336,7 +3336,15 @@ describe("App hint state (#80)", () => {
       homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
       routes: (url, init) => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
-          return new Response(JSON.stringify([]), { status: 200 });
+          return new Response(JSON.stringify([
+            {
+              id: "hint-history",
+              role: "assistant",
+              parts: [{ type: "text", text: "Ready for a hint" }],
+              createdAt: "2026-08-01T00:00:00.000Z",
+              seq: 1,
+            },
+          ]), { status: 200 });
         }
         if (url === "/api/courses/course-a/sections/s1/hints") {
           return new Response(JSON.stringify({ count: 0, limit: null, remaining: null }), { status: 200 });
@@ -3349,9 +3357,14 @@ describe("App hint state (#80)", () => {
       },
     });
 
-    const hintButton = await screen.findByRole("button", { name: "Give me a hint" });
+    // The hint button renders before the existing conversation hydrates.
+    // Wait for history so that its replacement of the chat cannot erase
+    // the reply while this test exercises double-click suppression.
+    await screen.findByText("Ready for a hint");
+    const hintButton = screen.getByRole("button", { name: "Give me a hint" });
     const user = userEvent.setup();
-    // Two rapid clicks, well within HINT_DOUBLE_SUBMIT_SUPPRESS_MS (1s).
+    // Keep both clicks within the suppression window even on a busy runner.
+    vi.spyOn(Date, "now").mockReturnValue(Date.now());
     await user.click(hintButton);
     await user.click(hintButton);
 

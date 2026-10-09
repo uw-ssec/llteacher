@@ -10,6 +10,7 @@ import {
   organizations,
   sections,
   users,
+  organizationMemberships,
 } from "../../db/schema";
 import { unsafeCourseScope, unsafeOrgScope } from "./scope";
 import {
@@ -29,8 +30,13 @@ import {
 // than being deleted, since what they pin is a database behaviour, not a
 // module boundary.
 import { resolveFallbackLLMConfig, resolveLLMConfig } from "../../lib/llm-config";
+import { listOrgAdminOrgIdsForUser } from "./users";
 
 const DATABASE_URL = process.env.DATABASE_URL;
+
+/** #367: these suites exercise the shared pool; a course id that owns no
+ *  configuration sees exactly the pool. */
+const NO_COURSE = "00000000-0000-4000-8000-000000000000";
 
 // #149: listLlmConfigsForOrg/getDefaultLlmConfig had zero test coverage
 // despite the Phase-4 commit claiming cross-org isolation tests for every
@@ -88,14 +94,14 @@ describe.skipIf(!DATABASE_URL)("llmConfigs repository", () => {
   // listLlmConfigsForOrg's organizationId filter were ever dropped, this
   // would return configAId too and fail.
   it("listLlmConfigsForOrg scoped to org B returns exactly org B's two configs, never org A's", async () => {
-    const rows = await listLlmConfigsForOrg(db, unsafeOrgScope(orgBId));
+    const rows = await listLlmConfigsForOrg(db, unsafeOrgScope(orgBId), NO_COURSE);
     const ids = rows.map((r) => r.id).sort();
     expect(ids).toEqual([configBDefaultId, configBNonDefaultId].sort());
     expect(ids).not.toContain(configAId);
   });
 
   it("listLlmConfigsForOrg scoped to org A returns only org A's single config", async () => {
-    const rows = await listLlmConfigsForOrg(db, unsafeOrgScope(orgAId));
+    const rows = await listLlmConfigsForOrg(db, unsafeOrgScope(orgAId), NO_COURSE);
     expect(rows.map((r) => r.id)).toEqual([configAId]);
   });
 
@@ -123,13 +129,13 @@ describe.skipIf(!DATABASE_URL)("llmConfigs repository", () => {
   // #161: the cross-tenant check updateHomeworkHandler relies on before
   // writing llmConfigId through.
   it("llmConfigBelongsToOrg returns true only when the id and org both match, false for a real id under the wrong org", async () => {
-    expect(await llmConfigBelongsToOrg(db, unsafeOrgScope(orgAId), configAId)).toBe(true);
+    expect(await llmConfigBelongsToOrg(db, unsafeOrgScope(orgAId), configAId, NO_COURSE)).toBe(true);
     // configBDefaultId is a real, existing llmConfig row -- just not org A's.
-    expect(await llmConfigBelongsToOrg(db, unsafeOrgScope(orgAId), configBDefaultId)).toBe(false);
+    expect(await llmConfigBelongsToOrg(db, unsafeOrgScope(orgAId), configBDefaultId, NO_COURSE)).toBe(false);
   });
 
   it("llmConfigBelongsToOrg returns false for a well-formed but nonexistent id", async () => {
-    expect(await llmConfigBelongsToOrg(db, unsafeOrgScope(orgAId), "00000000-0000-0000-0000-000000000000")).toBe(false);
+    expect(await llmConfigBelongsToOrg(db, unsafeOrgScope(orgAId), "00000000-0000-0000-0000-000000000000", NO_COURSE)).toBe(false);
   });
 });
 
@@ -202,22 +208,22 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
 
   it("numbers configs per org from oldest to newest, independent of list order", async () => {
     await reset();
-    const first = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "First" }));
-    const second = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Second" }));
+    const first = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "First" }), "organization");
+    const second = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Second" }), "organization");
     // The badge is CFG·001 for the oldest, while the LIST is newest-first --
     // the two orders are deliberately opposite, so this pins both.
     expect(first.recordNumber).toBe(1);
     expect(second.recordNumber).toBe(2);
-    const listed = await listLlmConfigsForOrg(db, unsafeOrgScope(orgId));
+    const listed = await listLlmConfigsForOrg(db, unsafeOrgScope(orgId), NO_COURSE);
     expect(listed.map((c) => c.name)).toEqual(["Second", "First"]);
     expect(listed.map((c) => c.recordNumber)).toEqual([2, 1]);
   });
 
   it("keeps exactly one default when a second config is promoted", async () => {
     await reset();
-    const a = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "A", isDefault: true }));
-    const b = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "B", isDefault: true }));
-    const all = await listLlmConfigsForOrg(db, unsafeOrgScope(orgId));
+    const a = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "A", isDefault: true }), "organization");
+    const b = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "B", isDefault: true }), "organization");
+    const all = await listLlmConfigsForOrg(db, unsafeOrgScope(orgId), NO_COURSE);
     // Data corruption if this ever fails: two defaults means resolution picks
     // arbitrarily and two courses run on different models for one setting.
     expect(all.filter((c) => c.isDefault).map((c) => c.id)).toEqual([b.id]);
@@ -226,17 +232,17 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
 
   it("promotes on update as well as on create", async () => {
     await reset();
-    const a = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "A", isDefault: true }));
-    const b = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "B" }));
-    await updateLlmConfig(db, unsafeOrgScope(orgId), b.id, input({ name: "B", isDefault: true }));
-    const all = await listLlmConfigsForOrg(db, unsafeOrgScope(orgId));
+    const a = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "A", isDefault: true }), "organization");
+    const b = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "B" }), "organization");
+    await updateLlmConfig(db, unsafeOrgScope(orgId), b.id, input({ name: "B", isDefault: true }), "organization");
+    const all = await listLlmConfigsForOrg(db, unsafeOrgScope(orgId), NO_COURSE);
     expect(all.filter((c) => c.isDefault).map((c) => c.id)).toEqual([b.id]);
     expect(all.find((c) => c.id === a.id)!.isDefault).toBe(false);
   });
 
   it("refuses at the database to make an inactive config the default", async () => {
     await reset();
-    const a = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "A" }));
+    const a = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "A" }), "organization");
     await db
       .update(llmConfigs)
       .set({ isActive: false })
@@ -250,26 +256,26 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
 
   it("will not deactivate the default, and says which case it is", async () => {
     await reset();
-    const a = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "A", isDefault: true }));
-    const b = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "B" }));
+    const a = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "A", isDefault: true }), "organization");
+    const b = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "B" }), "organization");
     // Deactivating the default is an org-wide outage wearing the clothes of a
     // settings change: every unpinned course resolves through it.
-    expect(await deactivateLlmConfig(db, unsafeOrgScope(orgId), a.id)).toBe("is_default");
-    expect(await deactivateLlmConfig(db, unsafeOrgScope(orgId), b.id)).toBe("deactivated");
-    expect(await deactivateLlmConfig(db, unsafeOrgScope(otherOrgId), a.id)).toBe("not_found");
+    expect(await deactivateLlmConfig(db, unsafeOrgScope(orgId), a.id, "organization")).toBe("is_default");
+    expect(await deactivateLlmConfig(db, unsafeOrgScope(orgId), b.id, "organization")).toBe("deactivated");
+    expect(await deactivateLlmConfig(db, unsafeOrgScope(otherOrgId), a.id, "organization")).toBe("not_found");
   });
 
   it("hides another org's config from every read and write path", async () => {
     await reset();
-    const mine = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Mine" }));
+    const mine = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Mine" }), "organization");
     // A single missing org filter is a privilege escalation, so each entry
     // point is checked rather than trusting one shared helper.
     expect(await getLlmConfig(db, unsafeOrgScope(otherOrgId), mine.id)).toBeNull();
     expect(
-      await updateLlmConfig(db, unsafeOrgScope(otherOrgId), mine.id, input({ name: "Hijacked" })),
+      await updateLlmConfig(db, unsafeOrgScope(otherOrgId), mine.id, input({ name: "Hijacked" }), "organization"),
     ).toBeNull();
-    expect(await cloneLlmConfig(db, unsafeOrgScope(otherOrgId), mine.id, "Copy")).toBeNull();
-    expect(await listLlmConfigsForOrg(db, unsafeOrgScope(otherOrgId))).toEqual([]);
+    expect(await cloneLlmConfig(db, unsafeOrgScope(otherOrgId), mine.id, "Copy", NO_COURSE, "organization")).toBeNull();
+    expect(await listLlmConfigsForOrg(db, unsafeOrgScope(otherOrgId), NO_COURSE)).toEqual([]);
     // And the row is untouched.
     expect((await getLlmConfig(db, unsafeOrgScope(orgId), mine.id))!.name).toBe("Mine");
   });
@@ -279,9 +285,9 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
     const source = await createLlmConfig(
       db,
       unsafeOrgScope(orgId),
-      input({ name: "Source", isDefault: true, basePrompt: "Be Socratic." }),
+      input({ name: "Source", isDefault: true, basePrompt: "Be Socratic." }), "organization",
     );
-    const clone = await cloneLlmConfig(db, unsafeOrgScope(orgId), source.id, "Experiment");
+    const clone = await cloneLlmConfig(db, unsafeOrgScope(orgId), source.id, "Experiment", NO_COURSE, "organization");
 
     expect(clone!.name).toBe("Experiment");
     expect(clone!.basePrompt).toBe("Be Socratic.");
@@ -304,9 +310,9 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
       const orgDefault = await createLlmConfig(
         db,
         unsafeOrgScope(orgId),
-        input({ name: "Org default", isDefault: true }),
+        input({ name: "Org default", isDefault: true }), "organization",
       );
-      const pinned = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Pinned" }));
+      const pinned = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Pinned" }), "organization");
       const homeworkId = await makeHomework(pinned.id);
 
       expect((await resolveLlmConfig(db, unsafeOrgScope(orgId), { homeworkId }))!.id).toBe(
@@ -317,9 +323,9 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
 
     it("#421: prefers the course's config over the org default, and the homework's over the course's", async () => {
       await reset();
-      await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Org default", isDefault: true }));
-      const courseConfig = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Course" }));
-      const pinned = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Pinned" }));
+      await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Org default", isDefault: true }), "organization");
+      const courseConfig = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Course" }), "organization");
+      const pinned = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Pinned" }), "organization");
       const homeworkId = await makeHomework(pinned.id);
 
       /* #325 gave `courses` an llm_config_id and this walk was never updated,
@@ -343,12 +349,12 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
       const orgDefault = await createLlmConfig(
         db,
         unsafeOrgScope(orgId),
-        input({ name: "Org default", isDefault: true }),
+        input({ name: "Org default", isDefault: true }), "organization",
       );
       const inactive = await createLlmConfig(
         db,
         unsafeOrgScope(orgId),
-        input({ name: "Retired course config", isActive: false }),
+        input({ name: "Retired course config", isActive: false }), "organization",
       );
 
       // Same is_active and org predicates the other tiers apply -- a course
@@ -367,11 +373,11 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
       const orgDefault = await createLlmConfig(
         db,
         unsafeOrgScope(orgId),
-        input({ name: "Org default", isDefault: true }),
+        input({ name: "Org default", isDefault: true }), "organization",
       );
-      const pinned = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Pinned" }));
+      const pinned = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Pinned" }), "organization");
       const homeworkId = await makeHomework(pinned.id);
-      await deactivateLlmConfig(db, unsafeOrgScope(orgId), pinned.id);
+      await deactivateLlmConfig(db, unsafeOrgScope(orgId), pinned.id, "organization");
 
       // Running on a config an instructor deliberately retired is worse than
       // running on the org default.
@@ -385,17 +391,17 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
       const orgDefault = await createLlmConfig(
         db,
         unsafeOrgScope(orgId),
-        input({ name: "Org default", isDefault: true }),
+        input({ name: "Org default", isDefault: true }), "organization",
       );
       const courseOverride = await createLlmConfig(
         db,
         unsafeOrgScope(orgId),
-        input({ name: "Course override" }),
+        input({ name: "Course override" }), "organization",
       );
       const homeworkOverride = await createLlmConfig(
         db,
         unsafeOrgScope(orgId),
-        input({ name: "Homework override" }),
+        input({ name: "Homework override" }), "organization",
       );
       const homeworkId = await makeHomework(homeworkOverride.id);
 
@@ -475,8 +481,8 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
 
     it("resolves from a section by way of its homework", async () => {
       await reset();
-      await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Org default", isDefault: true }));
-      const pinned = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Pinned" }));
+      await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Org default", isDefault: true }), "organization");
+      const pinned = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Pinned" }), "organization");
       const homeworkId = await makeHomework(pinned.id);
       const [section] = await db
         .insert(sections)
@@ -494,7 +500,7 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
       // promotion. Callers degrade to the platform prompt; they must not be
       // handed some other org's config or an arbitrary local one.
       expect(await resolveLlmConfig(db, unsafeOrgScope(orgId), {})).toBeNull();
-      await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Not default" }));
+      await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Not default" }), "organization");
       expect(await resolveLlmConfig(db, unsafeOrgScope(orgId), {})).toBeNull();
     });
   });
@@ -502,15 +508,15 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
   describe("resolveFallbackLLMConfig (#98/#364)", () => {
     it("returns the configured fallback, and nothing when it was deactivated", async () => {
       await reset();
-      const backup = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Backup" }));
+      const backup = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Backup" }), "organization");
       const primary = await createLlmConfig(
         db,
         unsafeOrgScope(orgId),
-        input({ name: "Primary", fallbackLlmConfigId: backup.id }),
+        input({ name: "Primary", fallbackLlmConfigId: backup.id }), "organization",
       );
 
       expect((await resolveFallbackLLMConfig(db, unsafeOrgScope(orgId), primary))!.id).toBe(backup.id);
-      await deactivateLlmConfig(db, unsafeOrgScope(orgId), backup.id);
+      await deactivateLlmConfig(db, unsafeOrgScope(orgId), backup.id, "organization");
       // An instructor who retires a config has not said "except when the
       // primary is down".
       expect(await resolveFallbackLLMConfig(db, unsafeOrgScope(orgId), primary)).toBeNull();
@@ -518,7 +524,7 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
 
     it("returns null when no fallback is configured", async () => {
       await reset();
-      const solo = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Solo" }));
+      const solo = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Solo" }), "organization");
       expect(await resolveFallbackLLMConfig(db, unsafeOrgScope(orgId), solo)).toBeNull();
     });
 
@@ -528,13 +534,13 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
       // through to the ORG DEFAULT -- which is what most turns resolve their
       // PRIMARY to, so the "failover" would retry the model that just failed.
       await reset();
-      await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Org default", isDefault: true }));
+      await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Org default", isDefault: true }), "organization");
       const primary = await createLlmConfig(
         db,
         unsafeOrgScope(orgId),
         // A fallback id that resolves to nothing under this org -- the state
         // an ON DELETE SET NULL race or a cross-tenant id would produce.
-        input({ name: "Primary", fallbackLlmConfigId: null }),
+        input({ name: "Primary", fallbackLlmConfigId: null }), "organization",
       );
       expect(
         await resolveFallbackLLMConfig(db, unsafeOrgScope(orgId), {
@@ -546,7 +552,7 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
 
     it("will not resolve a fallback belonging to another organization", async () => {
       await reset();
-      const foreign = await createLlmConfig(db, unsafeOrgScope(otherOrgId), input({ name: "Foreign" }));
+      const foreign = await createLlmConfig(db, unsafeOrgScope(otherOrgId), input({ name: "Foreign" }), "organization");
       expect(
         await resolveFallbackLLMConfig(db, unsafeOrgScope(orgId), { fallbackLlmConfigId: foreign.id }),
       ).toBeNull();
@@ -554,7 +560,7 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
 
     it("refuses a self-referencing fallback at the database", async () => {
       await reset();
-      const solo = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Solo" }));
+      const solo = await createLlmConfig(db, unsafeOrgScope(orgId), input({ name: "Solo" }), "organization");
       // At depth one this is the entire cycle problem -- the resolver reads
       // exactly one hop, so there is no A -> B -> A to detect.
       await expect(
@@ -593,6 +599,116 @@ describe.skipIf(!DATABASE_URL)("llmConfigs authoring (#31, #170, #98)", () => {
   }
 });
 
+/* #367: course-scoped configurations and the Org Admin grant, against a real
+   database -- the route suite proves who is admitted; this proves the
+   repository cannot be talked into crossing a course boundary even if a
+   route forgot to check. */
+describe.skipIf(!DATABASE_URL)("course-scoped configurations and Org Admin grants (#367)", () => {
+  let db: Db;
+  let orgId: string;
+  let courseAId: string;
+  let courseBId: string;
+  const scope = () => unsafeOrgScope(orgId);
+  const cfgInput = (overrides: Partial<Parameters<typeof createLlmConfig>[2]> = {}) => ({
+    name: "cfg",
+    provider: "openrouter" as const,
+    modelName: "m",
+    basePrompt: "",
+    temperature: 0.7,
+    maxCompletionTokens: 1000,
+    fallbackLlmConfigId: null,
+    isActive: true,
+    isDefault: false,
+    knowledgeEnabled: true,
+    ...overrides,
+  });
+
+  beforeAll(async () => {
+    db = makeNodeDb(DATABASE_URL!);
+    const [org] = await db
+      .insert(organizations)
+      .values({ slug: `o367-${crypto.randomUUID()}`, name: "367", workosOrganizationId: `w367-${crypto.randomUUID()}` })
+      .returning({ id: organizations.id });
+    orgId = org!.id;
+    const [a] = await db.insert(courses).values({ organizationId: orgId, code: "A", term: "T", title: "A" }).returning({ id: courses.id });
+    const [b] = await db.insert(courses).values({ organizationId: orgId, code: "B", term: "T", title: "B" }).returning({ id: courses.id });
+    courseAId = a!.id;
+    courseBId = b!.id;
+  });
+
+  afterAll(async () => {
+    await db.delete(organizations).where(eq(organizations.id, orgId));
+  });
+
+  it("shows a course the shared pool and its own configs, never another course's", async () => {
+    const pool = await createLlmConfig(db, scope(), cfgInput({ name: "pool" }), "organization");
+    const ownA = await createLlmConfig(db, scope(), cfgInput({ name: "A only" }), { courseId: courseAId });
+    const ownB = await createLlmConfig(db, scope(), cfgInput({ name: "B only" }), { courseId: courseBId });
+
+    const seenByA = (await listLlmConfigsForOrg(db, scope(), courseAId)).map((c) => c.id);
+    expect(seenByA).toEqual(expect.arrayContaining([pool.id, ownA.id]));
+    expect(seenByA).not.toContain(ownB.id);
+    expect(ownA.scopeCourseId).toBe(courseAId);
+    expect(pool.scopeCourseId).toBeNull();
+
+    // Homework pinning uses the same visibility (routes/homeworks.ts).
+    expect(await llmConfigBelongsToOrg(db, scope(), pool.id, courseAId)).toBe(true);
+    expect(await llmConfigBelongsToOrg(db, scope(), ownA.id, courseAId)).toBe(true);
+    expect(await llmConfigBelongsToOrg(db, scope(), ownB.id, courseAId)).toBe(false);
+  });
+
+  it("only writes a configuration through its own owner, in the statement itself", async () => {
+    const pool = await createLlmConfig(db, scope(), cfgInput({ name: "pool2" }), "organization");
+    const ownB = await createLlmConfig(db, scope(), cfgInput({ name: "B2" }), { courseId: courseBId });
+
+    // Course A cannot touch B's config or the pool through the repository,
+    // even if a route forgot its own check.
+    expect(await updateLlmConfig(db, scope(), ownB.id, cfgInput({ name: "hijack" }), { courseId: courseAId })).toBeNull();
+    expect(await updateLlmConfig(db, scope(), pool.id, cfgInput({ name: "hijack" }), { courseId: courseAId })).toBeNull();
+    expect(await deactivateLlmConfig(db, scope(), ownB.id, { courseId: courseAId })).toBe("not_found");
+    // ...and the pool owner cannot reach a course's config as if it were shared.
+    expect(await updateLlmConfig(db, scope(), ownB.id, cfgInput({ name: "hijack" }), "organization")).toBeNull();
+
+    expect((await updateLlmConfig(db, scope(), ownB.id, cfgInput({ name: "B renamed" }), { courseId: courseBId }))!.name).toBe("B renamed");
+  });
+
+  it("refuses a course-owned configuration as the organization default, in the database", async () => {
+    await expect(
+      db.insert(llmConfigs).values({
+        organizationId: orgId,
+        scopeCourseId: courseAId,
+        name: "sneaky default",
+        provider: "openrouter",
+        modelName: "m",
+        isDefault: true,
+      }),
+    ).rejects.toThrow(/llm_configs_default_is_org_pool_chk/);
+  });
+
+  it("clones another course's config into nothing, and a shared one into the cloning course", async () => {
+    const pool = await createLlmConfig(db, scope(), cfgInput({ name: "pool3" }), "organization");
+    const ownB = await createLlmConfig(db, scope(), cfgInput({ name: "B3" }), { courseId: courseBId });
+
+    expect(await cloneLlmConfig(db, scope(), ownB.id, "copy", courseAId, { courseId: courseAId })).toBeNull();
+    const copy = await cloneLlmConfig(db, scope(), pool.id, "copy", courseAId, { courseId: courseAId });
+    expect(copy!.scopeCourseId).toBe(courseAId);
+  });
+
+  it("loads exactly the organizations a user is an Org Admin of", async () => {
+    const [user] = await db
+      .insert(users)
+      .values({
+        email: crypto.getRandomValues(new Uint8Array(16)) as never,
+        emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+      })
+      .returning({ id: users.id });
+    expect(await listOrgAdminOrgIdsForUser(db, user!.id)).toEqual([]);
+    await db.insert(organizationMemberships).values({ userId: user!.id, organizationId: orgId, role: "admin" });
+    expect(await listOrgAdminOrgIdsForUser(db, user!.id)).toEqual([orgId]);
+    await db.delete(users).where(eq(users.id, user!.id));
+  });
+});
+
 /* Subject figure packs (genui_toolkits): opt-in, kept across an update that
    doesn't mention them, copied by clone, and read back by the resolver
    the chat handler uses. Real database: the column default and the array
@@ -628,21 +744,21 @@ describe.skipIf(!DATABASE_URL)("llmConfigs subject figure packs", () => {
 
   it("defaults to no packs, stores a selection, keeps it when an update omits it, and clones it", async () => {
     const scope = unsafeOrgScope(orgId);
-    const plain = (await createLlmConfig(db, scope, base))!;
+    const plain = (await createLlmConfig(db, scope, base, "organization"))!;
     expect(plain.genuiToolkits).toEqual([]);
 
-    const chosen = (await createLlmConfig(db, scope, { ...base, name: "Econ", genuiToolkits: ["economics", "statistics"] }))!;
+    const chosen = (await createLlmConfig(db, scope, { ...base, name: "Econ", genuiToolkits: ["economics", "statistics"] }, "organization"))!;
     expect(chosen.genuiToolkits).toEqual(["economics", "statistics"]);
 
     // An older client that never sends the field must not wipe the packs.
-    const renamed = (await updateLlmConfig(db, scope, chosen.id, { ...base, name: "Econ 201" }))!;
+    const renamed = (await updateLlmConfig(db, scope, chosen.id, { ...base, name: "Econ 201" }, "organization"))!;
     expect(renamed.genuiToolkits).toEqual(["economics", "statistics"]);
 
-    const cleared = (await updateLlmConfig(db, scope, chosen.id, { ...base, name: "Econ 201", genuiToolkits: [] }))!;
+    const cleared = (await updateLlmConfig(db, scope, chosen.id, { ...base, name: "Econ 201", genuiToolkits: [] }, "organization"))!;
     expect(cleared.genuiToolkits).toEqual([]);
 
-    await updateLlmConfig(db, scope, chosen.id, { ...base, genuiToolkits: ["clinical-informatics"] });
-    const copy = (await cloneLlmConfig(db, scope, chosen.id, "Econ copy"))!;
+    await updateLlmConfig(db, scope, chosen.id, { ...base, genuiToolkits: ["clinical-informatics"] }, "organization");
+    const copy = (await cloneLlmConfig(db, scope, chosen.id, "Econ copy", NO_COURSE, "organization"))!;
     expect(copy.genuiToolkits).toEqual(["clinical-informatics"]);
   });
 });

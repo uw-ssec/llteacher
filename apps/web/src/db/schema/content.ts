@@ -189,6 +189,12 @@ export const llmConfigs = pgTable(
     markCompleteInstruction: text("mark_complete_instruction"),
     isDefault: boolean("is_default").notNull().default(false),
     isActive: boolean("is_active").notNull().default(true),
+    // #367: null = the organization's shared pool, owned by Org Admins.
+    // Set = a configuration owned by that one course: its instructors can
+    // create and edit it, and no other course can see or pin it. Mirrors
+    // prompt_templates.scope_course_id. ON DELETE CASCADE: a course-scoped
+    // config means nothing once its course is gone.
+    scopeCourseId: uuid("scope_course_id").references(() => courses.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -198,6 +204,13 @@ export const llmConfigs = pgTable(
   },
   (t) => [
     index("llm_configs_org_idx").on(t.organizationId),
+    index("llm_configs_scope_course_idx").on(t.scopeCourseId),
+    // #367: the org default is org-level state -- what every course without
+    // an explicit choice runs on -- so only a pool config can hold it.
+    check(
+      "llm_configs_default_is_org_pool_chk",
+      sql`NOT (${t.isDefault} AND ${t.scopeCourseId} IS NOT NULL)`,
+    ),
     uniqueIndex("llm_configs_org_default_uq")
       .on(t.organizationId)
       .where(sql`${t.isDefault} = true`),

@@ -3,9 +3,54 @@ import { eq } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { organizations, courses } from "../../db/schema";
-import { getOrgScopeByWorkosOrgId, getOrgScopeForCourse } from "./organizations";
+import { createDeploymentOrganization, getOrgScopeByWorkosOrgId, getOrgScopeForCourse } from "./organizations";
 
 const DATABASE_URL = process.env.DATABASE_URL;
+
+describe.skipIf(!DATABASE_URL)("deployment organization initialization (real DB)", () => {
+  let db: Db;
+
+  beforeAll(() => {
+    db = makeNodeDb(DATABASE_URL!);
+  });
+
+  afterAll(async () => {
+    await db.delete(organizations).where(eq(organizations.deploymentSingleton, true));
+  });
+
+  it("allows exactly one winner when two first-run requests race", async () => {
+    await db.delete(organizations).where(eq(organizations.deploymentSingleton, true));
+    const suffix = crypto.randomUUID();
+    const results = await Promise.all([
+      createDeploymentOrganization(db, {
+        name: "University of Washington",
+        slug: `uw-a-${suffix}`,
+        allowedDomains: ["uw.edu"],
+      }),
+      createDeploymentOrganization(db, {
+        name: "University of Washington",
+        slug: `uw-b-${suffix}`,
+        allowedDomains: ["uw.edu"],
+      }),
+    ]);
+
+    expect(results.filter((result) => result.created)).toHaveLength(1);
+    const rows = await db.select().from(organizations).where(eq(organizations.deploymentSingleton, true));
+    expect(rows).toHaveLength(1);
+    expect(results.every((result) => result.organization?.id === rows[0]!.id)).toBe(true);
+  });
+
+  it("returns a conflict instead of throwing when a legacy row already owns the slug", async () => {
+    await db.delete(organizations).where(eq(organizations.deploymentSingleton, true));
+    const slug = `legacy-${crypto.randomUUID()}`;
+    const [legacy] = await db.insert(organizations).values({ name: "Legacy", slug }).returning({ id: organizations.id });
+    const result = await createDeploymentOrganization(db, {
+      name: "New institution", slug, allowedDomains: ["example.edu"],
+    });
+    expect(result).toEqual({ created: false, reason: "conflict", organization: null });
+    await db.delete(organizations).where(eq(organizations.id, legacy!.id));
+  });
+});
 
 describe.skipIf(!DATABASE_URL)("getOrgScopeByWorkosOrgId (#147, real DB)", () => {
   let db: Db;

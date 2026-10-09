@@ -3,10 +3,10 @@ type: Bug
 title: "Overdue auto-submit sweep: per-org cap vs per-invocation budget, and abort-on-one-org"
 description: "The hourly overdue auto-submit sweep had a per-org cap against Cloudflare's per-invocation subrequest limit, aborted every org on one failure, and raced restarts onto soft-deleted conversations; fixed in PR #432."
 tags: [jobs, submissions, cloudflare, reliability, concurrency]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T22:25:31Z" }
+generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-08T20:52:12Z" }
 status: stable
 governance: context
-code_refs: ["apps/web/src/server/jobs/autoSubmitOverdue.ts", "apps/web/src/server/repositories/submissions.ts"]
+code_refs: [apps/web/src/server/jobs/autoSubmitOverdue.ts, apps/web/src/server/repositories/submissions.ts]
 sources:
   - resource: "issue #414"
   - resource: "issue #416"
@@ -32,3 +32,9 @@ PR #458 moved the job to a plain Node process on ECS (and #461 to in-process sch
 - Fault-isolate per tenant in batch jobs.
 - When the platform changes, remove limits that encoded the old platform's constraints.
 - Do check-then-write as one statement (or with a lock) when a user action can race a background job.
+
+## Resolved: the per-org bound is in SQL now (#442, PR #482, 2026-10-08)
+
+`OVERDUE_SUBMISSION_BATCH_CANDIDATE_LIMIT` used to be a JavaScript truncation applied after Postgres had returned every organization's full backlog. `selectOverdueCandidateRows` now applies a `ROW_NUMBER() OVER (PARTITION BY organization_id ORDER BY due_date, conversation id)` window inside the one query body both paths share, so Postgres returns at most the cap per org.
+
+**Invariant a change must keep:** the window is safe only because the query also filters on `isPastDueHomeworkSql()` (repositories/homeworks.ts), a SQL restatement of `deriveHomeworkStatus`'s `past_due` branch. A bound applied before release-state filtering starves: old hidden, expired, draft or scheduled homeworks fill the window and are then dropped in JS, so an org gets zero candidates every run. If `deriveHomeworkStatus` changes, change `isPastDueHomeworkSql` with it. The parity test in `jobs/autoSubmitOverdue.db.test.ts` seeds all 72 input combinations and fails on any disagreement; the "does not starve" test fails if the predicate is removed (checked on 2026-10-08).

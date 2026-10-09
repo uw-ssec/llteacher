@@ -1,13 +1,9 @@
 /* --------------------------------------------------------------------------
    #73: instructor-managed Canvas API token.
 
-   Same authorization shape as llm-configs' own routes, and the same
-   TRACKED GAP those routes document (see llmConfigs.ts's own header):
-   gated on instructor-of-COURSE, operating on that course's ORGANIZATION
-   credential -- an instructor of one course can set/replace/delete the
-   Canvas token every course in the same org's Canvas sync depends on.
-   Narrowing this needs the same Org Admin role #367 already tracks for
-   llm-configs; not solved here for the same reason it wasn't solved there.
+   Gated on instructor-of-course and owner-scoped to the authenticated user.
+   One instructor can reuse their account credential across their courses,
+   while a co-instructor can neither read nor spend it.
 
    Every response from this file is checked, in its own tests, to never
    carry the plaintext token -- only a masked summary.
@@ -22,6 +18,7 @@ import {
   deleteCanvasCredential,
   getCanvasCredentialSummary,
   getDecryptedCanvasCredential,
+  hasLegacyCanvasCredential,
   setCanvasCredential,
 } from "../repositories/organizationCredentials";
 import { getOrgScopeForCourse } from "../repositories/organizations";
@@ -137,9 +134,13 @@ export const getCanvasCredentialHandler = effectHandler((c) => Effect.gen(functi
   const cipher = yield* loadCipher(c.env);
   const credential = yield* query(
     "getCanvasCredentialSummary",
-    (db) => getCanvasCredentialSummary(db, cipher, ctx.scope),
+    (db) => getCanvasCredentialSummary(db, cipher, ctx.scope, ctx.authContext.session.userId),
   );
-  return c.json({ credential });
+  const reconnectRequired = credential === null && (yield* query(
+    "hasLegacyCanvasCredential",
+    (db) => hasLegacyCanvasCredential(db, ctx.scope),
+  ));
+  return c.json({ credential, ...(reconnectRequired ? { reconnectRequired: true } : {}) });
 }));
 
 export const setCanvasCredentialHandler = effectHandler((c) => Effect.gen(function* () {
@@ -165,10 +166,11 @@ export const setCanvasCredentialHandler = effectHandler((c) => Effect.gen(functi
   // "replace" are distinguishable log entries) -- setCanvasCredential's own
   // upsert is what actually decides create-vs-update at the database level.
   const existed =
-    (yield* query("getCanvasCredentialSummary", (db) => getCanvasCredentialSummary(db, cipher, ctx.scope))) !==
+    (yield* query("getCanvasCredentialSummary", (db) =>
+      getCanvasCredentialSummary(db, cipher, ctx.scope, ctx.authContext.session.userId))) !==
     null;
   yield* query("setCanvasCredential", (db) =>
-    setCanvasCredential(db, cipher, ctx.scope, {
+    setCanvasCredential(db, cipher, ctx.scope, ctx.authContext.session.userId, {
       token,
       canvasBaseUrl: baseUrlResult.baseUrl,
       expiresAt: expiresAtResult.expiresAt,
@@ -183,7 +185,7 @@ export const setCanvasCredentialHandler = effectHandler((c) => Effect.gen(functi
 
   const credential = yield* query(
     "getCanvasCredentialSummary",
-    (db) => getCanvasCredentialSummary(db, cipher, ctx.scope),
+    (db) => getCanvasCredentialSummary(db, cipher, ctx.scope, ctx.authContext.session.userId),
   );
   return c.json({ credential });
 }));
@@ -191,7 +193,8 @@ export const setCanvasCredentialHandler = effectHandler((c) => Effect.gen(functi
 export const deleteCanvasCredentialHandler = effectHandler((c) => Effect.gen(function* () {
   const ctx = yield* orgScopeForInstructor(c);
 
-  const result = yield* query("deleteCanvasCredential", (db) => deleteCanvasCredential(db, ctx.scope));
+  const result = yield* query("deleteCanvasCredential", (db) =>
+    deleteCanvasCredential(db, ctx.scope, ctx.authContext.session.userId));
   if (!result.deleted) return yield* new NotFound({ message: NO_TOKEN_MESSAGE });
 
   yield* auditCredentialChange(ctx, AUDIT_ACTIONS.CANVAS_TOKEN_DELETED, {});
@@ -212,7 +215,7 @@ export const validateCanvasCredentialHandler = effectHandler((c) => Effect.gen(f
   const cipher = yield* loadCipher(c.env);
   const decrypted = yield* query(
     "getDecryptedCanvasCredential",
-    (db) => getDecryptedCanvasCredential(db, cipher, ctx.scope),
+    (db) => getDecryptedCanvasCredential(db, cipher, ctx.scope, ctx.authContext.session.userId),
   );
   if (!decrypted) return yield* new NotFound({ message: NO_TOKEN_MESSAGE });
 

@@ -1,6 +1,6 @@
 import { and, eq, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
-import { courseMemberships, courses, users } from "../../db/schema";
+import { courseMemberships, courses, organizationMemberships, organizations, users } from "../../db/schema";
 import { unsafeOrgScope, type OrgScope } from "./scope";
 import type { BlindIndex } from "../../db/types/encrypted";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
@@ -37,6 +37,19 @@ export async function getOrgScopesForUser(db: Db, userId: string): Promise<OrgSc
  *  must not still count as active access. No `includeDropped` escape hatch
  *  yet since nothing needs one; add it if/when an instructor roster view
  *  needs to see dropped rows too. */
+/** #367: the organizations this user is an Org Admin of. Runs beside
+ *  listMembershipsForUser on every authenticated request (rolesMiddleware),
+ *  so it projects one column and nothing else, for the same reason that
+ *  function does (#172 CMP-001). */
+export async function listOrgAdminOrgIdsForUser(db: Db, userId: string): Promise<string[]> {
+  // The relational builder, like listMembershipsForUser beside it.
+  const rows = await db.query.organizationMemberships.findMany({
+    where: and(eq(organizationMemberships.userId, userId), eq(organizationMemberships.role, "admin")),
+    columns: { organizationId: true },
+  });
+  return rows.map((r) => r.organizationId);
+}
+
 export async function listMembershipsForUser(db: Db, userId: string) {
   // #172 audit (CMP-001/REL-002): explicitly projected rather than selecting
   // every schema-declared column. rolesMiddleware runs this on EVERY
@@ -99,33 +112,45 @@ export async function getUserActivationState(
 
 /** #316: grants (or re-confirms) courseless, platform-wide "recognized as
  *  an instructor" status -- see the users schema's own doc comment for why
- *  this is columns on the row rather than a course_memberships row or an
- *  audit_events entry. Reuses findOrCreatePendingUser (roster.ts), the same
+ *  these columns are the durable authority rather than a course_memberships
+ *  or audit_events row. Reuses findOrCreatePendingUser (roster.ts), the same
  *  "find or create a pending user by email" pipeline upsertCourseMember
  *  uses, so a never-logged-in person can be granted this exactly like they
  *  can be added to a course.
  *
- *  Domain-validated against the platform default (no org to pull a custom
- *  allowlist from -- this grant precedes any course/org membership) so a
- *  typo'd address fails loudly instead of silently creating an unreachable
- *  pending account.
+ *  Domain-validated against the deployment's singleton organization, or the
+ *  configured bootstrap domains before that organization exists.
  *
- *  Idempotent: granting an already-granted user updates grantedBy/grantedAt
- *  to this call rather than erroring, so re-running it is never a mistake. */
+ *  Idempotent: re-granting keeps the original grantedBy/grantedAt provenance
+ *  and returns the stored grant rather than rewriting its history. */
 export type GrantPlatformInstructorResult =
-  | { status: "granted"; userId: string; grantedAt: Date }
+  | { status: "granted"; userId: string; grantedAt: Date; grantCreated: boolean }
   | { status: "invalid_email" | "disallowed_domain"; message: string };
+
+export async function allowedDomainsForPlatformInstructor(
+  db: Db,
+  bootstrapDomains?: string,
+): Promise<string[]> {
+  const organization = await db.query.organizations.findFirst({
+    where: eq(organizations.deploymentSingleton, true),
+    columns: { allowedDomains: true },
+  });
+  return organization?.allowedDomains
+    ?? DomainAllowlistService.bootstrapAllowedDomains(bootstrapDomains);
+}
 
 export async function grantPlatformInstructor(
   db: Db,
   cipher: IdentityCipher,
   granterUserId: string,
   rawEmail: string,
+  bootstrapDomains?: string,
 ): Promise<GrantPlatformInstructorResult> {
   const email = IdentityCipher.normalizeEmail(rawEmail);
+  const allowedDomains = await allowedDomainsForPlatformInstructor(db, bootstrapDomains);
   const domainCheck = DomainAllowlistService.validateEmailDomain(
     email,
-    DomainAllowlistService.DEFAULT_ALLOWED_DOMAINS,
+    allowedDomains,
   );
   if (!domainCheck.allowed) {
     const malformed = domainCheck.reason === "Invalid email format";
@@ -137,12 +162,39 @@ export async function grantPlatformInstructor(
 
   const user = await findOrCreatePendingUser(db, cipher, email);
   const grantedAt = new Date();
-  await db
+  const [createdGrant] = await db
     .update(users)
-    .set({ platformInstructorGrantedAt: grantedAt, platformInstructorGrantedBy: granterUserId })
-    .where(eq(users.id, user.id));
+    .set({
+      platformInstructorGrantedAt: grantedAt,
+      platformInstructorGrantedBy: granterUserId,
+      updatedAt: grantedAt,
+    })
+    .where(and(eq(users.id, user.id), isNull(users.platformInstructorGrantedAt)))
+    .returning({ grantedAt: users.platformInstructorGrantedAt });
 
-  return { status: "granted", userId: user.id, grantedAt };
+  if (createdGrant?.grantedAt) {
+    return {
+      status: "granted",
+      userId: user.id,
+      grantedAt: createdGrant.grantedAt,
+      grantCreated: true,
+    };
+  }
+
+  const existingGrant = await db.query.users.findFirst({
+    where: eq(users.id, user.id),
+    columns: { platformInstructorGrantedAt: true },
+  });
+  if (!existingGrant?.platformInstructorGrantedAt) {
+    throw new Error("Platform instructor grant was not readable after update");
+  }
+
+  return {
+    status: "granted",
+    userId: user.id,
+    grantedAt: existingGrant.platformInstructorGrantedAt,
+    grantCreated: false,
+  };
 }
 
 /** Like getOrgScopesForUser, but also counts a membership dropped
@@ -253,4 +305,78 @@ export async function deactivateByWorkosUserId(db: Db, workosUserId: string) {
     userId: existingUser.id,
     orgScopes,
   };
+}
+
+/* -- #367: Org Admin grants ------------------------------------------------ */
+
+export type GrantOrgAdminResult =
+  | { status: "granted"; userId: string }
+  | { status: "organization_missing"; message: string }
+  | { status: "invalid_email" | "disallowed_domain"; message: string };
+
+/** Grants Org Admin in one organization, by email. Same identity path as
+ *  grantPlatformInstructor: the domain allowlist, then findOrCreatePendingUser
+ *  so a grant can precede the person's first login (they claim the pending
+ *  row by email blind index on sign-in). Idempotent: granting twice is one
+ *  row. */
+export async function grantOrgAdmin(
+  db: Db,
+  cipher: IdentityCipher,
+  granterUserId: string,
+  organizationId: string,
+  rawEmail: string,
+): Promise<GrantOrgAdminResult> {
+  const email = IdentityCipher.normalizeEmail(rawEmail);
+  const organization = await db.query.organizations.findFirst({
+    where: eq(organizations.id, organizationId),
+    columns: { allowedDomains: true },
+  });
+  if (!organization) {
+    return { status: "organization_missing", message: "Organization not found" };
+  }
+  const domainCheck = DomainAllowlistService.validateEmailDomain(
+    email,
+    organization.allowedDomains,
+  );
+  if (!domainCheck.allowed) {
+    const malformed = domainCheck.reason === "Invalid email format";
+    return {
+      status: malformed ? "invalid_email" : "disallowed_domain",
+      message: domainCheck.reason ?? "That email address is not eligible.",
+    };
+  }
+  const user = await findOrCreatePendingUser(db, cipher, email);
+  await db
+    .insert(organizationMemberships)
+    .values({ userId: user.id, organizationId, role: "admin", grantedByUserId: granterUserId })
+    .onConflictDoNothing({ target: [organizationMemberships.userId, organizationMemberships.organizationId] });
+  return { status: "granted", userId: user.id };
+}
+
+/** Revokes Org Admin in one organization. False when there was no grant. */
+export async function revokeOrgAdmin(db: Db, organizationId: string, userId: string): Promise<boolean> {
+  const removed = await db
+    .delete(organizationMemberships)
+    .where(and(eq(organizationMemberships.organizationId, organizationId), eq(organizationMemberships.userId, userId)))
+    .returning({ id: organizationMemberships.id });
+  return removed.length > 0;
+}
+
+/** The organization's Org Admins, emails decrypted for display. */
+export async function listOrgAdmins(
+  db: Db,
+  cipher: IdentityCipher,
+  organizationId: string,
+): Promise<{ userId: string; email: string; grantedAt: string }[]> {
+  const rows = await db
+    .select({ userId: organizationMemberships.userId, email: users.email, grantedAt: organizationMemberships.createdAt })
+    .from(organizationMemberships)
+    .innerJoin(users, eq(organizationMemberships.userId, users.id))
+    .where(and(eq(organizationMemberships.organizationId, organizationId), eq(organizationMemberships.role, "admin")))
+    .orderBy(organizationMemberships.createdAt);
+  const out = [];
+  for (const r of rows) {
+    out.push({ userId: r.userId, email: await cipher.decryptString(r.email), grantedAt: r.grantedAt.toISOString() });
+  }
+  return out;
 }

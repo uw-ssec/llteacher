@@ -20,6 +20,7 @@ const LLM_CONFIGS: LlmConfigPayload[] = [
     isDefault: true,
     isActive: true,
   knowledgeEnabled: true, genuiToolkits: [],
+  scopeCourseId: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
   },

@@ -37,6 +37,7 @@ import {
 } from "./routes/instructor/transcripts";
 import { flagResponseHandler, listCourseFeedbackHandler } from "./routes/feedback";
 import { submitWidgetResponseHandler } from "./routes/progressWidgets";
+import { grantOrgAdminHandler, listOrgAdminsHandler, revokeOrgAdminHandler } from "./routes/organizationAdmins";
 import {
   addCourseMemberHandler,
   addCourseTasHandler,
@@ -44,7 +45,9 @@ import {
   removeCourseTaHandler,
   updateTaCapabilitiesHandler,
 } from "./routes/courseMemberships";
-import { grantPlatformInstructorHandler } from "./routes/platformInstructors";
+import { grantPlatformInstructorHandler, listPlatformInstructorsHandler } from "./routes/platformInstructors";
+import { createOrganizationHandler, getOrganizationHandler } from "./routes/organizations";
+import { listPlatformCoursesHandler, provisionCourseHandler } from "./routes/courseProvisioning";
 import {
   cloneLlmConfigHandler,
   createLlmConfigHandler,
@@ -336,20 +339,23 @@ app.post("/api/courses/:courseId/members", requireSuperAdmin()(addCourseMemberHa
 // #316: courseless -- deliberately outside /api/courses, since it grants
 // instructor status before any course exists for the person.
 app.post("/api/platform/instructors", requireSuperAdmin()(grantPlatformInstructorHandler));
+app.get("/api/platform/instructors", requireSuperAdmin()(listPlatformInstructorsHandler));
+app.get("/api/platform/organization", requireSuperAdmin()(getOrganizationHandler));
+app.post("/api/platform/organization", requireSuperAdmin()(createOrganizationHandler));
+app.post("/api/platform/courses", requireSuperAdmin()(provisionCourseHandler));
+app.get("/api/platform/courses", requireSuperAdmin()(listPlatformCoursesHandler));
 
-// #31/#170: LLM configuration authoring. Instructor-gated on the COURSE,
-// operating on that course's ORGANIZATION pool -- llm_configs is a per-org
-// resource, so an instructor of one course can edit configs other courses in
-// the same org use, and can change the org default.
-//
-// #367: that widening is a TRACKED GAP, not an accepted design. It was
-// documented as deliberate when this landed; #363's review rejected that
-// framing -- the fix is an Org Admin role owning org-level config, with
-// per-course instructors scoped to their own course, which is schema-level
-// and so lands as its own change rather than inside a 105-file PR. These
-// guards genuinely cannot narrow it in the meantime (the authority checked
-// and the scope written are different keys), which is why it is filed
-// rather than patched here.
+// #31/#170/#367: LLM configuration authoring. Instructor-gated on the
+// COURSE; inside the handlers (routes/llmConfigs.ts), the organization's
+// shared pool and its default additionally require isOrgAdminOf(that
+// course's organization), and a course's own configurations are scoped to
+// that course. See that file's header for the full rule.
+// #367: Org Admin provisioning. Org-keyed; each handler checks
+// isOrgAdminOf(:organizationId), which a super admin holds everywhere -- the
+// bootstrap path for an organization with no admin yet.
+app.get("/api/organizations/:organizationId/admins", listOrgAdminsHandler);
+app.post("/api/organizations/:organizationId/admins", grantOrgAdminHandler);
+app.delete("/api/organizations/:organizationId/admins/:userId", revokeOrgAdminHandler);
 app.get("/api/courses/:courseId/llm-configs", requireInstructorOf()(listLlmConfigsHandler));
 app.post("/api/courses/:courseId/llm-configs", requireInstructorOf()(createLlmConfigHandler));
 app.get(
@@ -406,11 +412,10 @@ app.post(
   requireInstructorOf()(draftGradeHandler),
 );
 
-// #73/#74: Canvas integration. Instructor-of-course-gated, same widening
-// as llm-configs (courses just above) -- the credential is an ORG
-// resource, the course link/sync is per-COURSE. See canvasCredentials.ts's
-// and canvasSync.ts's own header comments for the full authorization
-// reasoning.
+// #73/#74: Canvas integration. Instructor-of-course-gated: the credential
+// is an ORG resource, the course link/sync is per-COURSE -- the widening
+// llm-configs had before #367 (see canvasCredentials.ts's header for why it
+// is not narrowed to Org Admin here). See canvasSync.ts too.
 app.get("/api/courses/:courseId/canvas/credential", requireInstructorOf()(getCanvasCredentialHandler));
 app.put("/api/courses/:courseId/canvas/credential", requireInstructorOf()(setCanvasCredentialHandler));
 app.delete("/api/courses/:courseId/canvas/credential", requireInstructorOf()(deleteCanvasCredentialHandler));

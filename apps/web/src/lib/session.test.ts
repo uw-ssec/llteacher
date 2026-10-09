@@ -37,6 +37,35 @@ describe("sealSession / unsealSession", () => {
     expect(unsealed?.workosSessionId).toBe("session_abc");
   });
 
+  it("round-trips workosOrganizationId when present", async () => {
+    const payload = createSessionPayload(
+      "user-1",
+      "workos-1",
+      7,
+      undefined,
+      "session_abc",
+      "org_abc",
+    );
+    const sealed = await sealSession(payload, key);
+    const unsealed = await unsealSession(sealed, key);
+    expect(unsealed?.workosOrganizationId).toBe("org_abc");
+  });
+
+  it("accepts a legacy cookie without workosOrganizationId", async () => {
+    const payload = createSessionPayload("user-1", "workos-1", 7);
+    const sealed = await sealSession(payload, key);
+    expect((await unsealSession(sealed, key))?.workosOrganizationId).toBeUndefined();
+  });
+
+  it("rejects a non-string workosOrganizationId", async () => {
+    const payload = {
+      ...createSessionPayload("user-1", "workos-1", 7),
+      workosOrganizationId: 42,
+    } as unknown as Parameters<typeof sealSession>[0];
+    const sealed = await sealSession(payload, key);
+    expect(await unsealSession(sealed, key)).toBeNull();
+  });
+
   it("round-trips with workosSessionId absent (backward compatible)", async () => {
     const payload = createSessionPayload("user-1", "workos-1", 7);
     const sealed = await sealSession(payload, key);

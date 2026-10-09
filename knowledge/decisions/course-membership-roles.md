@@ -3,7 +3,7 @@ type: Decision
 title: Roles live on per-course memberships instead of global Teacher/Student profiles
 description: "Django's Teacher/Student one-to-one profiles were dropped; role is a course_role enum (instructor, ta, student, observer, admin) on course_memberships, with instructor-granted per-course TA capabilities."
 tags: [data-model, auth, roles, tenancy]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T22:32:35Z" }
+generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-08T20:08:07Z" }
 status: stable
 governance: constraint
 code_refs: [apps/web/src/db/schema/identity.ts, apps/web/src/server/middleware/roles.ts, apps/web/src/server/utils/guards.ts, apps/web/src/lib/instructor-authz.ts, apps/web/src/server/repositories/roster.ts]
@@ -42,3 +42,4 @@ Co-instructors and TAs, multi-course students, and Canvas enrollments all need r
 - [Authentication and authorization](../architecture/auth-and-authorization.md): Roles drive authorization checks
 - [Authorization model and known gaps: course-scoped roles, super admins, no course creation](../facts/authority-and-provisioning-gaps.md): Known gaps in authority and provisioning
 - [Stakeholder requirement (unresolved): aggregate vs individual student data for instructors](../requirements/stakeholder-instructor-visibility-of-student-data.md): What instructors may see is still unresolved
+- [Org Admin owns the shared LLM config pool; course instructors own course-scoped configs](org-admin-role-and-course-scoped-configs.md): Adds the first organization-level role beside course roles

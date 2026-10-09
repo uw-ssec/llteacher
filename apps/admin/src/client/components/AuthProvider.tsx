@@ -15,6 +15,8 @@ const NARROWEST_CONSOLE_ROLE: CourseRole = "ta";
 export interface CourseOption {
   id: string;
   title: string;
+  code: string;
+  term: string;
   role: CourseRole;
   canViewSolutions: boolean;
   canViewDrafts: boolean;
@@ -32,6 +34,7 @@ export interface CourseOption {
 }
 
 export type AuthState = AuthSessionState & {
+  userId: string | null;
   role: CourseRole | null;
   courses: CourseOption[];
   /** #33: the signed-in instructor's own name, for the chrome. The console
@@ -90,6 +93,8 @@ function parseCourse(raw: unknown, fallbackRole: CourseRole | null): CourseOptio
   return {
     id: c.id,
     title: c.title,
+    code: typeof c.code === "string" ? c.code : c.title,
+    term: typeof c.term === "string" ? c.term : "",
     role,
     canViewSolutions: c.canViewSolutions === true,
     canViewDrafts: c.canViewDrafts === true,
@@ -100,6 +105,7 @@ function parseCourse(raw: unknown, fallbackRole: CourseRole | null): CourseOptio
 }
 
 export const { AuthProvider, useAuth } = createAuthProvider<{
+  userId: string | null;
   role: CourseRole | null;
   courses: CourseOption[];
   displayName: string | null;
@@ -113,6 +119,7 @@ export const { AuthProvider, useAuth } = createAuthProvider<{
       displayName?: unknown;
       isSuperAdmin?: unknown;
       isPlatformInstructor?: unknown;
+      userId?: unknown;
     } | null;
     let role: CourseRole | null = null;
     if (raw?.role != null) {
@@ -132,6 +139,7 @@ export const { AuthProvider, useAuth } = createAuthProvider<{
       );
     }
     return {
+      userId: typeof raw?.userId === "string" ? raw.userId : null,
       role,
       courses,
       // Null rather than a placeholder when absent: the chrome falls back to
@@ -145,5 +153,5 @@ export const { AuthProvider, useAuth } = createAuthProvider<{
       isPlatformInstructor: raw?.isPlatformInstructor === true,
     };
   },
-  defaultExtra: { role: null, courses: [], displayName: null, isSuperAdmin: false, isPlatformInstructor: false },
+  defaultExtra: { userId: null, role: null, courses: [], displayName: null, isSuperAdmin: false, isPlatformInstructor: false },
 });

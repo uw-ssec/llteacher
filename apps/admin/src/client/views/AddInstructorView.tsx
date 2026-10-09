@@ -23,6 +23,8 @@ import { Warning, CheckCircle } from "@phosphor-icons/react";
 import { PageHeader } from "../components/PageHeader";
 import { abortAfter } from "../lib/abortAfter";
 import { apiClient, ApiError } from "../lib/api-client";
+import { useApiResource } from "../lib/useApiResource";
+import { ViewEmpty, ViewError, ViewLoading } from "../components/ViewState";
 
 /** Copy per outcome. `granted` covers both a brand-new pending user and an
  *  already-granted one re-confirmed -- grantPlatformInstructor is
@@ -32,6 +34,7 @@ const OUTCOME_COPY = {
 } as const;
 
 export function AddInstructorView() {
+  const instructorsResource = useApiResource((opts) => apiClient.platformInstructors.list(opts), []);
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ status: "granted"; grantedAt: string } | null>(null);
@@ -53,6 +56,7 @@ export function AddInstructorView() {
       if (outcome.status === "granted" && outcome.grantedAt) {
         setResult({ status: "granted", grantedAt: outcome.grantedAt });
         setEmail("");
+        instructorsResource.reload();
       } else {
         // "invalid_email" / "disallowed_domain" -- the server's own sentence
         // (via ApiError below) already explains why, so this path is only
@@ -130,6 +134,23 @@ export function AddInstructorView() {
             {OUTCOME_COPY.granted}
           </p>
         )}
+      </section>
+
+      <section aria-labelledby="all-instructors-heading">
+        <h2 id="all-instructors-heading">All instructors</h2>
+        {instructorsResource.loading && !instructorsResource.data ? <ViewLoading label="Loading instructors…" /> : null}
+        {instructorsResource.error ? <ViewError error={instructorsResource.error} onRetry={instructorsResource.reload} detail="GET /api/platform/instructors" /> : null}
+        {instructorsResource.data?.instructors.length === 0 ? <ViewEmpty title="No instructors yet" body="Grant instructor access above or create a course shell." /> : null}
+        {instructorsResource.data?.instructors.length ? <table className="admin-table">
+          <caption className="admin-visually-hidden">Everyone with instructor portal access</caption>
+          <thead><tr><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Access granted</th><th scope="col">Assigned courses</th></tr></thead>
+          <tbody>{instructorsResource.data.instructors.map((instructor) => <tr key={instructor.userId}>
+            <th scope="row">{instructor.email}</th>
+            <td>{instructor.status === "signed_in" ? "Signed in" : "Pending"}</td>
+            <td>{new Date(instructor.grantedAt).toLocaleDateString()}</td>
+            <td>{instructor.assignedCourseCount}</td>
+          </tr>)}</tbody>
+        </table> : null}
       </section>
     </div>
   );

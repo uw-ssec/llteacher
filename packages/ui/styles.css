@@ -547,6 +547,18 @@ body {
     padding-inline: var(--space-4);
   }
 
+  .top-nav__course-select {
+    margin-inline-end: 10px;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    color: inherit;
+    background: transparent;
+  }
+
+  .top-nav__course-option {
+    color: var(--color-text-primary);
+  }
+
   .top-nav__user-group {
     position: relative;
     flex-shrink: 0;
@@ -4043,6 +4055,11 @@ body {
   padding-block-end: var(--space-8);
 }
 
+.admin-view--setup {
+  max-width: 45rem;
+  margin: 4rem auto;
+}
+
 /* -- Page header ----------------------------------------------------------- */
 
 .admin-page-header {
@@ -4387,6 +4404,14 @@ body {
 
 .admin-record-row__meta-chip--mono {
   color: var(--color-text);
+  /* A model id is the one meta value with no length bound
+     ("google/gemma-4-31b-it:free"), and it has no spaces to wrap at. Let only
+     this chip break mid-id, so at 320px it stays inside the row instead of
+     overflowing it; at desktop widths it fits on one line as before. Found by
+     the design-system screenshot review (admin-configs-320). */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .admin-record-row__desc {
@@ -5990,6 +6015,28 @@ body {
   .list-controls__sort {
     margin-inline-start: 0;
   }
+}
+
+/* -- Lock: a whole-form disabled state (#367) ------------------------------
+   A bare fieldset whose only job is `disabled`: a shared LLM configuration
+   viewed by someone who may not change it. `display: contents` gives it no
+   box, so the form's own column and gaps are unchanged. Disabled controls
+   read as reference, not as a broken form: the raised surface instead of the
+   input field's paper, secondary text, and no pointer. */
+.admin-form-lock {
+  display: contents;
+}
+
+.admin-form-lock:disabled input,
+.admin-form-lock:disabled select,
+.admin-form-lock:disabled textarea {
+  background-color: var(--color-surface-raised);
+  color: var(--color-text-secondary);
+  cursor: not-allowed;
+}
+
+.admin-form-lock:disabled .admin-form-check {
+  cursor: not-allowed;
 }
 
 /* -- Group: a ruled fieldset, replacing the browser's default box --------- */

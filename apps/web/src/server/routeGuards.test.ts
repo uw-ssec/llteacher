@@ -70,6 +70,8 @@ const handlers = {
   removeCourseTa: ok("removeCourseTa"),
   addCourseMember: ok("addCourseMember"),
   grantPlatformInstructor: ok("grantPlatformInstructor"),
+  listPlatformInstructors: ok("listPlatformInstructors"),
+  listPlatformCourses: ok("listPlatformCourses"),
   listLlmConfigs: ok("listLlmConfigs"),
   createLlmConfig: ok("createLlmConfig"),
   getLlmConfig: ok("getLlmConfig"),
@@ -136,6 +138,11 @@ vi.mock("./routes/courseMemberships", () => ({
 }));
 vi.mock("./routes/platformInstructors", () => ({
   grantPlatformInstructorHandler: (c: Context) => handlers.grantPlatformInstructor(c),
+  listPlatformInstructorsHandler: (c: Context) => handlers.listPlatformInstructors(c),
+}));
+vi.mock("./routes/courseProvisioning", () => ({
+  provisionCourseHandler: (c: Context) => c.json({}, 200),
+  listPlatformCoursesHandler: (c: Context) => handlers.listPlatformCourses(c),
 }));
 
 const findMany = vi.fn();
@@ -144,6 +151,8 @@ vi.mock("../db/client", () => ({
   makeDb: () => ({
     query: {
       courseMemberships: { findMany: (...args: unknown[]) => findMany(...args) },
+      // #367: rolesMiddleware also loads Org Admin grants; none by default.
+      organizationMemberships: { findMany: async () => [] },
       users: { findFirst: (...args: unknown[]) => findFirst(...args) },
     },
   }),
@@ -247,6 +256,10 @@ const ROUTES: { method: string; path: string; handler: HandlerName; admits: Pers
   // #316: courseless -- not under /api/courses at all. Same admits-nobody-
   // in-this-table reasoning as addCourseMember above.
   { method: "POST", path: "/api/platform/instructors", handler: "grantPlatformInstructor",
+    admits: [] },
+  { method: "GET", path: "/api/platform/instructors", handler: "listPlatformInstructors",
+    admits: [] },
+  { method: "GET", path: "/api/platform/courses", handler: "listPlatformCourses",
     admits: [] },
 
   // #31/#170: repointing the organization at a different model, or changing

@@ -18,24 +18,20 @@
        for why instructor-supplied credentials are gated behind a secret_ref
        allowlist.
 
-   AUTHORIZATION SHAPE -- a widening, and as of #367 a TRACKED GAP rather
-   than an accepted design. These routes gate on instructor-of-COURSE and
-   then operate on that course's ORGANIZATION pool, because that is what
-   `llm_configs` is. So an instructor of one course can edit configs other
-   courses in the same org use, and can change the org default.
+   AUTHORIZATION SHAPE (#367). `llm_configs` is a per-organization table
+   holding two kinds of configuration:
 
-   This block previously argued the widening was fine -- "within one UW
-   organization, course staff are trusted with the shared model pool."
-   #363's review rejected that: the authority a course instructor holds
-   should not reach org-level state just because the schema stores it
-   per-org. The fix is an Org Admin role that owns org-level config, with
-   per-course instructors scoped strictly to their own course (#367).
-   Schema-level, so it lands separately rather than inside this PR.
+     · the organization's SHARED POOL (scope_course_id IS NULL), including
+       the org default -- owned by Org Admins (organization_memberships);
+     · a course's OWN configurations (scope_course_id = that course) --
+       owned by that course's instructors.
 
-   Nothing here can narrow it in the meantime: the authority being checked
-   and the scope being written are different keys, so a filter would either
-   be a no-op or lock instructors out of the pool entirely. Do not read the
-   absence of a guard as a decision that one is not wanted.
+   A course instructor sees the pool and their course's own configs, may use
+   or test any of them, and may create, edit, clone into, and deactivate
+   only their own course's. Changing the pool or the org default requires
+   isOrgAdminOf(the course's organization). This replaces the earlier
+   widening, where any instructor of any course could edit every config in
+   the organization, including the default other courses run on.
    -------------------------------------------------------------------------- */
 
 import { type Context } from "hono";
@@ -64,10 +60,13 @@ import {
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import type { OrgScope } from "../repositories/scope";
+import type { LlmConfigOwner } from "../repositories/llmConfigs";
+import type { LlmConfigRecord } from "../repositories/llmConfigs";
 import type {
   LlmConfigBody,
   LlmConfigCloneBody,
   LlmConfigListResponse,
+  LlmConfigScope,
   LlmConfigTestBody,
   LlmConfigTestResponse,
 } from "../../shared/types";
@@ -105,7 +104,13 @@ function isProvider(value: unknown): value is Provider {
   return typeof value === "string" && (PROVIDERS as readonly string[]).includes(value);
 }
 
-type InstructorOrgCtx = { scope: OrgScope; courseId: string; authContext: AuthContext };
+type InstructorOrgCtx = {
+  scope: OrgScope;
+  courseId: string;
+  authContext: AuthContext;
+  /** #367: may change the organization's shared pool and its default. */
+  isOrgAdmin: boolean;
+};
 
 /** Resolves the caller's authority (a course) into the scope these routes
  *  operate on (that course's org). Fails Forbidden for anything that should
@@ -122,8 +127,66 @@ function orgScopeForInstructor(
     if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) return yield* denied();
     const scope = yield* query("getOrgScopeForCourse", (db) => getOrgScopeForCourse(db, courseId));
     if (!scope) return yield* denied();
-    return { scope, courseId, authContext };
+    return { scope, courseId, authContext, isOrgAdmin: authContext.isOrgAdminOf(scope) };
   });
+}
+
+/** #367: a config this course can see -- the shared pool or its own. One
+ *  owned by another course reads as missing, never as forbidden: its
+ *  existence is not this course's business. */
+function isVisibleToCourse(ctx: InstructorOrgCtx, config: Pick<LlmConfigRecord, "scopeCourseId">): boolean {
+  return config.scopeCourseId === null || config.scopeCourseId === ctx.courseId;
+}
+
+function ownerOf(config: Pick<LlmConfigRecord, "scopeCourseId">): LlmConfigOwner {
+  return config.scopeCourseId === null ? "organization" : { courseId: config.scopeCourseId };
+}
+
+const sharedPoolDenied = () =>
+  new Forbidden({
+    message:
+      "Only an organization admin can change shared configurations. Clone it to make a copy for this course.",
+  });
+
+/** #367: may this caller change a config with this owner? */
+function canChange(ctx: InstructorOrgCtx, owner: LlmConfigOwner): boolean {
+  return owner === "organization" ? ctx.isOrgAdmin : owner.courseId === ctx.courseId;
+}
+
+/** #367: where a create or clone lands. Absent means the pool for an Org
+ *  Admin (what the console did before #367) and this course for anyone else;
+ *  an instructor asking for the pool is refused rather than downgraded, so
+ *  a request never silently lands somewhere other than where it asked. */
+function resolveNewOwner(
+  ctx: InstructorOrgCtx,
+  requested: unknown,
+): Effect.Effect<LlmConfigOwner, BadRequest | Forbidden> {
+  if (requested !== undefined && requested !== "course" && requested !== "organization") {
+    return Effect.fail(new BadRequest({ message: 'scope must be "course" or "organization"' }));
+  }
+  const scope: LlmConfigScope = (requested as LlmConfigScope | undefined) ?? (ctx.isOrgAdmin ? "organization" : "course");
+  if (scope === "organization" && !ctx.isOrgAdmin) return Effect.fail(sharedPoolDenied());
+  return Effect.succeed(scope === "organization" ? "organization" : { courseId: ctx.courseId });
+}
+
+/** #367: the org default is org-level state, so only a pool config can hold
+ *  it, and only an Org Admin can move it. The database enforces the first
+ *  half too (llm_configs_default_is_org_pool_chk). */
+function requireDefaultAllowed(
+  ctx: InstructorOrgCtx,
+  owner: LlmConfigOwner,
+  isDefault: boolean,
+): Effect.Effect<void, BadRequest | Forbidden> {
+  if (!isDefault) return Effect.void;
+  if (owner !== "organization") {
+    return Effect.fail(
+      new BadRequest({ message: "Only a shared organization configuration can be the organization default." }),
+    );
+  }
+  if (!ctx.isOrgAdmin) {
+    return Effect.fail(new Forbidden({ message: "Only an organization admin can change the organization default." }));
+  }
+  return Effect.void;
 }
 
 /** Unparseable JSON is the caller's fault, not a dependency failure. */
@@ -276,22 +339,48 @@ function translateDefaultRace<A, R>(
  *  row to exist SOMEWHERE. Same gap #161 found with homeworks.llm_config_id:
  *  without this, a config could name another organization's config as its
  *  fallback, and a provider outage would then quietly run students on a
- *  tenant they have no relationship with. */
-function requireFallbackInOrg(
+ *  tenant they have no relationship with.
+ *
+ *  #367: and within the org, a fallback every user of the config can reach.
+ *  A shared config may only fall back to another shared one -- a course-owned
+ *  fallback would put one course's private configuration under every other
+ *  course's outage. A course's own config may fall back to the pool or to
+ *  that course's own configs. */
+function requireFallbackAllowed(
   ctx: InstructorOrgCtx,
+  owner: LlmConfigOwner,
   fallbackLlmConfigId: string | null,
 ): Effect.Effect<void, BadRequest | DatabaseError, Database> {
   return Effect.gen(function* () {
     if (!fallbackLlmConfigId) return;
     const fallback = yield* query("getLlmConfig", (db) => getLlmConfig(db, ctx.scope, fallbackLlmConfigId));
-    if (!fallback) return yield* new BadRequest({ message: "That fallback configuration no longer exists." });
+    if (!fallback || !isVisibleToCourse(ctx, fallback)) {
+      return yield* new BadRequest({ message: "That fallback configuration no longer exists." });
+    }
+    if (owner === "organization" && fallback.scopeCourseId !== null) {
+      return yield* new BadRequest({
+        message: "A shared configuration can only fall back to another shared configuration.",
+      });
+    }
+  });
+}
+
+/** #367: the config this course can see, or a 404. */
+function requireVisibleConfig(
+  ctx: InstructorOrgCtx,
+  configId: string,
+): Effect.Effect<LlmConfigRecord, NotFound | DatabaseError, Database> {
+  return Effect.gen(function* () {
+    const config = yield* query("getLlmConfig", (db) => getLlmConfig(db, ctx.scope, configId));
+    if (!config || !isVisibleToCourse(ctx, config)) return yield* configNotFound();
+    return config;
   });
 }
 
 export const listLlmConfigsHandler = effectHandler((c) => Effect.gen(function* () {
   const ctx = yield* orgScopeForInstructor(c);
-  const configs = yield* query("listLlmConfigsForOrg", (db) => listLlmConfigsForOrg(db, ctx.scope));
-  const body: LlmConfigListResponse = { configs };
+  const configs = yield* query("listLlmConfigsForOrg", (db) => listLlmConfigsForOrg(db, ctx.scope, ctx.courseId));
+  const body: LlmConfigListResponse = { configs, canManageOrgPool: ctx.isOrgAdmin };
   return c.json(body);
 }));
 
@@ -299,8 +388,7 @@ export const getLlmConfigHandler = effectHandler((c) => Effect.gen(function* () 
   const ctx = yield* orgScopeForInstructor(c);
   const configId = yield* requireConfigId(c);
 
-  const config = yield* query("getLlmConfig", (db) => getLlmConfig(db, ctx.scope, configId));
-  if (!config) return yield* configNotFound();
+  const config = yield* requireVisibleConfig(ctx, configId);
   return c.json(config);
 }));
 
@@ -311,13 +399,15 @@ export const createLlmConfigHandler = effectHandler((c) => Effect.gen(function* 
   const parsed = parseConfigBody(raw);
   if ("error" in parsed) return yield* new BadRequest({ message: parsed.error });
 
-  yield* requireFallbackInOrg(ctx, parsed.input.fallbackLlmConfigId);
+  const owner = yield* resolveNewOwner(ctx, (raw as { scope?: unknown }).scope);
+  yield* requireDefaultAllowed(ctx, owner, parsed.input.isDefault);
+  yield* requireFallbackAllowed(ctx, owner, parsed.input.fallbackLlmConfigId);
 
-  const created = yield* query("createLlmConfig", (db) => createLlmConfig(db, ctx.scope, parsed.input)).pipe(
+  const created = yield* query("createLlmConfig", (db) => createLlmConfig(db, ctx.scope, parsed.input, owner)).pipe(
     translateDefaultRace,
   );
 
-  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_CREATED, created.id, {
+  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_CREATED, created.id, owner, {
     name: created.name,
     isDefault: created.isDefault,
   });
@@ -338,15 +428,21 @@ export const updateLlmConfigHandler = effectHandler((c) => Effect.gen(function* 
     return yield* new BadRequest({ message: "A configuration cannot be its own fallback." });
   }
 
-  yield* requireFallbackInOrg(ctx, parsed.input.fallbackLlmConfigId);
+  const existing = yield* requireVisibleConfig(ctx, configId);
+  const owner = ownerOf(existing);
+  if (!canChange(ctx, owner)) return yield* sharedPoolDenied();
+  // Promoting is an org-default change; leaving the current default checked
+  // while editing it is not (isDefault: true on the default is a no-op).
+  yield* requireDefaultAllowed(ctx, owner, parsed.input.isDefault && !existing.isDefault);
+  yield* requireFallbackAllowed(ctx, owner, parsed.input.fallbackLlmConfigId);
 
   const updated = yield* query(
     "updateLlmConfig",
-    (db) => updateLlmConfig(db, ctx.scope, configId, parsed.input),
+    (db) => updateLlmConfig(db, ctx.scope, configId, parsed.input, owner),
   ).pipe(translateDefaultRace);
   if (!updated) return yield* configNotFound();
 
-  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_UPDATED, updated.id, {
+  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_UPDATED, updated.id, owner, {
     name: updated.name,
     isDefault: updated.isDefault,
     isActive: updated.isActive,
@@ -358,7 +454,11 @@ export const deactivateLlmConfigHandler = effectHandler((c) => Effect.gen(functi
   const ctx = yield* orgScopeForInstructor(c);
   const configId = yield* requireConfigId(c);
 
-  const outcome = yield* query("deactivateLlmConfig", (db) => deactivateLlmConfig(db, ctx.scope, configId));
+  const existing = yield* requireVisibleConfig(ctx, configId);
+  const owner = ownerOf(existing);
+  if (!canChange(ctx, owner)) return yield* sharedPoolDenied();
+
+  const outcome = yield* query("deactivateLlmConfig", (db) => deactivateLlmConfig(db, ctx.scope, configId, owner));
   if (outcome === "not_found") return yield* configNotFound();
   if (outcome === "is_default") {
     // 409, not 403: the caller is entitled to do this, the org's state just
@@ -369,7 +469,7 @@ export const deactivateLlmConfigHandler = effectHandler((c) => Effect.gen(functi
     });
   }
 
-  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_DEACTIVATED, configId, {});
+  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_DEACTIVATED, configId, owner, {});
   return c.json({ id: configId, isActive: false });
 }));
 
@@ -384,13 +484,19 @@ export const cloneLlmConfigHandler = effectHandler((c) => Effect.gen(function* (
     return yield* new BadRequest({ message: `Name must be ${NAME_MAX} characters or fewer.` });
   }
 
-  const clone = yield* query("cloneLlmConfig", (db) => cloneLlmConfig(db, ctx.scope, configId, name));
-  // Null covers "no such config" and "another organization's config"
-  // indistinguishably -- cloning must not become a way to read across
-  // tenants, not even to learn that an id exists.
+  // #367: cloning is how a course instructor adapts a shared config, so the
+  // copy is theirs (this course) unless an Org Admin asks for the pool.
+  const owner = yield* resolveNewOwner(ctx, body.scope);
+  const clone = yield* query(
+    "cloneLlmConfig",
+    (db) => cloneLlmConfig(db, ctx.scope, configId, name, ctx.courseId, owner),
+  );
+  // Null covers "no such config", "another organization's config" and
+  // "another course's config" indistinguishably -- cloning must not become a
+  // way to read across tenants, not even to learn that an id exists.
   if (!clone) return yield* configNotFound();
 
-  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_CREATED, clone.id, {
+  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_CREATED, clone.id, owner, {
     name: clone.name,
     clonedFrom: configId,
   });
@@ -441,7 +547,11 @@ export const testLlmConfigHandler = effectHandler((c) => Effect.gen(function* ()
     "loadLLMConfigById",
     (db) => loadLLMConfigById(db, ctx.scope, configId, { activeOnly: false }),
   );
-  if (!config) return yield* configNotFound();
+  // #367: any config this course can see may be tested; another course's own
+  // config may not -- checked on this one read, not a second one (#390).
+  if (!config || !isVisibleToCourse(ctx, { scopeCourseId: config.scopeCourseId ?? null })) {
+    return yield* configNotFound();
+  }
 
   // #365: previously hardcoded `getOpenRouter(c.env.OPENROUTER_API_KEY)`
   // regardless of what the config actually said. Since migration 0035 every
@@ -554,7 +664,7 @@ export const testLlmConfigHandler = effectHandler((c) => Effect.gen(function* ()
   );
   if ("response" in result) return result.response;
 
-  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_TESTED, configId, {
+  yield* auditConfigChange(ctx, AUDIT_ACTIONS.LLM_CONFIG_TESTED, configId, null, {
     modelName: config.modelName,
   });
 
@@ -571,14 +681,20 @@ export const testLlmConfigHandler = effectHandler((c) => Effect.gen(function* ()
 }));
 
 /** Best-effort (#147), scoped to the course's org rather than fanned out
- *  (SEC-002). A config change is an org-level act with real blast radius --
- *  the default is what every unpinned course runs on -- so it is audited,
- *  but an audit outage must not fail a save that already landed: a
- *  DatabaseError here is logged and swallowed, never answered 503. */
+ *  (SEC-002). Audited because a shared-config change has real blast radius
+ *  -- the default is what every unpinned course runs on -- but an audit
+ *  outage must not fail a save that already landed: a DatabaseError here is
+ *  logged and swallowed, never answered 503.
+ *
+ *  #367: `level` says which kind of configuration changed, "organization"
+ *  (the shared pool) or "course" (one course's own), so the log separates an
+ *  org-level act from a course-level one. Null for an action that changes no
+ *  configuration (the test button). */
 function auditConfigChange(
   ctx: InstructorOrgCtx,
   action: string,
   configId: string,
+  owner: LlmConfigOwner | null,
   metadata: Record<string, unknown>,
 ): Effect.Effect<void, never, Database> {
   return query("auditBestEffort", (db) =>
@@ -587,7 +703,11 @@ function auditConfigChange(
       action,
       targetType: AUDIT_TARGET_TYPES.LLM_CONFIG,
       targetId: configId,
-      requestMetadata: { courseId: ctx.courseId, ...metadata },
+      requestMetadata: {
+        courseId: ctx.courseId,
+        ...(owner ? { level: owner === "organization" ? "organization" : "course" } : {}),
+        ...metadata,
+      },
     }),
   ).pipe(Effect.catchTag("DatabaseError", (err) => Effect.sync(() => logServerError("auditConfigChange", err.cause))));
 }

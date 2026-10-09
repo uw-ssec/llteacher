@@ -34,6 +34,8 @@ export interface HomeworkListItemResponse {
 }
 
 export type HomeworksViewProps = {
+  courseCode: string;
+  term: string;
   homeworks: HomeworkListItemResponse[];
   onOpenHomework: (id: string) => void;
   onOpenSubmissions: (id: string) => void;
@@ -94,6 +96,8 @@ function formatDueDate(iso: string): string {
 }
 
 export function HomeworksView({
+  courseCode,
+  term,
   homeworks,
   onOpenHomework,
   onOpenSubmissions,
@@ -152,7 +156,7 @@ export function HomeworksView({
     <div className="admin-view">
       <PageHeader
         eyebrow={`HOMEWORKS · ${homeworks.length} RECORDS`}
-        title="STATS 311 · Autumn 2026"
+        title={`${courseCode} · ${term}`}
         subtitle="Assignments, sections, and the AI tutor configuration backing each homework."
         actions={
           canAuthor ? (
