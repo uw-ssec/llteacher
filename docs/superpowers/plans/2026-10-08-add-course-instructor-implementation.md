@@ -139,4 +139,3 @@ Expected: all tasks pass; any environment-gated database suites remain explicitl
 - [ ] **Step 7: Commit Task 2**
 
 Commit message: `feat(admin): manage course instructors from setup`
-
