@@ -81,13 +81,13 @@ describe("run chart: computed, not trusted", () => {
 });
 
 describe("SUS: computed, not trusted", () => {
-  it("fixture: mean, range, comparison with 68, adjective basis and the weakest item", () => {
+  it("fixture: mean, range, comparison with 68, adjective band and the weakest item", () => {
     render(<UsabilityScore {...parseUsabilityScoreInput(MEASUREMENT_FIXTURES.showUsabilityScore)!} />);
     expect(takeaway()).toBe(
-      "Mean SUS score 62.3 from 12 respondents (range 30–80): 5.7 below the commonly cited average of 68. Nearest adjective: “Good” (in Bangor, Kortum & Miller, 2009, people who rated a system “Good” gave it a mean SUS of 71.4). The lowest-scoring item is 8, “I found the system very cumbersome to use.” (mean contribution 1.25 of 4).",
+      "Mean SUS score 62.3 from 12 respondents (range 30–80): 5.7 below the commonly cited average of 68. It falls between the mean scores Bangor, Kortum & Miller (2009) found for systems rated “OK” (50.9) and “Good” (71.4). The lowest-scoring item is 8, “I found the system very cumbersome to use.” (mean contribution 1.25 of 4).",
     );
     const stats = fig().querySelector(".gen-stats")!.textContent!;
-    for (const s of ["Mean SUS62.3", "Range30–80", "Respondents12", "Nearest adjectiveGood"]) expect(stats).toContain(s);
+    for (const s of ["Mean SUS62.3", "Range30–80", "Respondents12", "Adjective bandOK–Good"]) expect(stats).toContain(s);
     expect(fig().querySelectorAll("circle.gen-dot")).toHaveLength(12);
     // The figure owns the statements: every one appears in the table.
     expect(fig().textContent).toContain("I think that I would need the support of a technical person to be able to use this system.");

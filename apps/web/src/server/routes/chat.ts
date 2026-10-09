@@ -1557,8 +1557,8 @@ export const TOOLS: ToolSet = {
     description:
       "Clinical informatics: the System Usability Scale (Brooke, 1996) for a clinical system. Use it when students " +
       "score or interpret SUS survey responses. The figure owns the ten statements and computes each respondent's " +
-      "0–100 score, the mean, range and n, the comparison with the commonly cited average of 68, the nearest Bangor " +
-      "adjective and each item's contribution. Send raw responses only, never scores. Args: systemName, " +
+      "0–100 score, the mean, range and n, the comparison with the commonly cited average of 68, which Bangor " +
+      "adjective means it falls between, and each item's contribution. Send raw responses only, never scores. Args: systemName, " +
       "respondents.",
     inputSchema: jsonSchema<Record<string, unknown>>({
       "type": "object",

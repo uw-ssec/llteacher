@@ -43,7 +43,7 @@ export const SYSTEMS_FIXTURES: Record<string, unknown> = {
       { element: "Heart rate 104", standard: "loinc", code: "8867-4", display: "Heart rate" },
       { element: "Temperature unit: °C", standard: "ucum", code: "Cel", display: "degree Celsius" },
       { element: "Heart rate unit: beats per minute", standard: "ucum", code: "/min", display: "per minute" },
-      { element: "At risk for falls", standard: "snomed-ct", code: "129839007", display: "At risk for falls (finding)" },
+      { element: "At risk for falls", standard: "snomed-ct", code: "129839007", display: "At increased risk for falls (finding)" },
       { element: "Nursing diagnosis: acute pain", standard: "nanda-i", code: "00132", display: "Acute pain" },
     ],
     exchange: { standard: "fhir", resource: "Observation" },

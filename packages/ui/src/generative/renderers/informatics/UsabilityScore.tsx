@@ -10,7 +10,7 @@
    raw 1–5 responses.
    -------------------------------------------------------------------------- */
 
-import { closestAdjective, fmt1, fmtNum, SUS_AVERAGE, SUS_ITEMS, SUS_SHORT, susSummary } from "../../lib/measurement";
+import { adjectiveBandShort, adjectiveBandText, fmt1, fmtNum, SUS_AVERAGE, SUS_ITEMS, SUS_SHORT, susSummary } from "../../lib/measurement";
 import { FigurePlate } from "../../figure/FigurePlate";
 
 export interface UsabilityScoreProps {
@@ -40,7 +40,6 @@ export function UsabilityScore({ systemName, respondents, isPartial = false }: U
   const diff = Math.round((meanR - SUS_AVERAGE) * 10) / 10;
   const vsAverage =
     diff === 0 ? `equal to the commonly cited average of ${SUS_AVERAGE}` : `${fmt1(Math.abs(diff))} ${diff > 0 ? "above" : "below"} the commonly cited average of ${SUS_AVERAGE}`;
-  const adj = closestAdjective(meanR);
   const low = s.lowestItems;
   const lowC = s.itemMeanContribution[low[0]! - 1]!;
   const lowSentence =
@@ -83,8 +82,7 @@ export function UsabilityScore({ systemName, respondents, isPartial = false }: U
       label={aria}
       takeaway={
         <>
-          Mean SUS score <strong>{fmt1(meanR)}</strong> from {who} (range {range}): {vsAverage}. Nearest adjective: “{adj.adjective}” (in Bangor, Kortum
-          &amp; Miller, 2009, people who rated a system “{adj.adjective}” gave it a mean SUS of {adj.mean}). {lowSentence}
+          Mean SUS score <strong>{fmt1(meanR)}</strong> from {who} (range {range}): {vsAverage}. {adjectiveBandText(meanR)} {lowSentence}
         </>
       }
       note={`SUS gives one overall usability score, not a diagnosis of what to fix: the item breakdown hints where users struggle, but watching nurses use the system (for example, think-aloud testing) finds the problems. Odd items are positively worded and contribute response − 1; even items are negatively worded and contribute 5 − response; the sum × 2.5 gives 0–100. A SUS score is not a percentage, and ${SUS_AVERAGE} is an average across many studies, not a pass mark.`}
@@ -102,7 +100,7 @@ export function UsabilityScore({ systemName, respondents, isPartial = false }: U
         <div className="gen-stat"><dt>Mean SUS</dt><dd>{fmt1(meanR)}</dd></div>
         <div className="gen-stat"><dt>Range</dt><dd>{range}</dd></div>
         <div className="gen-stat"><dt>Respondents</dt><dd>{s.n}</dd></div>
-        <div className="gen-stat"><dt>Nearest adjective</dt><dd>{adj.adjective}</dd></div>
+        <div className="gen-stat"><dt>Adjective band</dt><dd>{adjectiveBandShort(meanR)}</dd></div>
       </dl>
 
       <svg className="gen-svg" viewBox={`0 0 ${VB_W} ${VB_H}`} role="img" aria-label={`Each respondent's SUS score on a 0 to 100 scale; mean ${fmt1(meanR)}, average across studies ${SUS_AVERAGE}.`}>

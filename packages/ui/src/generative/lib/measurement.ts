@@ -221,11 +221,36 @@ export function susSummary(respondents: readonly (readonly number[])[]): SusSumm
   };
 }
 
-/** The Bangor adjective whose mean score is nearest; an exact midpoint goes to the lower one. */
-export function closestAdjective(score: number): (typeof SUS_ADJECTIVES)[number] {
-  let best: (typeof SUS_ADJECTIVES)[number] = SUS_ADJECTIVES[0];
-  for (const a of SUS_ADJECTIVES) if (Math.abs(a.mean - score) < Math.abs(best.mean - score) - EPS) best = a;
-  return best;
+type SusAdjective = (typeof SUS_ADJECTIVES)[number];
+
+/** Where a score sits among the Bangor adjective means: the highest mean at or
+ *  below it and the lowest mean above it (null past either end). A band, not a
+ *  rating: "nearest adjective" called 62.3 "Good" while it sat below average. */
+export function adjectiveBand(score: number): { below: SusAdjective | null; above: SusAdjective | null } {
+  let below: SusAdjective | null = null;
+  let above: SusAdjective | null = null;
+  for (const a of SUS_ADJECTIVES) {
+    if (a.mean <= score + EPS) below = a;
+    else if (!above) above = a;
+  }
+  return { below, above };
+}
+
+/** The band as a sentence, with its source. */
+export function adjectiveBandText(score: number): string {
+  const { below, above } = adjectiveBand(score);
+  const src = "Bangor, Kortum & Miller (2009)";
+  const q = (a: SusAdjective) => `“${a.adjective}” (${a.mean})`;
+  if (below && above) return `It falls between the mean scores ${src} found for systems rated ${q(below)} and ${q(above)}.`;
+  if (above) return `It is below the mean score ${src} found for systems rated ${q(above)}.`;
+  return `It is at or above the mean score ${src} found for systems rated ${q(below!)}.`;
+}
+
+/** Short form for the stat tile, e.g. "OK–Good". */
+export function adjectiveBandShort(score: number): string {
+  const { below, above } = adjectiveBand(score);
+  if (below && above) return `${below.adjective}–${above.adjective}`;
+  return above ? `Below ${above.adjective}` : `${below!.adjective}+`;
 }
 
 /* -- Diffusion of innovations (Rogers) ---------------------------------------- */

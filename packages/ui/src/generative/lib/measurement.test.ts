@@ -3,7 +3,9 @@ import {
   ADOPTER_CATEGORIES,
   adoptionZ,
   analyseRunChart,
-  closestAdjective,
+  adjectiveBand,
+  adjectiveBandShort,
+  adjectiveBandText,
   findShifts,
   findTrends,
   firstReached,
@@ -112,12 +114,13 @@ describe("System Usability Scale", () => {
     expect(susSummary([[3, 3, 3, 3, 3, 3, 3, 3, 3, 3]]).lowestItems).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   });
 
-  it("nearest Bangor adjective", () => {
-    expect(closestAdjective(62.3).adjective).toBe("Good"); // 9.1 from 71.4, 11.4 from 50.9
-    expect(closestAdjective(55).adjective).toBe("OK");
-    expect(closestAdjective(61.15).adjective).toBe("OK"); // exact midpoint goes low
-    expect(closestAdjective(100).adjective).toBe("Best imaginable");
-    expect(closestAdjective(0).adjective).toBe("Worst imaginable");
+  it("places a score between the Bangor adjective means, never rounding it up to one", () => {
+    expect(adjectiveBandShort(62.3)).toBe("OK–Good");
+    expect(adjectiveBandText(62.3)).toBe("It falls between the mean scores Bangor, Kortum & Miller (2009) found for systems rated “OK” (50.9) and “Good” (71.4).");
+    expect(adjectiveBandShort(71.4)).toBe("Good–Excellent"); // a score equal to a mean sits at that mean
+    expect(adjectiveBandShort(5)).toBe("Below Worst imaginable");
+    expect(adjectiveBandShort(100)).toBe("Best imaginable+");
+    expect(adjectiveBand(100).above).toBeNull();
   });
 });
 

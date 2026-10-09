@@ -10654,6 +10654,18 @@ tr:focus-within .admin-knowledge__row-tools {
     margin-left: calc(2.75rem + var(--space-3));
   }
 }
+
+/* Narrow: the state's label takes its own line, without the separator dot
+   that would otherwise wrap to the start of a line. */
+@container (max-width: 460px) {
+  .gen-sy-flow__label {
+    flex-basis: 100%;
+  }
+
+  .gen-sy-flow__label::before {
+    content: none;
+  }
+}
 /* <<< genui:systems */
 
 /* >>> genui:measurement */
