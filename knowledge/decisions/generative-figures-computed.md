@@ -1,15 +1,22 @@
 ---
 type: Decision
 title: Subject figures compute what they assert; the model supplies only arguments
-description: "Generative-UI figures (ECON 201, clinical informatics and statistics packs, plus shared worked steps) draw from model arguments but compute every outcome, number and sentence in packages/ui/src/generative/lib; deny-by-default parsers render nothing on bad input; packs are opt-in per LLM config."
+description: "Generative-UI figures (ECON 201, NMETH 527 clinical informatics, test evaluation and statistics packs, plus shared tools) draw from model arguments but compute every outcome, number and sentence in packages/ui/src/generative/lib; deny-by-default parsers render nothing on bad input; packs are opt-in per LLM config."
 tags: [generative-ui, econ, clinical-informatics, statistics, dataviz, llm-config]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-08T21:05:00Z" }
+generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-09T00:30:00Z" }
 status: stable
 ---
 
 ## Decision
 
-Display tools render inline figures: shared showWorkedSteps and knowledgeCheck; the ECON 201 pack (showMacroModel, showGdpComposition, showMultiplier, showLaborForce, showInflation); the clinical informatics pack (showDiagnosticAccuracy, showPrevalenceEffect, showRocCurve, showPatientTimeline, showCdsRule); and the statistics pack (showDistribution). The model names WHAT to draw; the figure COMPUTES the consequences (equilibrium movement, GDP shares, the multiplier, labor rates, inflation; sensitivity/specificity/PPV/NPV/LRs, Bayes PPV by prevalence, trapezoid AUC and Youden's J, CDS rule evaluation with missing data; distribution tail probabilities). A model that asserts a wrong direction or number can't make the picture and its takeaway contradict each other. Only WorkedSteps presents the tutor's own arithmetic, and it states no computed takeaway for that reason. A bioinformatics pack was built and removed: the course is clinical informatics.
+Display tools render inline figures:
+- **Shared:** showWorkedSteps and knowledgeCheck.
+- **ECON 201 pack:** showMacroModel, showGdpComposition, showMultiplier, showLaborForce, showInflation.
+- **Clinical informatics pack**, built for NMETH 527 Introduction to Clinical Informatics (UW nursing; students also include other health professionals): showQuadrupleAim, showSociotechnicalModel, showDikw, showWorkflowComparison, showStandardsMap, showHealthItTimeline, showRunChart, showUsabilityScore, showAdoptionCurve, showPatientTimeline, showCdsRule, showPrevalenceEffect (alert fatigue).
+- **Screening and test evaluation pack:** showDiagnosticAccuracy, showRocCurve, showPrevalenceEffect.
+- **Statistics pack:** showDistribution.
+
+A tool may be in more than one pack. The model names WHAT to draw; the figure COMPUTES the consequences: equilibrium movement, the rates, PPV/NPV, AUC, rule firing, run-chart shifts and trends, SUS scores, adoption categories, workflow handoffs and tail probabilities. Framework figures also OWN their reference content, and the model only selects from it: the Quadruple/Quintuple Aim definitions, Sittig & Singh's eight dimensions, the DIKW levels, Brooke's SUS items, the standards catalog with stewards, and a curated list of health IT milestones. Tutor-added timeline events are labelled as such, and terminology codes are shown as given and marked unverified. A model that asserts a wrong direction or number can't make the picture and its takeaway contradict each other. Only WorkedSteps presents the tutor's own arithmetic, and it states no computed takeaway for that reason. A bioinformatics pack was built and removed: the course is clinical informatics. The first clinical pack was test-statistics heavy; the NMETH 527 course description (health IT design and implementation, the Quadruple Aim) moved those figures to their own pack.
 
 ## Subject packs are opt-in per LLM config
 

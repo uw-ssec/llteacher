@@ -1,3 +1,6 @@
+## 2026-10-09
+* **Update**: Updated concept `decisions/generative-figures-computed.md` (NMETH 527 clinical informatics pack; screening and test evaluation split into its own pack).
+
 ## 2026-10-08
 * **Update**: Updated concept `decisions/generative-figures-computed.md` (subject packs opt-in per LLM config; clinical informatics replaces bioinformatics; statistics pack and knowledge check).
 * **Update**: Linked `decisions/generative-figures-computed.md` to `decisions/messages-parts-jsonb.md` (Figures persist as tool-<name> parts in messages.parts and replay through output-available; RENDERABLE_TOOL_NAMES gates which parts count as renderable on replay.).

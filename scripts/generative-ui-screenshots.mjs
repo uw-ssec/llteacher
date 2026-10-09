@@ -2,9 +2,9 @@
 
    Runs the REAL student app (Vite, port 2311) with its API mocked so a
    section conversation's history holds persisted figure tool calls -- the
-   same parts the server stores and replays -- for an ECON 201 thread, a
-   clinical informatics thread and a statistics thread (with an answered
-   knowledge check). Captures light and dark at three widths and fails
+   same parts the server stores and replays -- for ECON 201, two NMETH 527
+   clinical informatics threads, a screening-test thread and a statistics
+   thread (with an answered knowledge check). Captures light and dark at three widths and fails
    on page errors, a missing figure, or a figure wider than the chat column.
 
    Usage (student app running on :2311):
@@ -43,18 +43,42 @@ const THREADS = {
       ai(7, [tool("showGdpComposition", 7), tool("showLaborForce", 7), tool("showInflation", 7), tool("showWorkedSteps", 7)]),
     ],
   },
-  clinical: {
-    course: "BIME 530",
-    homework: "Module 3 · Screening and decision support",
-    sections: ["Test accuracy", "Prevalence and predictive value", "Clinical decision support"],
+  nmeth: {
+    course: "NMETH 527",
+    homework: "Module 2 · Health IT and the Quadruple Aim",
+    sections: ["Why informatics", "Sociotechnical systems", "Data, standards and history"],
     messages: [
-      ai(1, [{ type: "text", text: "Let's start with how a screening test performs against a reference standard:" }, tool("showDiagnosticAccuracy", 1)]),
-      student(2, "So a positive result means they probably have it?"),
-      ai(3, [{ type: "text", text: "That depends on how common the condition is. Watch PPV as prevalence changes:" }, tool("showPrevalenceEffect", 3)]),
-      student(4, "How do we pick the cutoff?"),
-      ai(5, [tool("showRocCurve", 5), { type: "text", text: "Each point is a threshold. Where would you set it for a screening test?" }]),
-      student(6, "What does this look like for a real patient and a CDS alert?"),
-      ai(7, [tool("showPatientTimeline", 7), tool("showCdsRule", 7)]),
+      ai(1, [{ type: "text", text: "Let's weigh bar-code medication administration against all four aims, not just safety:" }, tool("showQuadrupleAim", 1)]),
+      student(2, "Why do nurses work around the scanners then?"),
+      ai(3, [tool("showSociotechnicalModel", 3), { type: "text", text: "Which of these dimensions could your unit change first?" }]),
+      student(4, "How does an assessment become a decision?"),
+      ai(5, [tool("showDikw", 5)]),
+      student(6, "What changes in the workflow with BCMA?"),
+      ai(7, [tool("showWorkflowComparison", 7)]),
+      student(8, "Which standards carry the admission assessment?"),
+      ai(9, [tool("showStandardsMap", 9), tool("showHealthItTimeline", 9)]),
+    ],
+  },
+  nmethqi: {
+    course: "NMETH 527",
+    homework: "Module 4 · Implementation and evaluation",
+    sections: ["Measuring change", "Usability and adoption", "Decision support"],
+    messages: [
+      ai(1, [{ type: "text", text: "Here's your unit's BCMA scanning compliance, week by week:" }, tool("showRunChart", 1)]),
+      student(2, "The nurses say the new flowsheet is clunky. How do we show that?"),
+      ai(3, [tool("showUsabilityScore", 3), tool("showAdoptionCurve", 3)]),
+      student(4, "Why do so many sepsis alerts turn out to be false?"),
+      ai(5, [tool("showPrevalenceEffect", 5), tool("showCdsRule", 5), tool("showPatientTimeline", 5)]),
+    ],
+  },
+  tests: {
+    course: "BIOST 310",
+    homework: "Screening tests",
+    sections: ["Accuracy", "Cut-offs"],
+    messages: [
+      ai(1, [tool("showDiagnosticAccuracy", 1)]),
+      student(2, "How do we pick the cutoff?"),
+      ai(3, [tool("showRocCurve", 3)]),
     ],
   },
   stats: {

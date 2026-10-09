@@ -288,11 +288,20 @@ The **Pack** column says when the tutor can use each one:
 | `showMultiplier` | `MultiplierRounds` | ECON | The spending multiplier, round by round |
 | `showLaborForce` | `LaborForce` | ECON | Employed, unemployed and not in the labor force, with the three rates |
 | `showInflation` | `PriceIndex` | ECON | A price index over time and the inflation it implies |
-| `showDiagnosticAccuracy` | `DiagnosticAccuracy` | Clinical informatics | A 2×2 table against a reference standard, with sensitivity, specificity, PPV and NPV |
-| `showPrevalenceEffect` | `PrevalenceEffect` | Clinical informatics | How PPV and NPV move with prevalence when sensitivity and specificity are fixed |
-| `showRocCurve` | `RocCurve` | Clinical informatics | An ROC curve from threshold points, with the trapezoidal AUC and the best Youden's J threshold marked |
+| `showDiagnosticAccuracy` | `DiagnosticAccuracy` | Test evaluation | A 2×2 table against a reference standard, with sensitivity, specificity, PPV and NPV |
+| `showPrevalenceEffect` | `PrevalenceEffect` | Clinical informatics, test evaluation | How PPV and NPV move with prevalence when sensitivity and specificity are fixed |
+| `showRocCurve` | `RocCurve` | Test evaluation | An ROC curve from threshold points, with the trapezoidal AUC and the best Youden's J threshold marked |
 | `showPatientTimeline` | `PatientTimeline` | Clinical informatics | A patient's encounters, labs, medications and events on one dated axis |
 | `showCdsRule` | `CdsRule` | Clinical informatics | A decision-support rule's conditions, each one evaluated against a patient, and whether the rule fires |
+| `showQuadrupleAim` | `QuadrupleAim` | Clinical informatics | One intervention against the Quadruple Aim (optionally Quintuple, with equity), with the computed trade-offs |
+| `showSociotechnicalModel` | `SociotechnicalModel` | Clinical informatics | A case against Sittig & Singh's eight sociotechnical dimensions: contributing, protective, not assessed |
+| `showDikw` | `Dikw` | Clinical informatics | The data → information → knowledge → wisdom steps for one clinical scenario |
+| `showWorkflowComparison` | `WorkflowComparison` | Clinical informatics | Current vs future workflow as role swimlanes, with steps, handoffs, documentation steps, waits and minutes |
+| `showStandardsMap` | `StandardsMap` | Clinical informatics | Data elements mapped to terminologies (incl. nursing terminologies) and the exchange standard; codes marked unverified |
+| `showHealthItTimeline` | `HealthItTimeline` | Clinical informatics | Health IT and nursing informatics milestones from a fixed reference list, plus tutor-added events marked as such |
+| `showRunChart` | `RunChart` | Clinical informatics | A QI run chart with median, IHI shift and trend signals, and the change marked |
+| `showUsabilityScore` | `UsabilityScore` | Clinical informatics | System Usability Scale scores from raw responses, against the average of 68, with item contributions |
+| `showAdoptionCurve` | `AdoptionCurve` | Clinical informatics | Rogers' adopter categories with how far a staff rollout has reached |
 | `showDistribution` | `DistributionPlot` | Statistics | A normal, t, chi-square or binomial distribution, with a shaded region and its probability |
 | `knowledgeCheck` | `KnowledgeCheck` | shared | A multiple-choice check the student answers in place; the tutor judges the answer on its next turn (#36) |
 
@@ -326,6 +335,6 @@ The whole plate dims to 55% while `isPartial`. Every tool part renders inside `T
 - State is never colour alone: a CDS condition says "met" or "not met" in words, and a shaded region states its probability in text.
 - The knowledge check is a native radio group in a `fieldset`, so arrow keys work. Once answered, it locks and says which option was chosen.
 
-**CSS hooks:** `.gen-figure*`, `.gen-svg*`, `.gen-line--N`, `.gen-fill--N`, `.gen-swatch--N`, `.gen-steps*`, `.gen-stat*`, `.gen-area-shade`, `.gen-check*` and the clinical figures' hooks (under "Clinical informatics figures") in `packages/ui/styles.css`.
+**CSS hooks:** `.gen-figure*`, `.gen-svg*`, `.gen-line--N`, `.gen-fill--N`, `.gen-swatch--N`, `.gen-steps*`, `.gen-stat*`, `.gen-area-shade`, `.gen-check*` the clinical figures' hooks (under "Clinical informatics figures") and the `gen-fw-*`, `gen-ms-*` and `gen-sy-*` blocks (marked `genui:frameworks`, `genui:measurement` and `genui:systems`) in `packages/ui/styles.css`.
 
-**Visual review:** with the student app on :2311, run `npm run screenshots:generative-ui`. It renders an ECON 201 thread, a clinical informatics thread and a statistics thread (with knowledge checks) in the real student app (light and dark, 1440, 768 and 390px), saves each figure, and fails on page errors, missing figures or overflow.
+**Visual review:** with the student app on :2311, run `npm run screenshots:generative-ui`. It renders ECON 201, two NMETH 527 clinical informatics threads, a screening-test thread and a statistics thread (with knowledge checks) in the real student app (light and dark, 1440, 768 and 390px), saves each figure, and fails on page errors, missing figures or overflow.

@@ -9625,3 +9625,1152 @@ tr:focus-within .admin-knowledge__row-tools {
     padding-top: 0;
   }
 }
+
+/* >>> genui:frameworks */
+/* ==========================================================================
+   Health informatics framework figures
+
+   Quadruple Aim cards, the sociotechnical model's eight dimensions and the
+   DIKW staircase. HTML layouts that reflow; the frameworks' own entities
+   (an aim, a DIKW level) keep a categorical slot via .gen-swatch--N, and
+   state (improves / worsens, contributing / protective) is always a symbol
+   and a word as well -- never colour alone. Text stays in text tokens.
+   ========================================================================== */
+
+/* Small mono label shared by the three figures ("Measure", "Action"). */
+.gen-fw-label {
+  margin-inline-end: var(--space-1);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+/* Quadruple Aim ------------------------------------------------------------ */
+
+.gen-fw-aims {
+  display: flex;
+  flex-direction: column;
+}
+
+.gen-fw-aims__tally {
+  margin-bottom: var(--space-3);
+}
+
+.gen-fw-aims__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-fw-aim {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+/* Mixed and worsens are the trade-offs: a heavier edge, plus the word. */
+.gen-fw-aim--worsens,
+.gen-fw-aim--mixed {
+  border: 2px solid var(--color-text);
+}
+
+/* Unclear is a gap in the evidence: dashed, like missing data. */
+.gen-fw-aim--unclear {
+  border-style: dashed;
+}
+
+.gen-fw-aim__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.gen-fw-aim__name {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-fw-aim__def {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-normal);
+  color: var(--color-text-muted);
+}
+
+.gen-fw-aim__effect {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text);
+}
+
+.gen-fw-aim__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 1.5px solid var(--color-text);
+  border-radius: 50%;
+  font-size: var(--font-size-sm);
+  letter-spacing: 0;
+}
+
+.gen-fw-aim--improves .gen-fw-aim__mark {
+  background-color: var(--color-text);
+  color: var(--color-surface);
+}
+
+.gen-fw-aim--unclear .gen-fw-aim__mark {
+  border-style: dashed;
+  border-color: var(--color-text-muted);
+}
+
+.gen-fw-aim__flag {
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-text);
+  border-radius: var(--radius-sm);
+  font-weight: var(--weight-normal);
+}
+
+.gen-fw-aim__why {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+}
+
+.gen-fw-aim__measure {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text-secondary);
+}
+
+@container (max-width: 460px) {
+  .gen-fw-aims__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Sociotechnical model ----------------------------------------------------- */
+
+.gen-fw-stm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* The overview: eight numbered cells. Contributing is solid ink, protective
+   an ink outline, not assessed a dashed muted outline -- each with its own
+   symbol, so the strip reads in greyscale. */
+.gen-fw-stm__strip {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-fw-stm__cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  min-width: 1.5rem;
+  min-height: 1.5rem;
+  padding: var(--space-1);
+  border: 1.5px solid var(--color-text);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text);
+}
+
+.gen-fw-stm__strip .gen-fw-stm__cell {
+  display: flex;
+  flex-direction: column;
+  min-height: 3rem;
+}
+
+.gen-fw-stm__cell--contributing {
+  background-color: var(--color-text);
+  color: var(--color-surface);
+}
+
+.gen-fw-stm__cell--none {
+  border-style: dashed;
+  border-color: var(--color-text-muted);
+  color: var(--color-text-muted);
+}
+
+.gen-fw-stm__n {
+  font-weight: var(--weight-semibold);
+}
+
+.gen-fw-stm__cell-mark {
+  font-weight: var(--weight-semibold);
+}
+
+.gen-fw-stm__key {
+  margin: 0;
+}
+
+.gen-fw-stm__list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-fw-stm__row {
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 1fr) 8.5rem;
+  gap: var(--space-3);
+  align-items: start;
+  padding-block: var(--space-2);
+}
+
+.gen-fw-stm__row + .gen-fw-stm__row {
+  border-top: 1px solid var(--color-border);
+}
+
+.gen-fw-stm__num {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+.gen-fw-stm__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gen-fw-stm__name {
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.gen-fw-stm__def {
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-normal);
+  color: var(--color-text-muted);
+}
+
+.gen-fw-stm__finding {
+  margin-top: 2px;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+}
+
+.gen-fw-stm__role {
+  padding-top: 0.15em;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.gen-fw-stm__row--contributing .gen-fw-stm__role {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-fw-stm__row--none .gen-fw-stm__name {
+  color: var(--color-text-secondary);
+}
+
+.gen-fw-stm__row--none .gen-fw-stm__role {
+  color: var(--color-text-muted);
+}
+
+@container (max-width: 460px) {
+  .gen-fw-stm__strip .gen-fw-stm__cell {
+    min-height: 2.5rem;
+    padding: 2px;
+  }
+
+  .gen-fw-stm__row {
+    grid-template-columns: 1.5rem minmax(0, 1fr);
+    gap: var(--space-1) var(--space-3);
+  }
+
+  .gen-fw-stm__role {
+    grid-column: 2;
+    padding-top: 0;
+  }
+}
+
+/* DIKW staircase ----------------------------------------------------------- */
+
+.gen-fw-dikw {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Four steps rising left to right: each starts lower on the page than the
+   next, so the tops climb from data to wisdom; all stretch to one floor. */
+.gen-fw-dikw__stairs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: stretch;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-fw-dikw__step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-top-width: 3px;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-raised);
+}
+
+.gen-fw-dikw__step--1 { margin-top: var(--space-12); border-top-color: var(--viz-1); }
+.gen-fw-dikw__step--2 { margin-top: var(--space-8); border-top-color: var(--viz-2); }
+.gen-fw-dikw__step--3 { margin-top: var(--space-4); border-top-color: var(--viz-3); }
+.gen-fw-dikw__step--4 { margin-top: 0; border-top-color: var(--viz-4); }
+
+.gen-fw-dikw__level {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.gen-fw-dikw__n {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.gen-fw-dikw__name {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-fw-dikw__def {
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-normal);
+  color: var(--color-text-muted);
+}
+
+.gen-fw-dikw__example {
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+}
+
+.gen-fw-dikw__action {
+  margin: 0;
+  padding: var(--space-3);
+  border: 2px solid var(--color-text);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+}
+
+/* On a phone: stacked bands, each indented a little more, so the climb
+   still reads top to bottom from data to wisdom. */
+@container (max-width: 460px) {
+  .gen-fw-dikw__stairs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gen-fw-dikw__step--1 { margin: 0; }
+  .gen-fw-dikw__step--2 { margin: 0 0 0 var(--space-3); }
+  .gen-fw-dikw__step--3 { margin: 0 0 0 var(--space-6); }
+  .gen-fw-dikw__step--4 { margin: 0 0 0 var(--space-8); }
+}
+/* <<< genui:frameworks */
+
+/* >>> genui:systems */
+/* ==========================================================================
+   Health information systems figures (gen-sy-)
+
+   Workflow swimlanes (current vs future state), a standards map and the
+   health IT history timeline. Text-heavy, so all three are HTML that
+   reflows: the swimlane grid becomes an ordered list on a phone. A step's
+   kind, a standard's category and a milestone's category are a coloured
+   edge or swatch AND a word; text stays in text tokens.
+   ========================================================================== */
+
+/* Workflow comparison ------------------------------------------------------ */
+
+.gen-sy-legend {
+  margin: 0 0 var(--space-3);
+}
+
+.gen-sy-glyph {
+  display: inline-block;
+  min-width: 1em;
+  text-align: center;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-flow + .gen-sy-flow {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.gen-sy-flow__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-sy-flow__label {
+  font-weight: var(--weight-normal);
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-flow__label::before {
+  content: "· ";
+}
+
+.gen-sy-flow__stats {
+  gap: var(--space-2) var(--space-5);
+  margin: var(--space-2) 0 var(--space-3);
+}
+
+.gen-sy-flow__stats dd {
+  font-size: var(--font-size-base);
+}
+
+.gen-sy-scroll {
+  overflow-x: auto;
+}
+
+/* One grid per state: a column per role (lane), a header row, then one
+   row per step, so the order reads top to bottom and a handoff is a move
+   to another column. */
+.gen-sy-lanes {
+  display: grid;
+  column-gap: var(--space-2);
+}
+
+.gen-sy-roles--1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.gen-sy-roles--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.gen-sy-roles--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.gen-sy-roles--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.gen-sy-roles--5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.gen-sy-roles--6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+
+.gen-sy-n--1 { grid-template-rows: auto repeat(1, auto); }
+.gen-sy-n--2 { grid-template-rows: auto repeat(2, auto); }
+.gen-sy-n--3 { grid-template-rows: auto repeat(3, auto); }
+.gen-sy-n--4 { grid-template-rows: auto repeat(4, auto); }
+.gen-sy-n--5 { grid-template-rows: auto repeat(5, auto); }
+.gen-sy-n--6 { grid-template-rows: auto repeat(6, auto); }
+.gen-sy-n--7 { grid-template-rows: auto repeat(7, auto); }
+.gen-sy-n--8 { grid-template-rows: auto repeat(8, auto); }
+.gen-sy-n--9 { grid-template-rows: auto repeat(9, auto); }
+.gen-sy-n--10 { grid-template-rows: auto repeat(10, auto); }
+.gen-sy-n--11 { grid-template-rows: auto repeat(11, auto); }
+.gen-sy-n--12 { grid-template-rows: auto repeat(12, auto); }
+.gen-sy-n--13 { grid-template-rows: auto repeat(13, auto); }
+.gen-sy-n--14 { grid-template-rows: auto repeat(14, auto); }
+.gen-sy-n--15 { grid-template-rows: auto repeat(15, auto); }
+.gen-sy-n--16 { grid-template-rows: auto repeat(16, auto); }
+.gen-sy-n--17 { grid-template-rows: auto repeat(17, auto); }
+.gen-sy-n--18 { grid-template-rows: auto repeat(18, auto); }
+.gen-sy-n--19 { grid-template-rows: auto repeat(19, auto); }
+.gen-sy-n--20 { grid-template-rows: auto repeat(20, auto); }
+
+.gen-sy-lane--1 { grid-column: 1; }
+.gen-sy-lane--2 { grid-column: 2; }
+.gen-sy-lane--3 { grid-column: 3; }
+.gen-sy-lane--4 { grid-column: 4; }
+.gen-sy-lane--5 { grid-column: 5; }
+.gen-sy-lane--6 { grid-column: 6; }
+
+.gen-sy-at--1 { grid-row: 2; }
+.gen-sy-at--2 { grid-row: 3; }
+.gen-sy-at--3 { grid-row: 4; }
+.gen-sy-at--4 { grid-row: 5; }
+.gen-sy-at--5 { grid-row: 6; }
+.gen-sy-at--6 { grid-row: 7; }
+.gen-sy-at--7 { grid-row: 8; }
+.gen-sy-at--8 { grid-row: 9; }
+.gen-sy-at--9 { grid-row: 10; }
+.gen-sy-at--10 { grid-row: 11; }
+.gen-sy-at--11 { grid-row: 12; }
+.gen-sy-at--12 { grid-row: 13; }
+.gen-sy-at--13 { grid-row: 14; }
+.gen-sy-at--14 { grid-row: 15; }
+.gen-sy-at--15 { grid-row: 16; }
+.gen-sy-at--16 { grid-row: 17; }
+.gen-sy-at--17 { grid-row: 18; }
+.gen-sy-at--18 { grid-row: 19; }
+.gen-sy-at--19 { grid-row: 20; }
+.gen-sy-at--20 { grid-row: 21; }
+
+/* A lane: a full-height band, every other one faintly washed. */
+.gen-sy-band {
+  grid-row: 1 / -1;
+  border-radius: var(--radius-sm);
+}
+
+.gen-sy-band.gen-sy-lane--1,
+.gen-sy-band.gen-sy-lane--3,
+.gen-sy-band.gen-sy-lane--5 {
+  background-color: var(--color-bg);
+}
+
+.gen-sy-lane {
+  grid-row: 1;
+  align-self: end;
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  border-bottom: 1px solid var(--color-border-strong);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+/* The steps join the lane grid directly; on a phone they are a list. */
+.gen-sy-steps {
+  display: contents;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-sy-step {
+  position: relative;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: var(--space-1) var(--space-1) 0;
+  padding: var(--space-2);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-tight);
+}
+
+/* Breathing room under the last step in each lane band. */
+.gen-sy-step:last-child {
+  margin-bottom: var(--space-1);
+}
+
+/* Kinds take slots 1-5 in the fixed order: task, decision, documentation,
+   communication, wait. The edge is the colour; the word is the meaning. */
+.gen-sy-kind--1 { border-left-color: var(--viz-1); }
+.gen-sy-kind--2 { border-left-color: var(--viz-2); }
+.gen-sy-kind--3 { border-left-color: var(--viz-3); }
+.gen-sy-kind--4 { border-left-color: var(--viz-4); }
+.gen-sy-kind--5 { border-left-color: var(--viz-5); }
+
+.gen-sy-step__top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.gen-sy-step__num {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+
+/* The lane already names the role on a wide figure: keep it for screen
+   readers only, and show it on a phone where the lanes are gone. */
+.gen-sy-step__role {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.gen-sy-step__action {
+  font-size: var(--font-size-xs);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.gen-sy-step__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-step__kind {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.gen-sy-step__min {
+  font-variant-numeric: tabular-nums;
+}
+
+.gen-sy-step__handoff {
+  padding-top: var(--space-1);
+  border-top: 1px dashed var(--color-border-strong);
+  font-size: 0.6875rem;
+  color: var(--color-text-secondary);
+}
+
+/* Standards map ------------------------------------------------------------ */
+
+.gen-sy-map {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.gen-sy-cat,
+.gen-sy-exchange {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.gen-sy-cat__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-std {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.gen-sy-std--1 { border-left-color: var(--viz-1); }
+.gen-sy-std--2 { border-left-color: var(--viz-2); }
+.gen-sy-std--3 { border-left-color: var(--viz-3); }
+
+.gen-sy-std__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+}
+
+.gen-sy-std__name {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-sy-std__count {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.gen-sy-std__about {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-std__steward {
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.gen-sy-std__list {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-sy-el {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: var(--space-1) var(--space-4);
+  padding-block: var(--space-2);
+  border-top: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+}
+
+.gen-sy-el__name {
+  color: var(--color-text);
+}
+
+.gen-sy-el__code {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gen-sy-el__value {
+  padding: 0 var(--space-1);
+  background-color: var(--color-code-bg);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.gen-sy-el__display {
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-el__caveat {
+  font-size: var(--font-size-xs);
+  font-style: italic;
+  color: var(--color-text-muted);
+}
+
+.gen-sy-exchange {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.gen-sy-exchange__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+/* Health IT timeline ------------------------------------------------------- */
+
+.gen-sy-tl-legend {
+  margin: 0 0 var(--space-3);
+}
+
+.gen-sy-tl__key {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--color-text-muted);
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.gen-sy-tl__key--hi {
+  border-color: var(--color-text);
+  background-color: var(--color-text);
+}
+
+.gen-sy-tl__key--local {
+  border-color: var(--color-text-secondary);
+  border-style: dashed;
+  border-radius: 2px;
+}
+
+.gen-sy-tl {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-sy-tl__decade + .gen-sy-tl__decade {
+  margin-top: var(--space-3);
+}
+
+.gen-sy-tl__decade-head {
+  margin: 0;
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--color-border);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.04em;
+  color: var(--color-text);
+}
+
+.gen-sy-tl__empty {
+  margin: var(--space-2) 0 0 calc(3rem + var(--space-3));
+  font-size: var(--font-size-sm);
+  font-style: italic;
+  color: var(--color-text-muted);
+}
+
+.gen-sy-tl__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-sy-tl__item {
+  display: grid;
+  grid-template-columns: 3rem minmax(0, 1fr);
+  column-gap: var(--space-3);
+}
+
+.gen-sy-tl__year {
+  padding-top: var(--space-2);
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+
+/* The rule runs down the left edge of the bodies; each entry hangs a
+   marker on it: hollow for context, filled for highlighted. */
+.gen-sy-tl__body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--space-2) 0 var(--space-2) var(--space-4);
+  border-left: 2px solid var(--color-border-strong);
+}
+
+.gen-sy-tl__body::before {
+  content: "";
+  position: absolute;
+  top: calc(var(--space-2) + 0.3em);
+  left: -7px;
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--color-text-muted);
+  border-radius: 50%;
+  background-color: var(--color-surface);
+}
+
+.gen-sy-tl__item--hi .gen-sy-tl__body::before,
+.gen-sy-tl__item--all .gen-sy-tl__body::before {
+  border-color: var(--color-text);
+  background-color: var(--color-text);
+}
+
+.gen-sy-tl__item--local .gen-sy-tl__body::before {
+  border-style: dashed;
+  border-color: var(--color-text-secondary);
+  border-radius: 2px;
+}
+
+.gen-sy-tl__label {
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-tl__item--hi .gen-sy-tl__label {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+/* Everything highlighted: nothing to set apart, so plain ink. */
+.gen-sy-tl__item--all .gen-sy-tl__label {
+  color: var(--color-text);
+}
+
+.gen-sy-tl__item--local .gen-sy-tl__label {
+  padding: var(--space-1) var(--space-2);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+}
+
+.gen-sy-tl__cat {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-tl__local {
+  font-size: var(--font-size-xs);
+  font-style: italic;
+  color: var(--color-text-secondary);
+}
+
+/* On a phone ---------------------------------------------------------------- */
+
+@container (max-width: 460px) {
+  /* The lanes become an ordered list: number, role, then the step. */
+  .gen-sy-scroll {
+    overflow: visible;
+  }
+
+  .gen-sy-lanes {
+    display: block;
+  }
+
+  .gen-sy-band,
+  .gen-sy-lane {
+    display: none;
+  }
+
+  .gen-sy-steps {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .gen-sy-step {
+    align-self: stretch;
+    margin: 0;
+    font-size: var(--font-size-sm);
+  }
+
+  .gen-sy-step__role {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+    white-space: normal;
+    font-weight: var(--weight-semibold);
+    color: var(--color-text);
+  }
+
+  .gen-sy-step__action {
+    font-size: var(--font-size-sm);
+  }
+
+  .gen-sy-step__meta,
+  .gen-sy-step__handoff {
+    font-size: var(--font-size-xs);
+  }
+
+  .gen-sy-el {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gen-sy-tl__item {
+    grid-template-columns: 2.75rem minmax(0, 1fr);
+    column-gap: var(--space-3);
+  }
+
+  .gen-sy-tl__empty {
+    margin-left: calc(2.75rem + var(--space-3));
+  }
+}
+/* <<< genui:systems */
+
+/* >>> genui:measurement */
+/* ==========================================================================
+   Measurement figures (clinical informatics): run chart, System Usability
+   Scale, adoption curve. Same plate and marks as the other packs. Signals,
+   the mean and "now" are drawn in ink with a shape or a word, never colour
+   alone; the data keep slot 1.
+   ========================================================================== */
+
+/* Run chart: the median in ink; dashed where a baseline median is extended. */
+.gen-ms-median {
+  stroke: var(--color-text-secondary);
+  stroke-width: 1.5;
+  fill: none;
+}
+
+.gen-ms-median--ext {
+  stroke-dasharray: 6 4;
+}
+
+/* A point that belongs to a shift or trend: an ink ring around the marker. */
+.gen-ms-ring {
+  fill: none;
+  stroke: var(--color-text);
+  stroke-width: 1.5;
+}
+
+.gen-ms-bracket {
+  fill: none;
+  stroke: var(--color-text-secondary);
+  stroke-width: 1.25;
+}
+
+/* Legend keys for the marks above. */
+.gen-ms-key-median,
+.gen-ms-key-change {
+  display: inline-block;
+  width: 16px;
+  height: 0;
+  flex-shrink: 0;
+  border-top: 1.5px solid var(--color-text-secondary);
+}
+
+.gen-ms-key-change {
+  border-top: 1.5px dotted var(--color-text-muted);
+}
+
+.gen-ms-key-ring {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border: 1.5px solid var(--color-text);
+  border-radius: 50%;
+}
+
+/* SUS: the mean as a solid ink rule (68 is a dotted guide). */
+.gen-ms-mean {
+  stroke: var(--color-text);
+  stroke-width: 2;
+}
+
+.gen-ms-subhead {
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+
+/* Adoption bell curve: the adopted share in slot 1, the rest a neutral wash. */
+.gen-ms-reached {
+  fill: var(--viz-1);
+  fill-opacity: 0.35;
+  stroke: none;
+}
+
+.gen-ms-unreached {
+  fill: var(--color-border);
+  fill-opacity: 0.5;
+  stroke: none;
+}
+
+.gen-ms-curve {
+  fill: none;
+  stroke: var(--color-text-secondary);
+  stroke-width: 1.5;
+}
+
+.gen-ms-boundary {
+  stroke: var(--color-surface);
+  stroke-width: 1.5;
+}
+
+.gen-ms-now {
+  stroke: var(--color-text);
+  stroke-width: 1.5;
+}
+
+/* Adopter categories: a row each, status in words. */
+.gen-ms-cats {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-size-sm);
+}
+
+.gen-ms-cat {
+  display: grid;
+  grid-template-columns: minmax(0, 9rem) minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  align-items: baseline;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.gen-ms-cat__name {
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.gen-ms-cat__share {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+
+.gen-ms-cat__status {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+/* Next to adopt: a heavier ink edge and ink status word. */
+.gen-ms-cat--next {
+  border: 2px solid var(--color-text);
+}
+
+.gen-ms-cat--next .gen-ms-cat__status,
+.gen-ms-cat--adopted .gen-ms-cat__status {
+  color: var(--color-text);
+}
+
+/* Not yet reached: a dashed edge. */
+.gen-ms-cat--ahead {
+  border-style: dashed;
+}
+
+@container (max-width: 460px) {
+  .gen-ms-cat {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .gen-ms-cat__share {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+/* <<< genui:measurement */

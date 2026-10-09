@@ -26,8 +26,31 @@ export const TOOLKITS = [
   {
     id: "clinical-informatics",
     label: "Clinical informatics",
-    description: "Diagnostic test accuracy, prevalence and predictive value, ROC curves, patient timelines, decision-support rules.",
-    tools: ["showDiagnosticAccuracy", "showPrevalenceEffect", "showRocCurve", "showPatientTimeline", "showCdsRule"],
+    description:
+      "Quadruple Aim, sociotechnical model, DIKW, workflow redesign, data standards, health IT history, run charts, " +
+      "usability (SUS), adoption of innovations, patient timelines, decision-support rules and alert fatigue.",
+    tools: [
+      "showQuadrupleAim",
+      "showSociotechnicalModel",
+      "showDikw",
+      "showWorkflowComparison",
+      "showStandardsMap",
+      "showHealthItTimeline",
+      "showRunChart",
+      "showUsabilityScore",
+      "showAdoptionCurve",
+      "showPatientTimeline",
+      "showCdsRule",
+      "showPrevalenceEffect",
+    ],
+  },
+  {
+    // A tool may sit in more than one pack: showPrevalenceEffect serves both
+    // alert fatigue (informatics) and screening (test evaluation).
+    id: "test-evaluation",
+    label: "Screening and test evaluation",
+    description: "Diagnostic test accuracy (2×2 table), prevalence and predictive value, ROC curves and cut-offs.",
+    tools: ["showDiagnosticAccuracy", "showPrevalenceEffect", "showRocCurve"],
   },
   {
     id: "statistics",

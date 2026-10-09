@@ -51,6 +51,15 @@ export const RENDERABLE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "showRocCurve",
   "showPatientTimeline",
   "showCdsRule",
+  "showQuadrupleAim",
+  "showSociotechnicalModel",
+  "showDikw",
+  "showWorkflowComparison",
+  "showStandardsMap",
+  "showHealthItTimeline",
+  "showRunChart",
+  "showUsabilityScore",
+  "showAdoptionCurve",
   "showDistribution",
 ]);
 

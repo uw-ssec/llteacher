@@ -39,6 +39,18 @@ import {
   parsePrevalenceEffectInput,
   parseRocCurveInput,
 } from "./toolInputs.clinical";
+import { QuadrupleAim } from "./renderers/informatics/QuadrupleAim";
+import { SociotechnicalModel } from "./renderers/informatics/SociotechnicalModel";
+import { Dikw } from "./renderers/informatics/Dikw";
+import { WorkflowComparison } from "./renderers/informatics/WorkflowComparison";
+import { StandardsMap } from "./renderers/informatics/StandardsMap";
+import { HealthItTimeline } from "./renderers/informatics/HealthItTimeline";
+import { RunChart } from "./renderers/informatics/RunChart";
+import { UsabilityScore } from "./renderers/informatics/UsabilityScore";
+import { AdoptionCurve } from "./renderers/informatics/AdoptionCurve";
+import { parseDikwInput, parseQuadrupleAimInput, parseSociotechnicalInput } from "./toolInputs.frameworks";
+import { parseHealthItTimelineInput, parseStandardsMapInput, parseWorkflowComparisonInput } from "./toolInputs.systems";
+import { parseAdoptionCurveInput, parseRunChartInput, parseUsabilityScoreInput } from "./toolInputs.measurement";
 import {
   parseDistributionInput,
   parseGdpCompositionInput,
@@ -171,6 +183,15 @@ const FIGURE_TOOLS: Record<string, FigureTool<unknown>> = {
   "tool-showRocCurve": figureTool({ kicker: "ROC curve", parse: parseRocCurveInput, render: (p, partial) => <RocCurve {...p} isPartial={partial} /> }),
   "tool-showPatientTimeline": figureTool({ kicker: "Patient timeline", parse: parsePatientTimelineInput, render: (p, partial) => <PatientTimeline {...p} isPartial={partial} /> }),
   "tool-showCdsRule": figureTool({ kicker: "Decision support rule", parse: parseCdsRuleInput, render: (p, partial) => <CdsRule {...p} isPartial={partial} /> }),
+  "tool-showQuadrupleAim": figureTool({ kicker: "Quadruple Aim", parse: parseQuadrupleAimInput, render: (p, partial) => <QuadrupleAim {...p} isPartial={partial} /> }),
+  "tool-showSociotechnicalModel": figureTool({ kicker: "Sociotechnical model", parse: parseSociotechnicalInput, render: (p, partial) => <SociotechnicalModel {...p} isPartial={partial} /> }),
+  "tool-showDikw": figureTool({ kicker: "Data → wisdom", parse: parseDikwInput, render: (p, partial) => <Dikw {...p} isPartial={partial} /> }),
+  "tool-showWorkflowComparison": figureTool({ kicker: "Workflow comparison", parse: parseWorkflowComparisonInput, render: (p, partial) => <WorkflowComparison {...p} isPartial={partial} /> }),
+  "tool-showStandardsMap": figureTool({ kicker: "Standards map", parse: parseStandardsMapInput, render: (p, partial) => <StandardsMap {...p} isPartial={partial} /> }),
+  "tool-showHealthItTimeline": figureTool({ kicker: "Health IT timeline", parse: parseHealthItTimelineInput, render: (p, partial) => <HealthItTimeline {...p} isPartial={partial} /> }),
+  "tool-showRunChart": figureTool({ kicker: "Run chart", parse: parseRunChartInput, render: (p, partial) => <RunChart {...p} isPartial={partial} /> }),
+  "tool-showUsabilityScore": figureTool({ kicker: "System Usability Scale", parse: parseUsabilityScoreInput, render: (p, partial) => <UsabilityScore {...p} isPartial={partial} /> }),
+  "tool-showAdoptionCurve": figureTool({ kicker: "Diffusion of innovations", parse: parseAdoptionCurveInput, render: (p, partial) => <AdoptionCurve {...p} isPartial={partial} /> }),
 };
 
 /** The figure-tool part types, exported for the registry lockstep test. */

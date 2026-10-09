@@ -12,9 +12,16 @@ describe("subject figure packs (toolkits.ts)", () => {
     }
   });
 
-  it("a tool belongs to at most one pack", () => {
-    const all = TOOLKITS.flatMap((t) => [...t.tools]);
-    expect(new Set(all).size).toBe(all.length);
+  it("ids are unique and no pack lists a tool twice", () => {
+    expect(new Set(TOOLKITS.map((t) => t.id)).size).toBe(TOOLKITS.length);
+    for (const t of TOOLKITS) expect(new Set(t.tools).size, t.id).toBe(t.tools.length);
+  });
+
+  it("a tool shared by two packs is offered when either is enabled", () => {
+    expect(isToolEnabled("showPrevalenceEffect", ["clinical-informatics"])).toBe(true);
+    expect(isToolEnabled("showPrevalenceEffect", ["test-evaluation"])).toBe(true);
+    expect(isToolEnabled("showRocCurve", ["clinical-informatics"])).toBe(false);
+    expect(isToolEnabled("showCdsRule", ["test-evaluation"])).toBe(false);
   });
 
   it("gates pack tools on their pack, leaves subject-neutral tools alone", () => {

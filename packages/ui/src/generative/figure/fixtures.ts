@@ -2,12 +2,18 @@
    model would send. Shared by the registry tests, the screenshot showcase
    (scripts/generative-ui-screenshots.mjs) and the end-to-end fake model, so
    all three exercise exactly the same figures. Not shipped to students.
-   The clinical informatics pack's fixtures live in fixtures.clinical.ts. */
+   The clinical informatics pack's fixtures live in fixtures.{clinical,frameworks,measurement,systems}.ts. */
 
 import { CLINICAL_FIXTURES } from "./fixtures.clinical";
+import { FRAMEWORKS_FIXTURES } from "./fixtures.frameworks";
+import { MEASUREMENT_FIXTURES } from "./fixtures.measurement";
+import { SYSTEMS_FIXTURES } from "./fixtures.systems";
 
 export const FIGURE_FIXTURES: Record<string, unknown> = {
   ...CLINICAL_FIXTURES,
+  ...FRAMEWORKS_FIXTURES,
+  ...MEASUREMENT_FIXTURES,
+  ...SYSTEMS_FIXTURES,
   showWorkedSteps: {
     title: "Real GDP from nominal GDP and the deflator",
     steps: [

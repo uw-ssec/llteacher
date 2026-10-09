@@ -246,19 +246,21 @@ Two kinds of tool are always available. Every other figure tool belongs to a sub
 | Pack id | Label | Tools |
 |---|---|---|
 | `economics` | Economics (intro macro) | `showMacroModel`, `showGdpComposition`, `showMultiplier`, `showLaborForce`, `showInflation` |
-| `clinical-informatics` | Clinical informatics | `showDiagnosticAccuracy`, `showPrevalenceEffect`, `showRocCurve`, `showPatientTimeline`, `showCdsRule` |
+| `clinical-informatics` | Clinical informatics (built for NMETH 527, nursing) | `showQuadrupleAim`, `showSociotechnicalModel`, `showDikw`, `showWorkflowComparison`, `showStandardsMap`, `showHealthItTimeline`, `showRunChart`, `showUsabilityScore`, `showAdoptionCurve`, `showPatientTimeline`, `showCdsRule`, `showPrevalenceEffect` |
+| `test-evaluation` | Screening and test evaluation | `showDiagnosticAccuracy`, `showRocCurve`, `showPrevalenceEffect` |
 | `statistics` | Statistics | `showDistribution` (#35) |
 
 ### How packs are chosen and enforced
 
 - **Choosing.** An instructor ticks packs under **Subject figures** on the LLM config form, in the admin console. The choice is stored in `llm_configs.genui_toolkits` (`text[]`, default `{}`, migration 0056). Packs are therefore optional, and nothing is enabled until someone opts in. Because the choice lives on the config, a homework or course that pins a config gets that config's packs, through the same homework → course → org resolution as the model and the knowledge-access switch.
 - **Enforcing.** `toolsForConversation` (`routes/chat.ts`) withholds every pack tool whose pack the resolved config hasn't enabled. A withheld tool is not in the turn's `tools`, so the model can't call it. It's also not in the generated tool paragraph, so the model isn't told it exists. Students can therefore only be shown figures from the packs their instructor chose.
+- **Shared tools.** A tool can belong to more than one pack. `showPrevalenceEffect` serves alert fatigue in informatics and screening in test evaluation, and it's offered when either pack is on.
 - **Already-saved figures still render.** Turning a pack off later doesn't hide figures already in a transcript. A turn's history is what happened, and the renderer still draws it.
 - **Validation.** The route validates the list: an unknown pack id is a 400 that names it. The list is stored normalized (known ids, de-duplicated, in catalog order). An update that omits the field keeps the stored packs, so an older client can't silently wipe them.
 
 ### Contract every figure follows
 
-- **Computed, not trusted.** The model supplies arguments only. The figure computes everything it states, in `packages/ui/src/generative/lib/` (`econ.ts`, `clinical.ts`, `stats.ts`, all unit-tested): equilibrium movement, GDP, the rates, PPV/NPV, AUC, rule firing, tail probabilities. Tool descriptions therefore tell the model to name what to draw, not the result.
+- **Computed, not trusted.** The model supplies arguments only. The figure computes everything it states, in `packages/ui/src/generative/lib/` (`econ.ts`, `clinical.ts`, `frameworks.ts`, `measurement.ts`, `systems.ts`, `stats.ts`, all unit-tested): equilibrium movement, GDP, the rates, PPV/NPV, AUC, rule firing, run-chart shifts and trends, SUS scores, adoption categories, workflow handoffs, tail probabilities. Framework figures also own their reference content: the aims, Sittig & Singh's eight dimensions, the DIKW levels, the SUS items, the standards catalog and the health IT milestones. The model picks from that content, so it can't misstate a date or a definition. Tool descriptions therefore tell the model to name what to draw, not the result.
 - **One table.** `render.tsx`'s `FIGURE_TOOLS` maps each part type to a kicker, a deny-by-default parser (`toolInputs*.ts`) and a renderer. Input that hasn't validated yet shows a skeleton while streaming, and nothing once streaming has finished.
 - **Per-part error boundary and lockstep (#38).**
   - `renderToolPart` wraps every tool part in `ToolPartErrorBoundary`, so a renderer that throws costs one figure, not the transcript.
