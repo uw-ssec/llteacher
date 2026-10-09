@@ -24,6 +24,7 @@ import { useId, useRef, useState } from "react";
 import { DownloadSimple, Warning } from "@phosphor-icons/react";
 import type { RosterImportPayload, RosterRowStatus } from "@llteacher/ui/api";
 import { apiClient, ApiError } from "../lib/api-client";
+import { downloadRosterCsvTemplate } from "../lib/rosterCsvTemplate";
 
 /** Copy per row outcome. `satisfies Record<...>` so a status added on the
  *  server fails to compile here rather than rendering a row with no stated
@@ -41,8 +42,6 @@ const OUTCOME = {
   disallowed_domain: { tone: "warn", label: "Skip", detail: "Not an allowed email domain." },
   duplicate_row: { tone: "warn", label: "Skip", detail: "This address appears earlier in the file." },
 } satisfies Record<RosterRowStatus, { tone: "ok" | "neutral" | "warn"; label: string; detail: string }>;
-
-const TEMPLATE = "email,name,role\r\nalovelace@uw.edu,Ada Lovelace,student\r\nghopper@uw.edu,Grace Hopper,ta\r\n";
 
 /** The extension is a picker hint the OS lets you bypass with "All Files",
  *  so it is re-checked in code. The size cap is about what a roster
@@ -131,15 +130,6 @@ export function RosterImportPanel({
     }
   }
 
-  function downloadTemplate() {
-    const url = URL.createObjectURL(new Blob([TEMPLATE], { type: "text/csv" }));
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "llteacher-roster-template.csv";
-    anchor.click();
-    URL.revokeObjectURL(url);
-  }
-
   const result = committed ?? preview;
 
   return (
@@ -151,7 +141,7 @@ export function RosterImportPanel({
       <p className="admin-accession__hint">
         A CSV with an <code>email</code> column. <code>name</code> and <code>role</code> are
         optional; role defaults to student. Nothing is written until you confirm.{" "}
-        <button type="button" className="admin-link-button" onClick={downloadTemplate}>
+        <button type="button" className="admin-link-button" onClick={downloadRosterCsvTemplate}>
           <DownloadSimple size={13} weight="regular" aria-hidden="true" /> Download a template
         </button>
       </p>
