@@ -150,7 +150,12 @@ export async function findOrCreatePendingUser(
         : {}),
       isPending: true,
     })
-    .onConflictDoNothing({ target: users.emailBlindIndex })
+    // No conflict target: two racing inserts of the same UW address collide
+    // on users_netid_blind_index_uq as well as the email index, and Postgres
+    // only suppresses conflicts on the arbiter index -- the netid one would
+    // still raise. Every unique index is an arbiter here, so the loser falls
+    // through to the re-read below.
+    .onConflictDoNothing()
     .returning({ id: users.id });
   if (created) return created;
 
