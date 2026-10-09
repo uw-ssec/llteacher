@@ -42,6 +42,7 @@ import type {
   GradeListPayload,
   GrantPlatformInstructorResultPayload,
   PlatformInstructorListResponse,
+  RevokePlatformInstructorResponse,
   KnowledgeDocumentListPayload,
   KnowledgeDocumentPayload,
   LlmConfigListPayload,
@@ -56,6 +57,10 @@ import type {
   CreateOrganizationBody,
   ProvisionCourseBody,
   ProvisionCourseResponse,
+  AddCourseInstructorBody,
+  AddCourseInstructorResponse,
+  RemoveCourseInstructorsBody,
+  RemoveCourseInstructorsResponse,
   PlatformCourseListResponse,
 } from "@llteacher/ui/api";
 
@@ -238,6 +243,18 @@ export const apiClient = {
   },
 
   platformCourses: {
+    addInstructor: (courseId: string, body: AddCourseInstructorBody, opts: RequestOptions) =>
+      request<AddCourseInstructorResponse>(
+        `/api/platform/courses/${encode(courseId)}/instructors`,
+        { method: "POST", body: JSON.stringify(body) },
+        opts,
+      ),
+    removeInstructors: (courseId: string, body: RemoveCourseInstructorsBody, opts: RequestOptions) =>
+      request<RemoveCourseInstructorsResponse>(
+        `/api/platform/courses/${encode(courseId)}/instructors`,
+        { method: "PATCH", body: JSON.stringify(body) },
+        opts,
+      ),
     list: (opts: RequestOptions) =>
       request<PlatformCourseListResponse>("/api/platform/courses", { method: "GET" }, opts),
     create: (body: ProvisionCourseBody, opts: RequestOptions) =>
@@ -569,6 +586,12 @@ export const apiClient = {
       request<GrantPlatformInstructorResultPayload>(
         "/api/platform/instructors",
         { method: "POST", body: JSON.stringify({ email }) },
+        opts,
+      ),
+    revoke: (userId: string, opts: RequestOptions) =>
+      request<RevokePlatformInstructorResponse>(
+        `/api/platform/instructors/${encode(userId)}`,
+        { method: "DELETE" },
         opts,
       ),
   },

@@ -66,6 +66,23 @@ export interface ProvisionCourseResponse {
   instructor: { userId: string; email: string };
 }
 
+export interface AddCourseInstructorBody {
+  instructorEmail: string;
+}
+
+export interface AddCourseInstructorResponse {
+  instructor: { userId: string; email: string };
+  membershipAdded: boolean;
+}
+
+export interface RemoveCourseInstructorsBody {
+  removeUserIds: string[];
+}
+
+export interface RemoveCourseInstructorsResponse {
+  removedUserIds: string[];
+}
+
 export interface PlatformCourseListItem extends ProvisionedCoursePayload {
   status: "active" | "inactive";
   instructors: Array<{ userId: string; email: string }>;
@@ -206,10 +223,16 @@ export interface PlatformInstructorListItem {
   status: "pending" | "signed_in";
   grantedAt: IsoDateTime;
   assignedCourseCount: number;
+  assignedCourses: Array<{ code: string; term: string }>;
 }
 
 export interface PlatformInstructorListResponse {
   instructors: PlatformInstructorListItem[];
+}
+
+export interface RevokePlatformInstructorResponse {
+  status: "revoked";
+  removedMembershipCount: number;
 }
 
 /* -- Roster (#32, #86) ----------------------------------------------------- */

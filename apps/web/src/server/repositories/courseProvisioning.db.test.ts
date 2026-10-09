@@ -1,12 +1,13 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq, sql } from "drizzle-orm";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { makeNodeDb } from "../../db/nodeClient";
 import type { Db } from "../../db/client";
 import { courseMemberships, courses, organizations, users } from "../../db/schema";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
-import { provisionInstructorCourse } from "./courseProvisioning";
+import { addInstructorToCourse, provisionInstructorCourse, removeInstructorsFromCourse, revokePlatformInstructor } from "./courseProvisioning";
 import { grantPlatformInstructor } from "./users";
+import { unsafeOrgScope } from "./scope";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -44,9 +45,14 @@ describe.skipIf(!DATABASE_URL)("provisionInstructorCourse atomicity (real DB)", 
     deploymentOrgId = deployment!.id;
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
     await db.execute(sql`DROP TRIGGER IF EXISTS test_fail_instructor_membership ON course_memberships`);
     await db.execute(sql`DROP FUNCTION IF EXISTS test_fail_instructor_membership()`);
+    await db.execute(sql`DROP TRIGGER IF EXISTS test_fail_platform_revoke ON users`);
+    await db.execute(sql`DROP FUNCTION IF EXISTS test_fail_platform_revoke()`);
+  });
+
+  afterAll(async () => {
     await db.delete(courses).where(eq(courses.organizationId, deploymentOrgId));
     await db.delete(organizations).where(eq(organizations.id, deploymentOrgId));
     await db.delete(organizations).where(eq(organizations.id, ordinaryOrgId));
@@ -154,5 +160,302 @@ describe.skipIf(!DATABASE_URL)("provisionInstructorCourse atomicity (real DB)", 
     expect(createdUsers).toEqual([]);
     expect(createdCourses).toEqual([]);
     expect(createdMemberships).toEqual([]);
+  });
+
+  it("adds a second instructor without changing the existing instructor", async () => {
+    const first = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-primary-${suffix}@uw.edu`,
+      title: "Co-taught Statistics",
+      code: `COTEACH-${suffix}`,
+      term: "Autumn 2026",
+    });
+    expect(first.status).toBe("created");
+    if (first.status !== "created") return;
+
+    const second = await addInstructorToCourse(
+      db,
+      cipher,
+      actorUserId,
+      first.course.id,
+      `prof-second-${suffix}@uw.edu`,
+    );
+
+    expect(second).toMatchObject({
+      status: "assigned",
+      membershipAdded: true,
+      platformInstructorGrantCreated: true,
+      instructor: { email: `prof-second-${suffix}@uw.edu` },
+    });
+    const activeInstructors = await db.select({ userId: courseMemberships.userId })
+      .from(courseMemberships)
+      .where(and(
+        eq(courseMemberships.courseId, first.course.id),
+        eq(courseMemberships.role, "instructor"),
+        isNull(courseMemberships.droppedAt),
+      ));
+    expect(activeInstructors.map(({ userId }) => userId).sort()).toEqual([
+      first.instructor.userId,
+      second.status === "assigned" ? second.instructor.userId : "",
+    ].sort());
+  });
+
+  it("removes selected instructors only from one course, retaining their platform grant and other course", async () => {
+    const email = `prof-removal-${suffix}@uw.edu`;
+    const first = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: email, title: "First removal fixture", code: `REMOVE-1-${suffix}`, term: "Autumn 2026",
+    });
+    const second = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: email, title: "Second removal fixture", code: `REMOVE-2-${suffix}`, term: "Winter 2027",
+    });
+    expect(first.status).toBe("created");
+    expect(second.status).toBe("created");
+    if (first.status !== "created" || second.status !== "created") return;
+
+    const result = await removeInstructorsFromCourse(db, unsafeOrgScope(deploymentOrgId), first.course.id, [first.instructor.userId]);
+    expect(result).toMatchObject({ status: "removed", removed: [{ userId: first.instructor.userId, membershipId: first.membershipId }] });
+    const memberships = await db.select({ courseId: courseMemberships.courseId, droppedAt: courseMemberships.droppedAt })
+      .from(courseMemberships).where(eq(courseMemberships.userId, first.instructor.userId));
+    expect(memberships.find((row) => row.courseId === first.course.id)?.droppedAt).not.toBeNull();
+    expect(memberships.find((row) => row.courseId === second.course.id)?.droppedAt).toBeNull();
+    const [person] = await db.select({ grantedAt: users.platformInstructorGrantedAt })
+      .from(users).where(eq(users.id, first.instructor.userId));
+    expect(person?.grantedAt).not.toBeNull();
+  });
+
+  it("revokes platform access and every active course membership atomically", async () => {
+    const targetEmail = `prof-platform-revoke-${suffix}@uw.edu`;
+    const first = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: targetEmail, title: "Platform revoke first", code: `REVOKE-1-${suffix}`, term: "Autumn 2026",
+    });
+    const second = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: targetEmail, title: "Platform revoke second", code: `REVOKE-2-${suffix}`, term: "Winter 2027",
+    });
+    expect(first.status).toBe("created");
+    expect(second.status).toBe("created");
+    if (first.status !== "created" || second.status !== "created") return;
+    await addInstructorToCourse(db, cipher, actorUserId, first.course.id, `replacement-1-${suffix}@uw.edu`);
+    await addInstructorToCourse(db, cipher, actorUserId, second.course.id, `replacement-2-${suffix}@uw.edu`);
+    const studentCourse = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `student-course-owner-${suffix}@uw.edu`, title: "Platform revoke student course",
+      code: `REVOKE-3-${suffix}`, term: "Spring 2027",
+    });
+    expect(studentCourse.status).toBe("created");
+    if (studentCourse.status !== "created") return;
+    await db.insert(courseMemberships).values({
+      userId: first.instructor.userId,
+      courseId: studentCourse.course.id,
+      role: "student",
+    });
+
+    const result = await revokePlatformInstructor(db, first.instructor.userId);
+    expect(result).toMatchObject({ status: "revoked", userId: first.instructor.userId });
+    if (result.status !== "revoked") return;
+    expect(result.removed.map((membership) => membership.courseId).sort()).toEqual([
+      first.course.id,
+      second.course.id,
+      studentCourse.course.id,
+    ].sort());
+    const activeMemberships = await db.select({ id: courseMemberships.id })
+      .from(courseMemberships)
+      .where(and(eq(courseMemberships.userId, first.instructor.userId), isNull(courseMemberships.droppedAt)));
+    expect(activeMemberships).toEqual([]);
+    const [person] = await db.select({ grantedAt: users.platformInstructorGrantedAt, grantedBy: users.platformInstructorGrantedBy })
+      .from(users).where(eq(users.id, first.instructor.userId));
+    expect(person).toEqual({ grantedAt: null, grantedBy: null });
+  });
+
+  it("preserves access when revocation would leave a course without an instructor", async () => {
+    const target = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-sole-${suffix}@uw.edu`, title: "Sole instructor fixture",
+      code: `SOLE-${suffix}`, term: "Autumn 2026",
+    });
+    expect(target.status).toBe("created");
+    if (target.status !== "created") return;
+
+    expect(await revokePlatformInstructor(db, target.instructor.userId)).toEqual({
+      status: "sole_instructor",
+      courses: [{ id: target.course.id, code: target.course.code, term: target.course.term }],
+    });
+    const [membership] = await db.select({ droppedAt: courseMemberships.droppedAt })
+      .from(courseMemberships).where(eq(courseMemberships.id, target.membershipId));
+    const [person] = await db.select({ grantedAt: users.platformInstructorGrantedAt })
+      .from(users).where(eq(users.id, target.instructor.userId));
+    expect(membership?.droppedAt).toBeNull();
+    expect(person?.grantedAt).not.toBeNull();
+  });
+
+  it("rolls membership removals back when clearing the platform grant fails", async () => {
+    const target = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-revoke-rollback-${suffix}@uw.edu`, title: "Revoke rollback fixture",
+      code: `REVOKE-ROLLBACK-${suffix}`, term: "Autumn 2026",
+    });
+    expect(target.status).toBe("created");
+    if (target.status !== "created") return;
+    await addInstructorToCourse(db, cipher, actorUserId, target.course.id, `rollback-replacement-${suffix}@uw.edu`);
+    await db.execute(sql`
+      CREATE FUNCTION test_fail_platform_revoke() RETURNS trigger AS $$
+      BEGIN RAISE EXCEPTION 'forced platform revoke failure'; END;
+      $$ LANGUAGE plpgsql
+    `);
+    await db.execute(sql`
+      CREATE TRIGGER test_fail_platform_revoke
+      BEFORE UPDATE OF platform_instructor_granted_at ON users
+      FOR EACH ROW WHEN (NEW.platform_instructor_granted_at IS NULL)
+      EXECUTE FUNCTION test_fail_platform_revoke()
+    `);
+
+    await expect(revokePlatformInstructor(db, target.instructor.userId)).rejects.toThrow(/forced platform revoke failure/i);
+    const [membership] = await db.select({ droppedAt: courseMemberships.droppedAt })
+      .from(courseMemberships).where(eq(courseMemberships.id, target.membershipId));
+    const [person] = await db.select({ grantedAt: users.platformInstructorGrantedAt })
+      .from(users).where(eq(users.id, target.instructor.userId));
+    expect(membership?.droppedAt).toBeNull();
+    expect(person?.grantedAt).not.toBeNull();
+  });
+
+  it("rejects a stale batch without removing any current instructors", async () => {
+    const first = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-stale-${suffix}@uw.edu`, title: "Stale removal fixture",
+      code: `REMOVE-STALE-${suffix}`, term: "Autumn 2026",
+    });
+    expect(first.status).toBe("created");
+    if (first.status !== "created") return;
+
+    expect(await removeInstructorsFromCourse(db, unsafeOrgScope(deploymentOrgId), first.course.id, [first.instructor.userId, crypto.randomUUID()]))
+      .toEqual({ status: "invalid_selection" });
+    const [membership] = await db.select({ droppedAt: courseMemberships.droppedAt })
+      .from(courseMemberships).where(eq(courseMemberships.id, first.membershipId));
+    expect(membership?.droppedAt).toBeNull();
+    expect(await removeInstructorsFromCourse(db, unsafeOrgScope(deploymentOrgId), crypto.randomUUID(), [first.instructor.userId]))
+      .toEqual({ status: "course_missing" });
+  });
+
+  it("is idempotent for an active instructor and restores a dropped membership", async () => {
+    const provisioned = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-owner-${suffix}@uw.edu`,
+      title: "Membership Recovery",
+      code: `RESTORE-${suffix}`,
+      term: "Winter 2027",
+    });
+    expect(provisioned.status).toBe("created");
+    if (provisioned.status !== "created") return;
+    const email = `prof-restored-${suffix}@uw.edu`;
+
+    const added = await addInstructorToCourse(db, cipher, actorUserId, provisioned.course.id, email);
+    expect(added).toMatchObject({ status: "assigned", membershipAdded: true });
+    if (added.status !== "assigned") return;
+    const repeated = await addInstructorToCourse(db, cipher, actorUserId, provisioned.course.id, email);
+    expect(repeated).toMatchObject({
+      status: "assigned",
+      membershipAdded: false,
+      platformInstructorGrantCreated: false,
+      membershipId: added.membershipId,
+    });
+
+    await db.update(courseMemberships).set({
+      droppedAt: new Date("2026-10-01T00:00:00Z"),
+      droppedReason: "roster_removal",
+    }).where(eq(courseMemberships.id, added.membershipId));
+    const restored = await addInstructorToCourse(db, cipher, actorUserId, provisioned.course.id, email);
+    expect(restored).toMatchObject({
+      status: "assigned",
+      membershipAdded: true,
+      platformInstructorGrantCreated: false,
+      membershipId: added.membershipId,
+    });
+    const [membership] = await db.select({
+      role: courseMemberships.role,
+      droppedAt: courseMemberships.droppedAt,
+      droppedReason: courseMemberships.droppedReason,
+    }).from(courseMemberships).where(eq(courseMemberships.id, added.membershipId));
+    expect(membership).toEqual({ role: "instructor", droppedAt: null, droppedReason: null });
+  });
+
+  it("rejects an unknown or other-organization course without creating the instructor", async () => {
+    const [ordinaryCourse] = await db.insert(courses).values({
+      organizationId: ordinaryOrgId,
+      title: "Other institution course",
+      code: `OTHER-${suffix}`,
+      term: "Autumn 2026",
+    }).returning({ id: courses.id });
+    const email = `prof-wrong-org-${suffix}@uw.edu`;
+    const blindIndex = await cipher.computeBlindIndex(email);
+
+    await expect(addInstructorToCourse(db, cipher, actorUserId, crypto.randomUUID(), email))
+      .resolves.toEqual({ status: "course_missing" });
+    await expect(addInstructorToCourse(db, cipher, actorUserId, ordinaryCourse!.id, email))
+      .resolves.toEqual({ status: "course_missing" });
+    expect(await db.select({ id: users.id }).from(users).where(eq(users.emailBlindIndex, blindIndex))).toEqual([]);
+    await db.delete(courses).where(eq(courses.id, ordinaryCourse!.id));
+  });
+
+  it("rejects a disallowed email without creating a user or membership", async () => {
+    const provisioned = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-domain-owner-${suffix}@uw.edu`,
+      title: "Domain Policy",
+      code: `DOMAIN-${suffix}`,
+      term: "Spring 2027",
+    });
+    expect(provisioned.status).toBe("created");
+    if (provisioned.status !== "created") return;
+    const email = `outsider-${suffix}@example.com`;
+    const blindIndex = await cipher.computeBlindIndex(email);
+
+    const result = await addInstructorToCourse(db, cipher, actorUserId, provisioned.course.id, email);
+
+    expect(result).toMatchObject({ status: "invalid_email" });
+    expect(await db.select({ id: users.id }).from(users).where(eq(users.emailBlindIndex, blindIndex))).toEqual([]);
+  });
+
+  it("rejects a malformed institutional email without creating any authority", async () => {
+    const provisioned = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-malformed-owner-${suffix}@uw.edu`,
+      title: "Malformed Instructor Domain",
+      code: `MALFORMED-${suffix}`,
+      term: "Spring 2027",
+    });
+    expect(provisioned.status).toBe("created");
+    if (provisioned.status !== "created") return;
+    const email = `prof-malformed-${suffix}@.uw.edu`;
+    const blindIndex = await cipher.computeBlindIndex(email);
+
+    expect(await addInstructorToCourse(db, cipher, actorUserId, provisioned.course.id, email))
+      .toMatchObject({ status: "invalid_email" });
+    expect(await db.select({ id: users.id }).from(users).where(eq(users.emailBlindIndex, blindIndex))).toEqual([]);
+    const memberships = await db.select({ userId: courseMemberships.userId })
+      .from(courseMemberships).where(eq(courseMemberships.courseId, provisioned.course.id));
+    expect(memberships).toEqual([{ userId: provisioned.instructor.userId }]);
+  });
+
+  it("rolls back a new user and platform grant when membership insertion fails", async () => {
+    const provisioned = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-rollback-owner-${suffix}@uw.edu`,
+      title: "Add Instructor Rollback",
+      code: `ADD-ROLLBACK-${suffix}`,
+      term: "Spring 2027",
+    });
+    expect(provisioned.status).toBe("created");
+    if (provisioned.status !== "created") return;
+    const email = `prof-add-rollback-${suffix}@uw.edu`;
+    const blindIndex = await cipher.computeBlindIndex(email);
+    await db.execute(sql.raw(`
+      CREATE OR REPLACE FUNCTION test_fail_instructor_membership() RETURNS trigger AS $$
+      BEGIN
+        IF EXISTS (SELECT 1 FROM courses WHERE id = NEW.course_id AND code LIKE 'ADD-ROLLBACK-%') THEN
+          RAISE EXCEPTION 'intentional add-instructor membership failure';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `));
+    await db.execute(sql`
+      CREATE TRIGGER test_fail_instructor_membership
+      BEFORE INSERT ON course_memberships
+      FOR EACH ROW EXECUTE FUNCTION test_fail_instructor_membership()
+    `);
+
+    await expect(addInstructorToCourse(db, cipher, actorUserId, provisioned.course.id, email))
+      .rejects.toThrow("intentional add-instructor membership failure");
+    expect(await db.select({ id: users.id }).from(users).where(eq(users.emailBlindIndex, blindIndex))).toEqual([]);
   });
 });
