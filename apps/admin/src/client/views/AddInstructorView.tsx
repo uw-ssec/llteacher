@@ -143,12 +143,13 @@ export function AddInstructorView() {
         {instructorsResource.data?.instructors.length === 0 ? <ViewEmpty title="No instructors yet" body="Grant instructor access above or create a course shell." /> : null}
         {instructorsResource.data?.instructors.length ? <table className="admin-table">
           <caption className="admin-visually-hidden">Everyone with instructor portal access</caption>
-          <thead><tr><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Access granted</th><th scope="col">Assigned courses</th></tr></thead>
+          <thead><tr><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Access granted</th><th scope="col">Assigned courses</th><th scope="col">Course codes</th></tr></thead>
           <tbody>{instructorsResource.data.instructors.map((instructor) => <tr key={instructor.userId}>
             <th scope="row">{instructor.email}</th>
             <td>{instructor.status === "signed_in" ? "Signed in" : "Pending"}</td>
             <td>{new Date(instructor.grantedAt).toLocaleDateString()}</td>
             <td>{instructor.assignedCourseCount}</td>
+            <td>{instructor.assignedCourses?.length ? instructor.assignedCourses.map((course) => <div key={`${course.code}-${course.term}`}>{course.code} <span className="admin-form-hint">({course.term})</span></div>) : "—"}</td>
           </tr>)}</tbody>
         </table> : null}
       </section>

@@ -47,7 +47,7 @@ import {
 } from "./routes/courseMemberships";
 import { grantPlatformInstructorHandler, listPlatformInstructorsHandler } from "./routes/platformInstructors";
 import { createOrganizationHandler, getOrganizationHandler } from "./routes/organizations";
-import { addCourseInstructorHandler, listPlatformCoursesHandler, provisionCourseHandler } from "./routes/courseProvisioning";
+import { addCourseInstructorHandler, listPlatformCoursesHandler, provisionCourseHandler, removeCourseInstructorsHandler } from "./routes/courseProvisioning";
 import {
   cloneLlmConfigHandler,
   createLlmConfigHandler,
@@ -345,6 +345,7 @@ app.post("/api/platform/organization", requireSuperAdmin()(createOrganizationHan
 app.post("/api/platform/courses", requireSuperAdmin()(provisionCourseHandler));
 app.get("/api/platform/courses", requireSuperAdmin()(listPlatformCoursesHandler));
 app.post("/api/platform/courses/:courseId/instructors", requireSuperAdmin()(addCourseInstructorHandler));
+app.patch("/api/platform/courses/:courseId/instructors", requireSuperAdmin()(removeCourseInstructorsHandler));
 
 // #31/#170/#367: LLM configuration authoring. Instructor-gated on the
 // COURSE; inside the handlers (routes/llmConfigs.ts), the organization's

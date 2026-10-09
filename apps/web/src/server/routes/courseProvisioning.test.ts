@@ -2,18 +2,22 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import type { AppEnv } from "../context";
 import { fakeAuthContext } from "../testing/authContext";
-import { addCourseInstructorHandler, listPlatformCoursesHandler, provisionCourseHandler } from "./courseProvisioning";
+import { addCourseInstructorHandler, listPlatformCoursesHandler, provisionCourseHandler, removeCourseInstructorsHandler } from "./courseProvisioning";
 
 const provisionMock = vi.fn();
 const addInstructorMock = vi.fn();
+const removeInstructorsMock = vi.fn();
+const getDeploymentOrganizationMock = vi.fn();
 const auditBestEffortMock = vi.fn();
 const listPlatformCoursesMock = vi.fn();
 vi.mock("../repositories/courseProvisioning", async (importOriginal) => ({
   isValidInstructorEmail: (await importOriginal<typeof import("../repositories/courseProvisioning")>()).isValidInstructorEmail,
   addInstructorToCourse: (...a: unknown[]) => addInstructorMock(...a),
+  removeInstructorsFromCourse: (...a: unknown[]) => removeInstructorsMock(...a),
   provisionInstructorCourse: (...a: unknown[]) => provisionMock(...a),
 }));
 vi.mock("../repositories/platformListings", () => ({ listPlatformCourses: (...a: unknown[]) => listPlatformCoursesMock(...a) }));
+vi.mock("../repositories/organizations", () => ({ getDeploymentOrganization: (...a: unknown[]) => getDeploymentOrganizationMock(...a) }));
 vi.mock("../utils/audit", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../utils/audit")>();
   return { ...actual, auditBestEffort: (...a: unknown[]) => auditBestEffortMock(...a) };
@@ -47,8 +51,18 @@ function postInstructor(superAdmin: boolean, courseId: string, body: unknown) {
   }, { DATABASE_URL: "ignored" } as Env);
 }
 
+function patchInstructors(superAdmin: boolean, courseId: string, body: unknown) {
+  const app = new Hono<AppEnv>();
+  app.use("*", async (c, next) => { c.set("authContext", fakeAuthContext({ isSuperAdmin: superAdmin })); await next(); });
+  app.patch("/api/platform/courses/:courseId/instructors", removeCourseInstructorsHandler);
+  return app.request(`/api/platform/courses/${courseId}/instructors`, {
+    method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }, { DATABASE_URL: "ignored" } as Env);
+}
+
 beforeEach(() => {
   listPlatformCoursesMock.mockReset().mockResolvedValue([]);
+  getDeploymentOrganizationMock.mockReset().mockResolvedValue({ id: "org-1" });
 });
 
 describe("GET /api/platform/courses", () => {
@@ -256,5 +270,47 @@ describe("POST /api/platform/courses/:courseId/instructors", () => {
     expect((await postInstructor(true, "course-1", { instructorEmail: "second@uw.edu" })).status).toBe(201);
     expect(auditBestEffortMock).toHaveBeenCalledTimes(1);
     expect(auditBestEffortMock.mock.calls[0]![2].action).toBe("membership.course_instructor_added");
+  });
+});
+
+describe("PATCH /api/platform/courses/:courseId/instructors", () => {
+  beforeEach(() => {
+    removeInstructorsMock.mockReset().mockResolvedValue({
+      status: "removed", organizationId: "org-1",
+      removed: [{ userId: "u1", membershipId: "m1" }, { userId: "u2", membershipId: "m2" }],
+    });
+    auditBestEffortMock.mockReset().mockResolvedValue(undefined);
+  });
+
+  it("requires a super admin", async () => {
+    expect((await patchInstructors(false, "course-1", { removeUserIds: ["u1"] })).status).toBe(403);
+    expect(removeInstructorsMock).not.toHaveBeenCalled();
+  });
+
+  it("removes a batch and audits each removed membership", async () => {
+    const response = await patchInstructors(true, "course-1", { removeUserIds: ["u1", "u2"] });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ removedUserIds: ["u1", "u2"] });
+    expect(removeInstructorsMock).toHaveBeenCalledWith(expect.anything(), "org-1", "course-1", ["u1", "u2"]);
+    expect(auditBestEffortMock.mock.calls.map((call) => call[2])).toEqual([
+      { actorUserId: "u1", action: "membership.course_instructor_removed", targetType: "membership", targetId: "m1", requestMetadata: { courseId: "course-1", instructorUserId: "u1" } },
+      { actorUserId: "u1", action: "membership.course_instructor_removed", targetType: "membership", targetId: "m2", requestMetadata: { courseId: "course-1", instructorUserId: "u2" } },
+    ]);
+  });
+
+  it.each([null, {}, { removeUserIds: [] }, { removeUserIds: ["u1", "u1"] }, { removeUserIds: ["u1", 4] }])("rejects invalid selections", async (body) => {
+    expect((await patchInstructors(true, "course-1", body)).status).toBe(400);
+    expect(removeInstructorsMock).not.toHaveBeenCalled();
+  });
+
+  it("does not mutate or audit when a selection is no longer active", async () => {
+    removeInstructorsMock.mockResolvedValueOnce({ status: "invalid_selection" });
+    expect((await patchInstructors(true, "course-1", { removeUserIds: ["u1"] })).status).toBe(409);
+    expect(auditBestEffortMock).not.toHaveBeenCalled();
+  });
+
+  it("hides an absent or other-organization course", async () => {
+    removeInstructorsMock.mockResolvedValueOnce({ status: "course_missing" });
+    expect((await patchInstructors(true, "other-course", { removeUserIds: ["u1"] })).status).toBe(404);
   });
 });

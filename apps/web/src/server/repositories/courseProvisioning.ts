@@ -1,8 +1,9 @@
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { courseMemberships, courses, organizations, users } from "../../db/schema";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { DomainAllowlistService } from "../../lib/services/DomainAllowlistService";
+import type { OrgScope } from "./scope";
 
 export interface CourseProvisioningInput {
   instructorEmail: string;
@@ -35,6 +36,11 @@ export type AddCourseInstructorResult =
       membershipAdded: boolean;
       platformInstructorGrantCreated: boolean;
     };
+
+export type RemoveCourseInstructorsResult =
+  | { status: "course_missing" }
+  | { status: "invalid_selection" }
+  | { status: "removed"; organizationId: string; removed: Array<{ userId: string; membershipId: string }> };
 
 function constraintName(error: unknown): string | undefined {
   let current: unknown = error;
@@ -256,6 +262,40 @@ export async function addInstructorToCourse(
       membershipId,
       membershipAdded: true,
       platformInstructorGrantCreated,
+    } as const;
+  });
+}
+
+/** Soft-drops selected active instructors in one transaction. An invalid or
+ * stale selection changes nothing; platform grants and other courses stay. */
+export async function removeInstructorsFromCourse(
+  db: Db,
+  organizationId: OrgScope,
+  courseId: string,
+  userIds: string[],
+): Promise<RemoveCourseInstructorsResult> {
+  return db.transaction(async (tx) => {
+    const course = await tx.query.courses.findFirst({
+      where: and(eq(courses.id, courseId), eq(courses.organizationId, organizationId)),
+      columns: { id: true },
+    });
+    if (!course) return { status: "course_missing" } as const;
+    const memberships = await tx.select({ id: courseMemberships.id, userId: courseMemberships.userId })
+      .from(courseMemberships)
+      .where(and(
+        eq(courseMemberships.courseId, courseId),
+        eq(courseMemberships.role, "instructor"),
+        isNull(courseMemberships.droppedAt),
+        inArray(courseMemberships.userId, userIds),
+      ))
+      .for("update");
+    if (memberships.length !== userIds.length) return { status: "invalid_selection" } as const;
+    const now = new Date();
+    await tx.update(courseMemberships).set({ droppedAt: now, droppedReason: null, updatedAt: now })
+      .where(inArray(courseMemberships.id, memberships.map((membership) => membership.id)));
+    return {
+      status: "removed", organizationId,
+      removed: memberships.map((membership) => ({ userId: membership.userId, membershipId: membership.id })),
     } as const;
   });
 }

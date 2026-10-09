@@ -1,3 +1,7 @@
+## 2026-10-09
+* **Update**: Linked `decisions/course-instructor-editing.md` to `decisions/course-membership-roles.md` (Course removal preserves the per-course role model and keeps platform recognition separate from membership authority.).
+* **Creation**: Documented concept `decisions/course-instructor-editing.md` (Course instructor edits are scoped membership changes).
+
 ## 2026-10-08
 * **Update**: Linked `bugs/hint-test-initial-hydration-race.md` to `bugs/chat-rerender-per-token.md` (Both depend on the lifecycle and rendering of the real streaming chat surface.).
 * **Creation**: Documented concept `bugs/hint-test-initial-hydration-race.md` (Hint suppression tests must wait for initial history).

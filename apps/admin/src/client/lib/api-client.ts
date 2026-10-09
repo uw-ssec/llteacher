@@ -58,6 +58,8 @@ import type {
   ProvisionCourseResponse,
   AddCourseInstructorBody,
   AddCourseInstructorResponse,
+  RemoveCourseInstructorsBody,
+  RemoveCourseInstructorsResponse,
   PlatformCourseListResponse,
 } from "@llteacher/ui/api";
 
@@ -244,6 +246,12 @@ export const apiClient = {
       request<AddCourseInstructorResponse>(
         `/api/platform/courses/${encode(courseId)}/instructors`,
         { method: "POST", body: JSON.stringify(body) },
+        opts,
+      ),
+    removeInstructors: (courseId: string, body: RemoveCourseInstructorsBody, opts: RequestOptions) =>
+      request<RemoveCourseInstructorsResponse>(
+        `/api/platform/courses/${encode(courseId)}/instructors`,
+        { method: "PATCH", body: JSON.stringify(body) },
         opts,
       ),
     list: (opts: RequestOptions) =>

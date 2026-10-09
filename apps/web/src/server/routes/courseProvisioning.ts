@@ -2,6 +2,8 @@ import type { Context } from "hono";
 import type {
   AddCourseInstructorBody,
   AddCourseInstructorResponse,
+  RemoveCourseInstructorsBody,
+  RemoveCourseInstructorsResponse,
   PlatformCourseListResponse,
   ProvisionCourseBody,
   ProvisionCourseResponse,
@@ -11,7 +13,8 @@ import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import type { AppEnv } from "../context";
 import type { AuthContext } from "../middleware/roles";
-import { addInstructorToCourse, isValidInstructorEmail, provisionInstructorCourse } from "../repositories/courseProvisioning";
+import { addInstructorToCourse, isValidInstructorEmail, provisionInstructorCourse, removeInstructorsFromCourse } from "../repositories/courseProvisioning";
+import { getDeploymentOrganization } from "../repositories/organizations";
 import { listPlatformCourses } from "../repositories/platformListings";
 import { unsafeOrgScope } from "../repositories/scope";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
@@ -120,4 +123,34 @@ export async function addCourseInstructorHandler(c: Context<AppEnv>) {
     membershipAdded: result.membershipAdded,
   } satisfies AddCourseInstructorResponse;
   return result.membershipAdded ? c.json(payload, 201) : c.json(payload, 200);
+}
+
+export async function removeCourseInstructorsHandler(c: Context<AppEnv>) {
+  const auth = c.get("authContext") as AuthContext | undefined;
+  if (!auth?.isSuperAdmin) return c.json({ error: "Super admin access required" }, 403);
+  const courseId = c.req.param("courseId");
+  if (!courseId) return c.json({ error: "Course not found" }, 404);
+  let raw: unknown;
+  try { raw = await c.req.json(); } catch { return c.json({ error: "Request body must be valid JSON" }, 400); }
+  if (!raw || typeof raw !== "object") return c.json({ error: "Invalid instructor selection" }, 400);
+  const { removeUserIds } = raw as Partial<RemoveCourseInstructorsBody>;
+  if (!Array.isArray(removeUserIds) || removeUserIds.length === 0 || removeUserIds.length > 100
+    || removeUserIds.some((id) => typeof id !== "string" || id.trim() === "")
+    || new Set(removeUserIds).size !== removeUserIds.length) {
+    return c.json({ error: "Select one or more distinct instructors" }, 400);
+  }
+  const db = makeDb(c.env.DATABASE_URL);
+  const organization = await getDeploymentOrganization(db);
+  if (!organization) return c.json({ error: "Course not found" }, 404);
+  const result = await removeInstructorsFromCourse(db, unsafeOrgScope(organization.id), courseId, removeUserIds);
+  if (result.status === "course_missing") return c.json({ error: "Course not found" }, 404);
+  if (result.status === "invalid_selection") return c.json({ error: "Instructor assignments changed. Reload and try again." }, 409);
+  await Promise.all(result.removed.map((membership) => auditBestEffort(db, [unsafeOrgScope(result.organizationId)], {
+    actorUserId: auth.session.userId,
+    action: AUDIT_ACTIONS.COURSE_INSTRUCTOR_REMOVED,
+    targetType: AUDIT_TARGET_TYPES.MEMBERSHIP,
+    targetId: membership.membershipId,
+    requestMetadata: { courseId, instructorUserId: membership.userId },
+  })));
+  return c.json({ removedUserIds: result.removed.map((membership) => membership.userId) } satisfies RemoveCourseInstructorsResponse);
 }

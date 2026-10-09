@@ -5,8 +5,9 @@ import type { Db } from "../../db/client";
 import { courseMemberships, courses, organizations, users } from "../../db/schema";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
-import { addInstructorToCourse, provisionInstructorCourse } from "./courseProvisioning";
+import { addInstructorToCourse, provisionInstructorCourse, removeInstructorsFromCourse } from "./courseProvisioning";
 import { grantPlatformInstructor } from "./users";
+import { unsafeOrgScope } from "./scope";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 
@@ -194,6 +195,46 @@ describe.skipIf(!DATABASE_URL)("provisionInstructorCourse atomicity (real DB)", 
       first.instructor.userId,
       second.status === "assigned" ? second.instructor.userId : "",
     ].sort());
+  });
+
+  it("removes selected instructors only from one course, retaining their platform grant and other course", async () => {
+    const email = `prof-removal-${suffix}@uw.edu`;
+    const first = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: email, title: "First removal fixture", code: `REMOVE-1-${suffix}`, term: "Autumn 2026",
+    });
+    const second = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: email, title: "Second removal fixture", code: `REMOVE-2-${suffix}`, term: "Winter 2027",
+    });
+    expect(first.status).toBe("created");
+    expect(second.status).toBe("created");
+    if (first.status !== "created" || second.status !== "created") return;
+
+    const result = await removeInstructorsFromCourse(db, unsafeOrgScope(deploymentOrgId), first.course.id, [first.instructor.userId]);
+    expect(result).toMatchObject({ status: "removed", removed: [{ userId: first.instructor.userId, membershipId: first.membershipId }] });
+    const memberships = await db.select({ courseId: courseMemberships.courseId, droppedAt: courseMemberships.droppedAt })
+      .from(courseMemberships).where(eq(courseMemberships.userId, first.instructor.userId));
+    expect(memberships.find((row) => row.courseId === first.course.id)?.droppedAt).not.toBeNull();
+    expect(memberships.find((row) => row.courseId === second.course.id)?.droppedAt).toBeNull();
+    const [person] = await db.select({ grantedAt: users.platformInstructorGrantedAt })
+      .from(users).where(eq(users.id, first.instructor.userId));
+    expect(person?.grantedAt).not.toBeNull();
+  });
+
+  it("rejects a stale batch without removing any current instructors", async () => {
+    const first = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-stale-${suffix}@uw.edu`, title: "Stale removal fixture",
+      code: `REMOVE-STALE-${suffix}`, term: "Autumn 2026",
+    });
+    expect(first.status).toBe("created");
+    if (first.status !== "created") return;
+
+    expect(await removeInstructorsFromCourse(db, unsafeOrgScope(deploymentOrgId), first.course.id, [first.instructor.userId, crypto.randomUUID()]))
+      .toEqual({ status: "invalid_selection" });
+    const [membership] = await db.select({ droppedAt: courseMemberships.droppedAt })
+      .from(courseMemberships).where(eq(courseMemberships.id, first.membershipId));
+    expect(membership?.droppedAt).toBeNull();
+    expect(await removeInstructorsFromCourse(db, unsafeOrgScope(deploymentOrgId), crypto.randomUUID(), [first.instructor.userId]))
+      .toEqual({ status: "course_missing" });
   });
 
   it("is idempotent for an active instructor and restores a dropped membership", async () => {

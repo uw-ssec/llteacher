@@ -191,6 +191,16 @@ describe("request shapes (#33)", () => {
     expect(result).toEqual({ instructor: { userId: "u2", email: "second@uw.edu" }, membershipAdded: true });
   });
 
+  it("saves course instructor removals as a batch", async () => {
+    const mock = stub(() => json({ removedUserIds: ["u1"] }));
+    const result = await apiClient.platformCourses.removeInstructors("course/one", { removeUserIds: ["u1"] }, opts);
+    expect(mock.mock.calls[0]).toEqual([
+      "/api/platform/courses/course%2Fone/instructors",
+      expect.objectContaining({ method: "PATCH", body: '{"removeUserIds":["u1"]}' }),
+    ]);
+    expect(result).toEqual({ removedUserIds: ["u1"] });
+  });
+
   it("encodes path segments so an id cannot escape its position", async () => {
     const mock = stub(() => json({ membershipId: "m" }));
     await apiClient.tas.remove("c/1", "../../admin", opts);

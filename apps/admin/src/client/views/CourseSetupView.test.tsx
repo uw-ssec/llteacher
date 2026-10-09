@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { CourseSetupView } from "./CourseSetupView";
 
 afterEach(() => {
@@ -102,6 +102,56 @@ describe("adding instructors to an existing course", () => {
     expect((await within(first.row).findByRole("status")).textContent).toContain("grace@uw.edu");
     expect((within(other.form).getByRole("textbox") as HTMLInputElement).value).toBe("third@uw.edu");
     expect(within(other.row).queryByRole("status")).toBeNull();
+  });
+});
+
+describe("editing instructors on a course", () => {
+  const course = {
+    id: "course-1", title: "Statistics", code: "STAT 311", term: "Autumn 2026", status: "active",
+    instructors: [{ userId: "u1", email: "ada@uw.edu" }, { userId: "u2", email: "grace@uw.edu" }],
+  };
+
+  it("marks instructors for removal, allows undo, and saves only selected course memberships", async () => {
+    let listCalls = 0;
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === "/api/platform/courses" && init?.method === "GET") {
+        listCalls += 1;
+        return new Response(JSON.stringify({ courses: [{ ...course, instructors: listCalls === 1 ? course.instructors : [course.instructors[1]] }] }), { status: 200 });
+      }
+      if (String(input) === "/api/platform/courses/course-1/instructors" && init?.method === "PATCH") {
+        return new Response(JSON.stringify({ removedUserIds: ["u1"] }), { status: 200 });
+      }
+      throw new Error("Unexpected request");
+    });
+    vi.stubGlobal("fetch", fetch);
+    render(<CourseSetupView />);
+    const row = (await screen.findByRole("rowheader", { name: "Statistics" })).closest("tr")!;
+    fireEvent.click(within(row).getByRole("button", { name: "Edit instructors for Statistics" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Remove ada@uw.edu" }));
+    expect(within(row).getByText("ada@uw.edu").closest("s")).toBeTruthy();
+    fireEvent.click(within(row).getByRole("button", { name: "Undo removal of ada@uw.edu" }));
+    expect(within(row).getByText("ada@uw.edu").closest("s")).toBeNull();
+    fireEvent.click(within(row).getByRole("button", { name: "Remove ada@uw.edu" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Save instructor changes" }));
+    await waitFor(() => expect(within(row).queryByText("ada@uw.edu")).toBeNull());
+    expect(within(row).getByText("grace@uw.edu")).toBeTruthy();
+    expect(fetch.mock.calls.find(([, init]) => init?.method === "PATCH")?.[1]?.body)
+      .toBe('{"removeUserIds":["u1"]}');
+  });
+
+  it("keeps pending removals visible when saving fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "PATCH"
+        ? new Response(JSON.stringify({ error: "Cannot update instructors" }), { status: 409 })
+        : new Response(JSON.stringify({ courses: [course] }), { status: 200 }),
+    ));
+    render(<CourseSetupView />);
+    const row = (await screen.findByRole("rowheader", { name: "Statistics" })).closest("tr")!;
+    fireEvent.click(within(row).getByRole("button", { name: "Edit instructors for Statistics" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Remove ada@uw.edu" }));
+    fireEvent.click(within(row).getByRole("button", { name: "Save instructor changes" }));
+    expect((await within(row).findByRole("alert")).textContent).toContain("Cannot update instructors");
+    expect(within(row).getByText("ada@uw.edu").closest("s")).toBeTruthy();
   });
 });
 

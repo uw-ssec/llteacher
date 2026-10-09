@@ -46,6 +46,7 @@ export const AUDIT_ACTIONS = {
   COURSE_CREATED: "course.created",
   PLATFORM_INSTRUCTOR_GRANTED: "user.platform_instructor_granted",
   COURSE_INSTRUCTOR_ADDED: "membership.course_instructor_added",
+  COURSE_INSTRUCTOR_REMOVED: "membership.course_instructor_removed",
   HOMEWORK_PUBLISHED: "homework.published",
   HOMEWORK_UNPUBLISHED: "homework.unpublished",
   HOMEWORK_HIDDEN: "homework.hidden",

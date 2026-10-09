@@ -29,8 +29,8 @@ function fillEmail(value: string) {
 describe("AddInstructorView (#316)", () => {
   it("lists every platform-approved instructor with sign-in state and assigned-course count", async () => {
     stubFetch(() => { throw new Error("unexpected mutation"); }, [
-      { userId: "u-signed-in", email: "ada@uw.edu", status: "signed_in", grantedAt: "2026-01-02T00:00:00Z", assignedCourseCount: 2 },
-      { userId: "u-pending", email: "grace@uw.edu", status: "pending", grantedAt: "2026-01-03T00:00:00Z", assignedCourseCount: 0 },
+      { userId: "u-signed-in", email: "ada@uw.edu", status: "signed_in", grantedAt: "2026-01-02T00:00:00Z", assignedCourseCount: 2, assignedCourses: [{ code: "STAT 311", term: "Autumn 2026" }, { code: "MATH 124", term: "Winter 2027" }] },
+      { userId: "u-pending", email: "grace@uw.edu", status: "pending", grantedAt: "2026-01-03T00:00:00Z", assignedCourseCount: 0, assignedCourses: [] },
     ]);
 
     render(<AddInstructorView />);
@@ -39,6 +39,8 @@ describe("AddInstructorView (#316)", () => {
     expect(screen.getByRole("rowheader", { name: "ada@uw.edu" })).toBeTruthy();
     expect(screen.getByRole("cell", { name: "Signed in" })).toBeTruthy();
     expect(screen.getByRole("cell", { name: "2" })).toBeTruthy();
+    expect(screen.getByText("STAT 311")).toBeTruthy();
+    expect(screen.getByText("MATH 124")).toBeTruthy();
     expect(screen.getByRole("rowheader", { name: "grace@uw.edu" })).toBeTruthy();
     expect(screen.getByRole("cell", { name: "Pending" })).toBeTruthy();
   });

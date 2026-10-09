@@ -21,6 +21,10 @@ const props = {
  *  reproducing FUN-001 exactly -- a TA shown a nav entry whose every request
  *  403s, which is the precise defect #172 exists to remove. */
 describe("AdminSidebar authoring affordances (#172)", () => {
+  it("does not show a development port label in the portal", () => {
+    render(<AdminSidebar {...props} canAuthor />);
+    expect(screen.queryByText(/port 2312/i)).toBeNull();
+  });
   it("hides the TA-permissions entry and quick actions from a non-author", () => {
     render(<AdminSidebar {...props} canAuthor={false} />);
 
