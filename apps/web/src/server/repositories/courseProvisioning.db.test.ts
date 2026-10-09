@@ -273,6 +273,26 @@ describe.skipIf(!DATABASE_URL)("provisionInstructorCourse atomicity (real DB)", 
     expect(await db.select({ id: users.id }).from(users).where(eq(users.emailBlindIndex, blindIndex))).toEqual([]);
   });
 
+  it("rejects a malformed institutional email without creating any authority", async () => {
+    const provisioned = await provisionInstructorCourse(db, cipher, actorUserId, {
+      instructorEmail: `prof-malformed-owner-${suffix}@uw.edu`,
+      title: "Malformed Instructor Domain",
+      code: `MALFORMED-${suffix}`,
+      term: "Spring 2027",
+    });
+    expect(provisioned.status).toBe("created");
+    if (provisioned.status !== "created") return;
+    const email = `prof-malformed-${suffix}@.uw.edu`;
+    const blindIndex = await cipher.computeBlindIndex(email);
+
+    expect(await addInstructorToCourse(db, cipher, actorUserId, provisioned.course.id, email))
+      .toMatchObject({ status: "invalid_email" });
+    expect(await db.select({ id: users.id }).from(users).where(eq(users.emailBlindIndex, blindIndex))).toEqual([]);
+    const memberships = await db.select({ userId: courseMemberships.userId })
+      .from(courseMemberships).where(eq(courseMemberships.courseId, provisioned.course.id));
+    expect(memberships).toEqual([{ userId: provisioned.instructor.userId }]);
+  });
+
   it("rolls back a new user and platform grant when membership insertion fails", async () => {
     const provisioned = await provisionInstructorCourse(db, cipher, actorUserId, {
       instructorEmail: `prof-rollback-owner-${suffix}@uw.edu`,

@@ -11,7 +11,7 @@ import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import type { AppEnv } from "../context";
 import type { AuthContext } from "../middleware/roles";
-import { addInstructorToCourse, provisionInstructorCourse } from "../repositories/courseProvisioning";
+import { addInstructorToCourse, isValidInstructorEmail, provisionInstructorCourse } from "../repositories/courseProvisioning";
 import { listPlatformCourses } from "../repositories/platformListings";
 import { unsafeOrgScope } from "../repositories/scope";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
@@ -86,7 +86,7 @@ export async function addCourseInstructorHandler(c: Context<AppEnv>) {
   if (!raw || typeof raw !== "object") return c.json({ error: "Invalid instructor" }, 400);
   const body = raw as Partial<AddCourseInstructorBody>;
   const instructorEmail = typeof body.instructorEmail === "string" ? body.instructorEmail.trim().toLowerCase() : "";
-  if (!/^\S+@\S+\.\S+$/.test(instructorEmail)) return c.json({ error: "Instructor email is required" }, 400);
+  if (!isValidInstructorEmail(instructorEmail)) return c.json({ error: "Invalid instructor email" }, 400);
 
   const db = makeDb(c.env.DATABASE_URL);
   const result = await addInstructorToCourse(

@@ -8,7 +8,8 @@ const provisionMock = vi.fn();
 const addInstructorMock = vi.fn();
 const auditBestEffortMock = vi.fn();
 const listPlatformCoursesMock = vi.fn();
-vi.mock("../repositories/courseProvisioning", () => ({
+vi.mock("../repositories/courseProvisioning", async (importOriginal) => ({
+  isValidInstructorEmail: (await importOriginal<typeof import("../repositories/courseProvisioning")>()).isValidInstructorEmail,
   addInstructorToCourse: (...a: unknown[]) => addInstructorMock(...a),
   provisionInstructorCourse: (...a: unknown[]) => provisionMock(...a),
 }));
@@ -221,6 +222,11 @@ describe("POST /api/platform/courses/:courseId/instructors", () => {
     {},
     { instructorEmail: "" },
     { instructorEmail: "bad" },
+    { instructorEmail: "prof@.uw.edu" },
+    { instructorEmail: "prof@sub..uw.edu" },
+    { instructorEmail: "first..last@uw.edu" },
+    { instructorEmail: "prof()@uw.edu" },
+    { instructorEmail: "prof@-sub.uw.edu" },
   ])("rejects an invalid request body", async (body) => {
     expect((await postInstructor(true, "course-1", body)).status).toBe(400);
     expect(addInstructorMock).not.toHaveBeenCalled();

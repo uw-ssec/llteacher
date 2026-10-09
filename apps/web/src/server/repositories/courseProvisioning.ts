@@ -46,6 +46,16 @@ function constraintName(error: unknown): string | undefined {
   return undefined;
 }
 
+/** A provisioned identity must have an email that can be claimed at login. */
+export function isValidInstructorEmail(email: string): boolean {
+  const [local, domain, extra] = email.split("@");
+  if (!local || !domain || extra !== undefined || /\s/.test(email)) return false;
+  if (!/^[a-z0-9.!#$%&'*+\/=?^_`{|}~-]+$/i.test(local)) return false;
+  if (local.startsWith(".") || local.endsWith(".") || local.includes("..")) return false;
+  const labels = domain.split(".");
+  return labels.length >= 2 && labels.every((label) => /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label));
+}
+
 /** Creates all local authority for a course in one PostgreSQL transaction.
  * WorkOS is intentionally absent: authentication identities are claimed on
  * first login by the same email blind index written here. */
@@ -152,6 +162,9 @@ export async function addInstructorToCourse(
   if (!organization) return { status: "course_missing" };
 
   const email = IdentityCipher.normalizeEmail(rawEmail);
+  if (!isValidInstructorEmail(email)) {
+    return { status: "invalid_email", message: "Invalid email format" };
+  }
   const domain = DomainAllowlistService.validateEmailDomain(email, organization.allowedDomains);
   if (!domain.allowed) return { status: "invalid_email", message: domain.reason ?? "Invalid email" };
 
