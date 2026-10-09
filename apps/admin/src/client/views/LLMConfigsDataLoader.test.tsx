@@ -168,6 +168,34 @@ describe("LLM config form (#31, #98)", () => {
     expect(screen.getByDisplayValue("Socratic default")).toBeTruthy();
   });
 
+  it("keeps an LLMoxie config on LLMoxie when it is edited, and creates new ones on OpenRouter", async () => {
+    const LLMOXIE = { ...DEFAULT_CONFIG, provider: "llmoxie" as const };
+    const fetchMock = stub((_url, init) => {
+      if (init?.method === "PATCH" || init?.method === "POST") {
+        return new Response(JSON.stringify({ config: LLMOXIE }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return listResponse([LLMOXIE]);
+    });
+    const sentProvider = (method: string) => {
+      const call = fetchMock.mock.calls.find(([, init]) => init?.method === method);
+      return JSON.parse(String(call![1]!.body)).provider;
+    };
+
+    renderLoader({ kind: "edit", configId: "cfg-1" });
+    await waitFor(() => screen.getByDisplayValue("Socratic default"));
+    fireEvent.click(screen.getByRole("button", { name: /Save changes/i }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(true));
+    expect(sentProvider("PATCH")).toBe("llmoxie");
+    cleanup();
+
+    renderLoader({ kind: "create" });
+    const name = await screen.findByLabelText(/^Name/i);
+    fireEvent.change(name, { target: { value: "New config" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create|Save/i }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
+    expect(sentProvider("POST")).toBe("openrouter");
+  });
+
   it("shows what the model said, and does not save when testing", async () => {
     const fetchMock = stub((url, init) => {
       if (init?.method === "POST" && url.includes("/test")) {

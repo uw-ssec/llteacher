@@ -95,6 +95,11 @@ const PROVIDERS = [
   "claude_for_education",
   "openrouter",
   "local",
+  // The platform LLMoxie gateway (#178, #332 tier 1): every org's default
+  // since migration 0035. Its endpoint comes from LLMOXIE_BASE_URL and its
+  // key from the platform, never from the instructor, so admitting it here
+  // only lets the console save the configs that already use it.
+  "llmoxie",
 ] as const;
 
 type Provider = (typeof PROVIDERS)[number];

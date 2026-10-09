@@ -27,13 +27,15 @@ export type ConfigScreen =
  *  enabled option) and the API speaks in the schema's. One translation,
  *  here, rather than the form knowing about `llm_provider` enum values.
  *
- *  "platform" maps to openrouter because that IS the platform gateway --
- *  #332's decision. When instructor-supplied credentials land (#323), this
+ *  "platform" maps to openrouter for a new config -- #332's decision. An
+ *  edit keeps the provider the config already has: the org default is on
+ *  the LLMoxie gateway (migration 0035), and saving it must not quietly move
+ *  it to OpenRouter. When instructor-supplied credentials land (#323), this
  *  is the function that grows a second branch. */
-function toWriteBody(values: LLMConfigFormValues): LlmConfigWriteBody {
+function toWriteBody(values: LLMConfigFormValues, existing?: LlmConfigPayload): LlmConfigWriteBody {
   return {
     name: values.name,
-    provider: "openrouter",
+    provider: existing?.provider ?? "openrouter",
     modelName: values.modelName,
     basePrompt: values.basePrompt,
     temperature: values.temperature,
@@ -84,9 +86,10 @@ export function LLMConfigsDataLoader({
   );
 
   const save = useCallback(
-    async (values: LLMConfigFormValues, configId: string | null) => {
+    async (values: LLMConfigFormValues, existing: LlmConfigPayload | undefined) => {
       setActionError(null);
-      const body = toWriteBody(values);
+      const body = toWriteBody(values, existing);
+      const configId = existing?.id ?? null;
       // Deliberately NOT caught here: LLMConfigFormView's own submit handler
       // turns a rejection into its inline "couldn't be saved" state and
       // keeps the form populated, which is #34's error-recovery
@@ -220,7 +223,7 @@ export function LLMConfigsDataLoader({
           siblings={fallbackChoices}
           readOnly={editing !== undefined && !canChange(editing)}
           canSetDefault={canManageOrgPool && editingShared}
-          onSave={(values) => save(values, editing?.id ?? null)}
+          onSave={(values) => save(values, editing)}
           onCancel={() => onScreenChange({ kind: "list" })}
           // Editing only: there is nothing saved to test when creating, and
           // testing unsaved form values would answer a different question
