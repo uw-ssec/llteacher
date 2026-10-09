@@ -56,6 +56,8 @@ import type {
   CreateOrganizationBody,
   ProvisionCourseBody,
   ProvisionCourseResponse,
+  AddCourseInstructorBody,
+  AddCourseInstructorResponse,
   PlatformCourseListResponse,
 } from "@llteacher/ui/api";
 
@@ -238,6 +240,12 @@ export const apiClient = {
   },
 
   platformCourses: {
+    addInstructor: (courseId: string, body: AddCourseInstructorBody, opts: RequestOptions) =>
+      request<AddCourseInstructorResponse>(
+        `/api/platform/courses/${encode(courseId)}/instructors`,
+        { method: "POST", body: JSON.stringify(body) },
+        opts,
+      ),
     list: (opts: RequestOptions) =>
       request<PlatformCourseListResponse>("/api/platform/courses", { method: "GET" }, opts),
     create: (body: ProvisionCourseBody, opts: RequestOptions) =>

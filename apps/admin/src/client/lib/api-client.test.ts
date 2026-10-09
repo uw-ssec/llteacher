@@ -179,6 +179,18 @@ describe("cancellation (#33)", () => {
 });
 
 describe("request shapes (#33)", () => {
+  it("adds a course instructor using an encoded course ID and JSON body", async () => {
+    const mock = stub(() => json({
+      instructor: { userId: "u2", email: "second@uw.edu" }, membershipAdded: true,
+    }, 201));
+    const result = await apiClient.platformCourses.addInstructor("course/one", { instructorEmail: "second@uw.edu" }, opts);
+    expect(mock.mock.calls[0]).toEqual([
+      "/api/platform/courses/course%2Fone/instructors",
+      expect.objectContaining({ method: "POST", body: '{"instructorEmail":"second@uw.edu"}' }),
+    ]);
+    expect(result).toEqual({ instructor: { userId: "u2", email: "second@uw.edu" }, membershipAdded: true });
+  });
+
   it("encodes path segments so an id cannot escape its position", async () => {
     const mock = stub(() => json({ membershipId: "m" }));
     await apiClient.tas.remove("c/1", "../../admin", opts);
