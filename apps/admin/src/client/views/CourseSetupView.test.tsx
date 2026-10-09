@@ -156,6 +156,24 @@ describe("editing instructors on a course", () => {
 });
 
 describe("CourseSetupView", () => {
+  it("uses the purple primary treatment for instructor-management actions", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ courses: [{
+      id: "course-1",
+      title: "Introduction to Statistics",
+      code: "STAT 311",
+      term: "Autumn 2026",
+      status: "active",
+      instructors: [{ userId: "u1", email: "ada@uw.edu" }],
+    }] }), { status: 200 })));
+
+    render(<CourseSetupView />);
+
+    const add = await screen.findByRole("button", { name: "Add instructor to Introduction to Statistics" });
+    const edit = screen.getByRole("button", { name: "Edit instructors for Introduction to Statistics" });
+    expect(add.classList.contains("admin-button--primary")).toBe(true);
+    expect(edit.classList.contains("admin-button--primary")).toBe(true);
+  });
+
   it("lists every course with status and all assigned instructors", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

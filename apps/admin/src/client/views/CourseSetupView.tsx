@@ -45,7 +45,7 @@ function AddCourseInstructor({ course, onAdded }: { course: PlatformCourseListIt
         <button className="admin-button admin-button--ghost" type="button" disabled={busy} onClick={() => setOpen(false)}>Cancel</button>
       </div>
       {error && <div className="admin-alert" role="alert">{error}</div>}
-    </form> : <button className="admin-button" type="button" aria-label={`Add instructor to ${course.title}`} onClick={() => setOpen(true)}>Add instructor</button>}
+    </form> : <button className="admin-button admin-button--primary" type="button" aria-label={`Add instructor to ${course.title}`} onClick={() => setOpen(true)}>Add instructor</button>}
     {success && <p className="admin-form-hint" role="status">{success}</p>}
   </>;
 }
@@ -104,7 +104,7 @@ function CourseRow({ course, onChanged }: { course: PlatformCourseListItem; onCh
         <button className="admin-button admin-button--ghost" type="button" disabled={busy} onClick={() => {
           setEditing(false); setRemoveUserIds([]); setError(null);
         }}>Cancel edit</button>
-      </div> : <button className="admin-button" type="button" aria-label={`Edit instructors for ${course.title}`}
+      </div> : <button className="admin-button admin-button--primary" type="button" aria-label={`Edit instructors for ${course.title}`}
         onClick={() => setEditing(true)}>Edit instructors</button>}
       {error && <div className="admin-alert" role="alert">{error}</div>}
     </td>
