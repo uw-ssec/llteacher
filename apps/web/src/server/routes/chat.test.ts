@@ -4511,6 +4511,32 @@ describe("TOOLS.markSectionComplete (#168)", () => {
   });
 });
 
+// Subject figure packs (toolkits.ts): a pack's tools are offered ONLY when
+// the instructor enabled that pack on the LLM config. Subject-neutral
+// tools are unaffected.
+describe("toolsForConversation: subject figure packs", () => {
+  const ECON = ["showMacroModel", "showGdpComposition", "showMultiplier", "showLaborForce", "showInflation"];
+
+  it("offers no pack tools when no pack is enabled (the default)", () => {
+    for (const tools of [toolsForConversation("section-1"), toolsForConversation("section-1", { genuiToolkits: [] })]) {
+      for (const name of ECON) expect(tools[name], name).toBeUndefined();
+      expect(tools.showDefinition).toBeDefined();
+      expect(tools.showWorkedSteps).toBeDefined();
+    }
+  });
+
+  it("offers exactly the enabled pack's tools", () => {
+    const tools = toolsForConversation("section-1", { genuiToolkits: ["economics"] });
+    for (const name of ECON) expect(tools[name], name).toBeDefined();
+    expect(tools.showDiagnosticAccuracy).toBeUndefined();
+  });
+
+  it("ignores an unknown pack id rather than enabling anything", () => {
+    const tools = toolsForConversation("section-1", { genuiToolkits: ["astrology"] });
+    for (const name of ECON) expect(tools[name], name).toBeUndefined();
+  });
+});
+
 // #168: toolsForConversation is the actual mechanism that makes
 // section-kind-only gating real -- a genuinely different `tools`
 // object/subset per request, not just TOOLS.markSectionComplete's own

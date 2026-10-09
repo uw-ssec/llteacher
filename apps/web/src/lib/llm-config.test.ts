@@ -23,6 +23,7 @@ const baseConfig: ResolvedLLMConfig = {
   maxCompletionTokens: 1000,
   credentialId: null,
   knowledgeEnabled: true,
+  genuiToolkits: [],
   fallbackLlmConfigId: null,
   basePrompt: "",
   pricePerMillionInputTokens: null,

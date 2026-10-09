@@ -1,8 +1,12 @@
 ## 2026-10-09
 * **Update**: Linked `decisions/course-instructor-editing.md` to `decisions/course-membership-roles.md` (Course removal preserves the per-course role model and keeps platform recognition separate from membership authority.).
 * **Creation**: Documented concept `decisions/course-instructor-editing.md` (Course instructor edits are scoped membership changes).
+* **Update**: Updated concept `decisions/generative-figures-computed.md` (NMETH 527 clinical informatics pack; screening and test evaluation split into its own pack).
 
 ## 2026-10-08
+* **Update**: Updated concept `decisions/generative-figures-computed.md` (subject packs opt-in per LLM config; clinical informatics replaces bioinformatics; statistics pack and knowledge check).
+* **Update**: Linked `decisions/generative-figures-computed.md` to `decisions/messages-parts-jsonb.md` (Figures persist as tool-<name> parts in messages.parts and replay through output-available; RENDERABLE_TOOL_NAMES gates which parts count as renderable on replay.).
+* **Creation**: Documented concept `decisions/generative-figures-computed.md` (Subject figures compute what they assert; the model supplies only arguments).
 * **Update**: Linked `bugs/hint-test-initial-hydration-race.md` to `bugs/chat-rerender-per-token.md` (Both depend on the lifecycle and rendering of the real streaming chat surface.).
 * **Creation**: Documented concept `bugs/hint-test-initial-hydration-race.md` (Hint suppression tests must wait for initial history).
 * **Update**: Updated concept `decisions/design-system-lint.md`.

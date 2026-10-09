@@ -37,6 +37,7 @@ import remarkGfm from "remark-gfm";
 import { PageHeader } from "../components/PageHeader";
 import { AdminNotice } from "../components/AdminNotice";
 import type { LlmConfigPayload } from "@llteacher/ui/api";
+import { TOOLKITS } from "@llteacher/ui/generative/toolkits";
 
 export interface LLMConfigFormValues {
   name: string;
@@ -53,6 +54,9 @@ export interface LLMConfigFormValues {
   /** Whether a tutor on this config may search the course knowledge base.
    *  What the tutor is told about searching lives on the Knowledge tab. */
   knowledgeEnabled: boolean;
+  /** Subject figure packs the tutor may draw on this config. None by
+   *  default: each pack is the instructor's choice for their subject. */
+  genuiToolkits: string[];
 }
 
 export interface LLMConfigFormViewProps {
@@ -140,6 +144,7 @@ export function LLMConfigFormView({
     isActive: initialConfig?.isActive ?? true,
     fallbackLlmConfigId: initialConfig?.fallbackLlmConfigId ?? null,
     knowledgeEnabled: initialConfig?.knowledgeEnabled ?? true,
+    genuiToolkits: initialConfig?.genuiToolkits ?? [],
   });
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -535,6 +540,34 @@ export function LLMConfigFormView({
             </span>
           </label>
         </fieldset>
+        </fieldset>
+
+        <fieldset className="admin-form-group">
+          <legend>Subject figures</legend>
+          <p className="admin-form-hint">
+            Optional. Pick the packs that fit your course and the tutor can draw those figures in a chat;
+            it is never offered a pack you leave off. Definitions, worked steps and knowledge checks are always available.
+          </p>
+          {TOOLKITS.map((toolkit) => (
+            <label key={toolkit.id} className="admin-form-check">
+              <input
+                type="checkbox"
+                checked={values.genuiToolkits.includes(toolkit.id)}
+                onChange={(e) =>
+                  set(
+                    "genuiToolkits",
+                    e.target.checked
+                      ? TOOLKITS.map((t) => t.id).filter((id) => id === toolkit.id || values.genuiToolkits.includes(id))
+                      : values.genuiToolkits.filter((id) => id !== toolkit.id),
+                  )
+                }
+              />
+              <span className="admin-form-check__label">
+                {toolkit.label}
+                <span>{toolkit.description}</span>
+              </span>
+            </label>
+          ))}
         </fieldset>
 
         {saveError && <AdminNotice eyebrow="Not saved" title={saveError} />}

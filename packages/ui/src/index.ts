@@ -68,6 +68,11 @@ export {
   CodeExecution,
   renderTextWithCode,
   SectionCompleteSuggestion,
+  KnowledgeCheck,
+  collectKnowledgeCheckAnswers,
+  knowledgeCheckAnswerText,
+  KNOWLEDGE_CHECK_PART_TYPE,
+  TOOLKITS,
 } from "./generative";
 export type {
   DefinitionCardProps,

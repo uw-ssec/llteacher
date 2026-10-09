@@ -122,6 +122,9 @@ export interface ResolvedLLMConfig {
   markCompleteInstruction: string | null;
   /** Whether the tutor may search the course knowledge base on this config. */
   knowledgeEnabled: boolean;
+  /** Subject figure packs enabled on this config (ids from
+   *  @llteacher/ui/generative/toolkits); empty means none. */
+  genuiToolkits: string[];
 }
 
 const LLM_CONFIG_COLUMNS = {
@@ -137,6 +140,7 @@ const LLM_CONFIG_COLUMNS = {
   fallbackLlmConfigId: llmConfigs.fallbackLlmConfigId,
   basePrompt: llmConfigs.basePrompt,
   knowledgeEnabled: llmConfigs.knowledgeEnabled,
+  genuiToolkits: llmConfigs.genuiToolkits,
   scopeCourseId: llmConfigs.scopeCourseId,
 } as const;
 
