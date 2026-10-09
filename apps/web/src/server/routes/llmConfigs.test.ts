@@ -317,6 +317,18 @@ describe("POST/PATCH validation (#31)", () => {
     expect((await post({ ...VALID_BODY, knowledgeEnabled: "no" })).status).toBe(400);
   });
 
+  it("stores subject figure packs, normalised, and refuses an unknown pack by name", async () => {
+    await post({ ...VALID_BODY, genuiToolkits: ["statistics", "economics", "economics"] });
+    // Catalog order, de-duplicated.
+    expect(createMock.mock.calls.at(-1)![2]).toMatchObject({ genuiToolkits: ["economics", "statistics"] });
+    await post(VALID_BODY);
+    expect(createMock.mock.calls.at(-1)![2].genuiToolkits).toBeUndefined();
+    const unknown = await post({ ...VALID_BODY, genuiToolkits: ["economics", "astrology"] });
+    expect(unknown.status).toBe(400);
+    expect(await unknown.json()).toEqual({ error: "Unknown subject figure pack: astrology" });
+    expect((await post({ ...VALID_BODY, genuiToolkits: "economics" })).status).toBe(400);
+  });
+
   it("creates and audits against the course's org", async () => {
     const res = await post(VALID_BODY);
     expect(res.status).toBe(201);

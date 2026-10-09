@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import { MessageMarkdown, renderToolPart, isToolPart, SourcesList } from "@llteacher/ui";
+import { MessageMarkdown, renderToolPart, isToolPart, SourcesList, collectKnowledgeCheckAnswers, knowledgeCheckAnswerText, KNOWLEDGE_CHECK_PART_TYPE } from "@llteacher/ui";
+import type { ToolPartHandlers } from "@llteacher/ui";
 import { sourcesFromParts } from "../sourcesFromParts";
 import type { MessageData, RCodeResult } from "@llteacher/ui";
 
@@ -126,7 +127,15 @@ function buildMessageData(
   chatStatus: ReturnType<typeof useChat>["status"],
   stoppedMessageId: string | null | undefined,
   onRunRCode?: (code: string) => Promise<RCodeResult>,
+  onAnswerKnowledgeCheck?: NonNullable<ToolPartHandlers["knowledgeCheck"]>["onAnswer"],
 ): MessageData[] {
+  /* #36: every knowledge check already answered in this transcript, read
+     from the answers' own data parts -- so a check stays locked across a
+     reload, not just in this tab's state. */
+  const knowledgeCheck = {
+    answers: collectKnowledgeCheckAnswers(aiMessages),
+    onAnswer: onAnswerKnowledgeCheck,
+  };
   /* #397: the persisted row's timestamp, riding on UIMessage.metadata (set in
      fetchConversationHistory, App.tsx). A turn the student has only just
      sent, or one still streaming, has no persisted row yet and therefore no
@@ -193,7 +202,7 @@ function buildMessageData(
                union can't statically prove a `tool-*` part carries
                `input`/`state`. */
             if (!isToolPart(part)) return null;
-            return renderToolPart(part, `tool-${m.id}-${i}`, { onRunRCode });
+            return renderToolPart(part, `tool-${m.id}-${i}`, { onRunRCode, knowledgeCheck });
           })}
           {/* #41: every concept the tutor opened this turn, once the reply is complete. */}
           {!isStreaming && <SourcesList sources={sourcesFromParts(m.parts)} />}
@@ -880,7 +889,7 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
      BEFORE calling this, so it never runs for a blocked send -- matching
      the original handlers, where the guard was the very first line before
      any of that work. */
-  const send = (text: string, extraBody?: Record<string, unknown>) => {
+  const send = (text: string, extraBody?: Record<string, unknown>, dataParts?: Array<{ type: `data-${string}`; data: unknown }>) => {
     // A fresh send supersedes any previous failure -- its text is either
     // being re-sent right now or was deliberately replaced by the student.
     // Unlike a `resetKey` change (#419), a fresh send genuinely retires the
@@ -913,9 +922,30 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     // #441: this send's dispatch key, unconditionally overwritten here --
     // see dispatchedKeyRef's own doc comment above.
     dispatchedKeyRef.current = resetKey;
-    sendMessage({ text }, { body: { ...buildSendBody(), ...extraBody } });
+    sendMessage(
+      dataParts?.length ? { parts: [{ type: "text", text }, ...dataParts] } : { text },
+      { body: { ...buildSendBody(), ...extraBody } },
+    );
     setStoppedMessageId(null);
   };
+
+  /* #36: a knowledge-check answer is an ordinary turn whose message also
+     carries the structured response. Refused (rejects, so the check shows
+     its error) while another turn is in flight. The server validates it
+     against the stored check and rebuilds both parts (knowledgeCheckAnswer.ts). */
+  const sendKnowledgeCheckAnswer = useCallback(
+    async (toolCallId: string, question: string, options: string[], selectedIndex: number) => {
+      if (!canSendRef.current) throw new Error("another turn is in flight");
+      sendRef.current(knowledgeCheckAnswerText(question, options, selectedIndex), undefined, [
+        { type: KNOWLEDGE_CHECK_PART_TYPE as `data-${string}`, data: { toolCallId, selectedIndex } },
+      ]);
+    },
+    [],
+  );
+  const sendRef = useRef(send);
+  sendRef.current = send;
+  const canSendRef = useRef(canSend);
+  canSendRef.current = canSend;
 
   /* #274, #317 review, #352: a client-side escape hatch for a turn that's
      merely slow -- marks whichever assistant message was on screen at the
@@ -932,8 +962,8 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
      this only recomputes when this surface's own messages/status/stopped-id
      actually change. */
   const messages = useMemo(
-    () => buildMessageData(aiMessages, status, stoppedMessageId, runRCode),
-    [aiMessages, status, stoppedMessageId, runRCode],
+    () => buildMessageData(aiMessages, status, stoppedMessageId, runRCode, sendKnowledgeCheckAnswer),
+    [aiMessages, status, stoppedMessageId, runRCode, sendKnowledgeCheckAnswer],
   );
 
   return {

@@ -12,6 +12,8 @@
     "./styles.css": "./styles.css",
     "./auth/courseRole": "./src/auth/courseRole.ts",
     "./generative/renderableTools": "./src/generative/renderableTools.ts",
+    "./generative/toolkits": "./src/generative/toolkits.ts",
+    "./generative/knowledgeCheck": "./src/generative/knowledgeCheck.ts",
     "./api": "./src/api/types.ts"
   },
   "scripts": {

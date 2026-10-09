@@ -1,0 +1,1 @@
+ALTER TABLE "llm_configs" ADD COLUMN "genui_toolkits" text[] DEFAULT '{}'::text[] NOT NULL;
