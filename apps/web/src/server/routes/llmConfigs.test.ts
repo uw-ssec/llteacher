@@ -317,6 +317,11 @@ describe("POST/PATCH validation (#31)", () => {
     expect((await post({ ...VALID_BODY, knowledgeEnabled: "no" })).status).toBe(400);
   });
 
+  it("saves a config on the platform LLMoxie gateway, every org's default provider", async () => {
+    expect((await post({ ...VALID_BODY, provider: "llmoxie" })).status).toBe(201);
+    expect(createMock.mock.calls.at(-1)![2]).toMatchObject({ provider: "llmoxie" });
+  });
+
   it("creates and audits against the course's org", async () => {
     const res = await post(VALID_BODY);
     expect(res.status).toBe(201);
