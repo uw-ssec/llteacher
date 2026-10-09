@@ -37,7 +37,9 @@ export function AddInstructorView() {
   const instructorsResource = useApiResource((opts) => apiClient.platformInstructors.list(opts), []);
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
+  const [removingUserId, setRemovingUserId] = useState<string | null>(null);
   const [result, setResult] = useState<{ status: "granted"; grantedAt: string } | null>(null);
+  const [revokeResult, setRevokeResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   if (!abortRef.current) abortRef.current = new AbortController();
@@ -75,6 +77,26 @@ export function AddInstructorView() {
     } finally {
       dispose();
       setBusy(false);
+    }
+  }
+
+  async function revoke(instructor: NonNullable<typeof instructorsResource.data>["instructors"][number]) {
+    if (!window.confirm(
+      `Remove instructor ${instructor.email}?\n\nThis revokes their platform access and all course memberships.`,
+    )) return;
+    setRemovingUserId(instructor.userId);
+    setError(null);
+    setRevokeResult(null);
+    try {
+      const outcome = await apiClient.platformInstructors.revoke(instructor.userId, { signal: null });
+      setRevokeResult(
+        `${instructor.email} removed. Platform access revoked and ${outcome.removedMembershipCount} course ${outcome.removedMembershipCount === 1 ? "membership" : "memberships"} removed.`,
+      );
+      instructorsResource.reload();
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "Could not remove the instructor.");
+    } finally {
+      setRemovingUserId(null);
     }
   }
 
@@ -134,6 +156,7 @@ export function AddInstructorView() {
             {OUTCOME_COPY.granted}
           </p>
         )}
+        {revokeResult && <p className="admin-form-hint" role="status">{revokeResult}</p>}
       </section>
 
       <section aria-labelledby="all-instructors-heading">
@@ -143,13 +166,16 @@ export function AddInstructorView() {
         {instructorsResource.data?.instructors.length === 0 ? <ViewEmpty title="No instructors yet" body="Grant instructor access above or create a course shell." /> : null}
         {instructorsResource.data?.instructors.length ? <table className="admin-table">
           <caption className="admin-visually-hidden">Everyone with instructor portal access</caption>
-          <thead><tr><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Access granted</th><th scope="col">Assigned courses</th><th scope="col">Course codes</th></tr></thead>
+          <thead><tr><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Access granted</th><th scope="col">Assigned courses</th><th scope="col">Course codes</th><th scope="col">Actions</th></tr></thead>
           <tbody>{instructorsResource.data.instructors.map((instructor) => <tr key={instructor.userId}>
             <th scope="row">{instructor.email}</th>
             <td>{instructor.status === "signed_in" ? "Signed in" : "Pending"}</td>
             <td>{new Date(instructor.grantedAt).toLocaleDateString()}</td>
             <td>{instructor.assignedCourseCount}</td>
             <td>{instructor.assignedCourses?.length ? instructor.assignedCourses.map((course) => <div key={`${course.code}-${course.term}`}>{course.code} <span className="admin-form-hint">({course.term})</span></div>) : "—"}</td>
+            <td className="admin-table__actions"><button type="button" className="admin-link-button admin-link-button--danger"
+              aria-label={`Remove instructor ${instructor.email}`} disabled={removingUserId !== null}
+              onClick={() => void revoke(instructor)}>{removingUserId === instructor.userId ? "Removing…" : "Remove"}</button></td>
           </tr>)}</tbody>
         </table> : null}
       </section>

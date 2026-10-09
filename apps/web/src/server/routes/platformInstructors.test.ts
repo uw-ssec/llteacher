@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import { grantPlatformInstructorHandler, listPlatformInstructorsHandler } from "./platformInstructors";
+import { grantPlatformInstructorHandler, listPlatformInstructorsHandler, revokePlatformInstructorHandler } from "./platformInstructors";
 import type { AuthContext } from "../middleware/roles";
 import type { AppEnv } from "../context";
 import { fakeAuthContext } from "../testing/authContext";
@@ -10,6 +10,7 @@ const TEST_ENV = { DATABASE_URL: "ignored", BOOTSTRAP_ALLOWED_DOMAINS: "example.
 
 const grantPlatformInstructorMock = vi.fn();
 const listPlatformInstructorsMock = vi.fn();
+const revokePlatformInstructorMock = vi.fn();
 const getDeploymentOrganizationMock = vi.fn();
 const auditBestEffortMock = vi.fn();
 vi.mock("../repositories/users", () => ({
@@ -18,12 +19,19 @@ vi.mock("../repositories/users", () => ({
 vi.mock("../repositories/platformListings", () => ({
   listPlatformInstructors: (...a: unknown[]) => listPlatformInstructorsMock(...a),
 }));
+vi.mock("../repositories/courseProvisioning", () => ({
+  revokePlatformInstructor: (...a: unknown[]) => revokePlatformInstructorMock(...a),
+}));
 vi.mock("../repositories/organizations", () => ({
   getDeploymentOrganization: (...a: unknown[]) => getDeploymentOrganizationMock(...a),
 }));
 vi.mock("../utils/audit", () => ({
-  AUDIT_ACTIONS: { PLATFORM_INSTRUCTOR_GRANTED: "user.platform_instructor_granted" },
-  AUDIT_TARGET_TYPES: { USER: "user" },
+  AUDIT_ACTIONS: {
+    PLATFORM_INSTRUCTOR_GRANTED: "user.platform_instructor_granted",
+    PLATFORM_INSTRUCTOR_REVOKED: "user.platform_instructor_revoked",
+    COURSE_MEMBERSHIP_REVOKED: "membership.platform_instructor_revoked",
+  },
+  AUDIT_TARGET_TYPES: { USER: "user", MEMBERSHIP: "membership" },
   auditBestEffort: (...a: unknown[]) => auditBestEffortMock(...a),
 }));
 vi.mock("../../db/client", () => ({ makeDb: () => ({}) }));
@@ -38,6 +46,7 @@ function buildApp(authContext: AuthContext | undefined) {
   });
   app.post("/api/platform/instructors", (c) => grantPlatformInstructorHandler(c));
   app.get("/api/platform/instructors", (c) => listPlatformInstructorsHandler(c));
+  app.delete("/api/platform/instructors/:userId", (c) => revokePlatformInstructorHandler(c));
   return app;
 }
 
@@ -56,6 +65,10 @@ function post(authContext: AuthContext | undefined, body: unknown) {
   );
 }
 
+function remove(authContext: AuthContext | undefined, userId = "u-remove") {
+  return buildApp(authContext).request(`/api/platform/instructors/${userId}`, { method: "DELETE" }, TEST_ENV);
+}
+
 beforeEach(() => {
   grantPlatformInstructorMock.mockReset().mockResolvedValue({
     status: "granted",
@@ -64,6 +77,14 @@ beforeEach(() => {
     grantCreated: true,
   });
   listPlatformInstructorsMock.mockReset().mockResolvedValue([]);
+  revokePlatformInstructorMock.mockReset().mockResolvedValue({
+    status: "revoked",
+    userId: "u-remove",
+    removed: [
+      { membershipId: "m-1", courseId: "c-1", organizationId: "org-1", role: "instructor" },
+      { membershipId: "m-2", courseId: "c-2", organizationId: "org-1", role: "ta" },
+    ],
+  });
   getDeploymentOrganizationMock.mockReset().mockResolvedValue({ id: "org-1" });
   auditBestEffortMock.mockReset().mockResolvedValue(undefined);
 });
@@ -192,5 +213,37 @@ describe("GET /api/platform/instructors", () => {
 
   it("denies instructor listing to a non-super-admin", async () => {
     expect((await get(instructor())).status).toBe(403);
+  });
+});
+
+describe("DELETE /api/platform/instructors/:userId", () => {
+  it("revokes platform access and audits every removed membership", async () => {
+    const response = await remove(superAdmin());
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "revoked", removedMembershipCount: 2 });
+    expect(auditBestEffortMock.mock.calls.map((call) => call[2])).toEqual([
+      { actorUserId: "u1", action: "user.platform_instructor_revoked", targetType: "user", targetId: "u-remove", requestMetadata: { removedMembershipCount: 2 } },
+      { actorUserId: "u1", action: "membership.platform_instructor_revoked", targetType: "membership", targetId: "m-1", requestMetadata: { courseId: "c-1", userId: "u-remove", role: "instructor" } },
+      { actorUserId: "u1", action: "membership.platform_instructor_revoked", targetType: "membership", targetId: "m-2", requestMetadata: { courseId: "c-2", userId: "u-remove", role: "ta" } },
+    ]);
+  });
+
+  it("requires a replacement before revoking a course's sole instructor", async () => {
+    revokePlatformInstructorMock.mockResolvedValueOnce({
+      status: "sole_instructor",
+      courses: [{ id: "c-1", code: "STAT 311", term: "Autumn 2026" }],
+    });
+    const response = await remove(superAdmin());
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "Assign another instructor to STAT 311 (Autumn 2026) before removing this instructor.",
+    });
+    expect(auditBestEffortMock).not.toHaveBeenCalled();
+  });
+
+  it("hides absent grants and denies non-super-admins", async () => {
+    revokePlatformInstructorMock.mockResolvedValueOnce({ status: "instructor_missing" });
+    expect((await remove(superAdmin())).status).toBe(404);
+    expect((await remove(instructor())).status).toBe(403);
   });
 });

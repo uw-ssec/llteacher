@@ -27,6 +27,61 @@ function fillEmail(value: string) {
 }
 
 describe("AddInstructorView (#316)", () => {
+  it("requires confirmation before revoking platform access and every course membership", async () => {
+    const fetchMock = stubFetch(() => { throw new Error("unexpected mutation"); }, [
+      { userId: "u-remove", email: "remove@uw.edu", status: "signed_in", grantedAt: "2026-01-02T00:00:00Z", assignedCourseCount: 2, assignedCourses: [{ code: "STAT 311", term: "Autumn 2026" }, { code: "MATH 124", term: "Winter 2027" }] },
+    ]);
+    vi.stubGlobal("confirm", vi.fn(() => false));
+
+    render(<AddInstructorView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Remove instructor remove@uw.edu" }));
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringMatching(/platform access and all course memberships/i));
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "DELETE")).toBe(false);
+  });
+
+  it("revokes platform access, reports removed memberships, and reloads the table", async () => {
+    let listCalls = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/platform/instructors" && (!init?.method || init.method === "GET")) {
+        listCalls += 1;
+        return new Response(JSON.stringify({ instructors: listCalls === 1 ? [
+          { userId: "u-remove", email: "remove@uw.edu", status: "signed_in", grantedAt: "2026-01-02T00:00:00Z", assignedCourseCount: 2, assignedCourses: [{ code: "STAT 311", term: "Autumn 2026" }, { code: "MATH 124", term: "Winter 2027" }] },
+        ] : [] }), { status: 200 });
+      }
+      if (url === "/api/platform/instructors/u-remove" && init?.method === "DELETE") {
+        return new Response(JSON.stringify({ status: "revoked", removedMembershipCount: 2 }), { status: 200 });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    render(<AddInstructorView />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove instructor remove@uw.edu" }));
+
+    await waitFor(() => screen.getByText(/Platform access revoked and 2 course memberships removed/i));
+    await waitFor(() => expect(screen.queryByRole("rowheader", { name: "remove@uw.edu" })).toBeNull());
+    expect(fetchMock.mock.calls.some(([url, init]) =>
+      String(url) === "/api/platform/instructors/u-remove" && init?.method === "DELETE"
+    )).toBe(true);
+  });
+
+  it("keeps the instructor visible when a course needs a replacement first", async () => {
+    stubFetch(
+      () => new Response(JSON.stringify({ error: "Assign another instructor to STAT 311 (Autumn 2026) before removing this instructor." }), { status: 409 }),
+      [{ userId: "u-only", email: "only@uw.edu", status: "signed_in", grantedAt: "2026-01-02T00:00:00Z", assignedCourseCount: 1, assignedCourses: [{ code: "STAT 311", term: "Autumn 2026" }] }],
+    );
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    render(<AddInstructorView />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove instructor only@uw.edu" }));
+
+    await waitFor(() => screen.getByText(/Assign another instructor to STAT 311/i));
+    expect(screen.getByRole("rowheader", { name: "only@uw.edu" })).toBeTruthy();
+  });
+
   it("lists every platform-approved instructor with sign-in state and assigned-course count", async () => {
     stubFetch(() => { throw new Error("unexpected mutation"); }, [
       { userId: "u-signed-in", email: "ada@uw.edu", status: "signed_in", grantedAt: "2026-01-02T00:00:00Z", assignedCourseCount: 2, assignedCourses: [{ code: "STAT 311", term: "Autumn 2026" }, { code: "MATH 124", term: "Winter 2027" }] },

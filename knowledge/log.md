@@ -1,4 +1,5 @@
 ## 2026-10-09
+* **Update**: Updated concept `decisions/course-instructor-editing.md`.
 * **Update**: Linked `decisions/course-instructor-editing.md` to `decisions/course-membership-roles.md` (Course removal preserves the per-course role model and keeps platform recognition separate from membership authority.).
 * **Creation**: Documented concept `decisions/course-instructor-editing.md` (Course instructor edits are scoped membership changes).
 * **Update**: Updated concept `decisions/generative-figures-computed.md` (NMETH 527 clinical informatics pack; screening and test evaluation split into its own pack).

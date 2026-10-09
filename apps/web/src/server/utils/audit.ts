@@ -45,6 +45,8 @@ export const AUDIT_ACTIONS = {
    *  instructor. Canvas linking is deliberately a separate, optional event. */
   COURSE_CREATED: "course.created",
   PLATFORM_INSTRUCTOR_GRANTED: "user.platform_instructor_granted",
+  PLATFORM_INSTRUCTOR_REVOKED: "user.platform_instructor_revoked",
+  COURSE_MEMBERSHIP_REVOKED: "membership.platform_instructor_revoked",
   COURSE_INSTRUCTOR_ADDED: "membership.course_instructor_added",
   COURSE_INSTRUCTOR_REMOVED: "membership.course_instructor_removed",
   HOMEWORK_PUBLISHED: "homework.published",

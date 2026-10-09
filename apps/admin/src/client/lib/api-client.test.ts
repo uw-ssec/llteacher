@@ -179,6 +179,16 @@ describe("cancellation (#33)", () => {
 });
 
 describe("request shapes (#33)", () => {
+  it("revokes platform instructor access using an encoded user ID", async () => {
+    const mock = stub(() => json({ status: "revoked", removedMembershipCount: 2 }));
+    const result = await apiClient.platformInstructors.revoke("user/one", opts);
+    expect(mock.mock.calls[0]).toEqual([
+      "/api/platform/instructors/user%2Fone",
+      expect.objectContaining({ method: "DELETE" }),
+    ]);
+    expect(result).toEqual({ status: "revoked", removedMembershipCount: 2 });
+  });
+
   it("adds a course instructor using an encoded course ID and JSON body", async () => {
     const mock = stub(() => json({
       instructor: { userId: "u2", email: "second@uw.edu" }, membershipAdded: true,

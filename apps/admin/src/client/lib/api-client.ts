@@ -42,6 +42,7 @@ import type {
   GradeListPayload,
   GrantPlatformInstructorResultPayload,
   PlatformInstructorListResponse,
+  RevokePlatformInstructorResponse,
   KnowledgeDocumentListPayload,
   KnowledgeDocumentPayload,
   LlmConfigListPayload,
@@ -585,6 +586,12 @@ export const apiClient = {
       request<GrantPlatformInstructorResultPayload>(
         "/api/platform/instructors",
         { method: "POST", body: JSON.stringify({ email }) },
+        opts,
+      ),
+    revoke: (userId: string, opts: RequestOptions) =>
+      request<RevokePlatformInstructorResponse>(
+        `/api/platform/instructors/${encode(userId)}`,
+        { method: "DELETE" },
         opts,
       ),
   },

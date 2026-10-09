@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { Db } from "../../db/client";
 import { courseMemberships, courses, organizations, users } from "../../db/schema";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
@@ -41,6 +41,15 @@ export type RemoveCourseInstructorsResult =
   | { status: "course_missing" }
   | { status: "invalid_selection" }
   | { status: "removed"; organizationId: string; removed: Array<{ userId: string; membershipId: string }> };
+
+export type RevokePlatformInstructorResult =
+  | { status: "instructor_missing" }
+  | { status: "sole_instructor"; courses: Array<{ id: string; code: string; term: string }> }
+  | {
+      status: "revoked";
+      userId: string;
+      removed: Array<{ membershipId: string; courseId: string; organizationId: string; role: string }>;
+    };
 
 function constraintName(error: unknown): string | undefined {
   let current: unknown = error;
@@ -296,6 +305,85 @@ export async function removeInstructorsFromCourse(
     return {
       status: "removed", organizationId,
       removed: memberships.map((membership) => ({ userId: membership.userId, membershipId: membership.id })),
+    } as const;
+  });
+}
+
+/** Revokes the platform grant and soft-drops every active course membership
+ * in one transaction. A course must retain another active instructor or
+ * course admin, so a broad platform revocation cannot orphan it. */
+export async function revokePlatformInstructor(
+  db: Db,
+  userId: string,
+): Promise<RevokePlatformInstructorResult> {
+  return db.transaction(async (tx) => {
+    const [instructor] = await tx.select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.id, userId), isNotNull(users.platformInstructorGrantedAt)))
+      .for("update");
+    if (!instructor) return { status: "instructor_missing" } as const;
+
+    const memberships = await tx.select({
+      membershipId: courseMemberships.id,
+      courseId: courseMemberships.courseId,
+      organizationId: courses.organizationId,
+      code: courses.code,
+      term: courses.term,
+      role: courseMemberships.role,
+    }).from(courseMemberships)
+      .innerJoin(courses, eq(courseMemberships.courseId, courses.id))
+      .where(and(eq(courseMemberships.userId, userId), isNull(courseMemberships.droppedAt)))
+      .for("update");
+
+    const authorCourseIds = memberships
+      .filter((membership) => membership.role === "instructor" || membership.role === "admin")
+      .map((membership) => membership.courseId);
+    if (authorCourseIds.length > 0) {
+      const remainingAuthors = await tx.select({
+        courseId: courseMemberships.courseId,
+        userId: courseMemberships.userId,
+      }).from(courseMemberships)
+        .where(and(
+          inArray(courseMemberships.courseId, authorCourseIds),
+          inArray(courseMemberships.role, ["instructor", "admin"]),
+          isNull(courseMemberships.droppedAt),
+        ))
+        .for("update");
+      const coveredCourses = new Set(
+        remainingAuthors.filter((membership) => membership.userId !== userId)
+          .map((membership) => membership.courseId),
+      );
+      const orphaned = memberships
+        .filter((membership) => authorCourseIds.includes(membership.courseId) && !coveredCourses.has(membership.courseId))
+        .map(({ courseId: id, code, term }) => ({ id, code, term }));
+      if (orphaned.length > 0) return { status: "sole_instructor", courses: orphaned } as const;
+    }
+
+    const now = new Date();
+    if (memberships.length > 0) {
+      await tx.update(courseMemberships).set({
+        droppedAt: now,
+        droppedReason: null,
+        canViewSolutions: false,
+        canViewDrafts: false,
+        updatedAt: now,
+      }).where(inArray(courseMemberships.id, memberships.map((membership) => membership.membershipId)));
+    }
+    await tx.update(users).set({
+      platformInstructorGrantedAt: null,
+      platformInstructorGrantedBy: null,
+      updatedAt: now,
+    }).where(eq(users.id, userId));
+
+    return {
+      status: "revoked",
+      userId,
+      removed: memberships.map(({ membershipId, courseId, organizationId, role }) => ({
+        membershipId,
+        courseId,
+        organizationId,
+        role,
+      })),
     } as const;
   });
 }

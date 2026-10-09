@@ -45,7 +45,7 @@ import {
   removeCourseTaHandler,
   updateTaCapabilitiesHandler,
 } from "./routes/courseMemberships";
-import { grantPlatformInstructorHandler, listPlatformInstructorsHandler } from "./routes/platformInstructors";
+import { grantPlatformInstructorHandler, listPlatformInstructorsHandler, revokePlatformInstructorHandler } from "./routes/platformInstructors";
 import { createOrganizationHandler, getOrganizationHandler } from "./routes/organizations";
 import { addCourseInstructorHandler, listPlatformCoursesHandler, provisionCourseHandler, removeCourseInstructorsHandler } from "./routes/courseProvisioning";
 import {
@@ -340,6 +340,7 @@ app.post("/api/courses/:courseId/members", requireSuperAdmin()(addCourseMemberHa
 // instructor status before any course exists for the person.
 app.post("/api/platform/instructors", requireSuperAdmin()(grantPlatformInstructorHandler));
 app.get("/api/platform/instructors", requireSuperAdmin()(listPlatformInstructorsHandler));
+app.delete("/api/platform/instructors/:userId", requireSuperAdmin()(revokePlatformInstructorHandler));
 app.get("/api/platform/organization", requireSuperAdmin()(getOrganizationHandler));
 app.post("/api/platform/organization", requireSuperAdmin()(createOrganizationHandler));
 app.post("/api/platform/courses", requireSuperAdmin()(provisionCourseHandler));

@@ -230,6 +230,11 @@ export interface PlatformInstructorListResponse {
   instructors: PlatformInstructorListItem[];
 }
 
+export interface RevokePlatformInstructorResponse {
+  status: "revoked";
+  removedMembershipCount: number;
+}
+
 /* -- Roster (#32, #86) ----------------------------------------------------- */
 
 export type RosterMemberStatus = "active" | "pending" | "dropped";

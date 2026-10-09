@@ -71,6 +71,7 @@ const handlers = {
   addCourseMember: ok("addCourseMember"),
   grantPlatformInstructor: ok("grantPlatformInstructor"),
   listPlatformInstructors: ok("listPlatformInstructors"),
+  revokePlatformInstructor: ok("revokePlatformInstructor"),
   listPlatformCourses: ok("listPlatformCourses"),
   addCourseInstructor: ok("addCourseInstructor"),
   removeCourseInstructors: ok("removeCourseInstructors"),
@@ -141,6 +142,7 @@ vi.mock("./routes/courseMemberships", () => ({
 vi.mock("./routes/platformInstructors", () => ({
   grantPlatformInstructorHandler: (c: Context) => handlers.grantPlatformInstructor(c),
   listPlatformInstructorsHandler: (c: Context) => handlers.listPlatformInstructors(c),
+  revokePlatformInstructorHandler: (c: Context) => handlers.revokePlatformInstructor(c),
 }));
 vi.mock("./routes/courseProvisioning", () => ({
   addCourseInstructorHandler: (c: Context) => handlers.addCourseInstructor(c),
@@ -262,6 +264,8 @@ const ROUTES: { method: string; path: string; handler: HandlerName; admits: Pers
   { method: "POST", path: "/api/platform/instructors", handler: "grantPlatformInstructor",
     admits: [] },
   { method: "GET", path: "/api/platform/instructors", handler: "listPlatformInstructors",
+    admits: [] },
+  { method: "DELETE", path: `/api/platform/instructors/${HW}`, handler: "revokePlatformInstructor",
     admits: [] },
   { method: "GET", path: "/api/platform/courses", handler: "listPlatformCourses",
     admits: [] },
