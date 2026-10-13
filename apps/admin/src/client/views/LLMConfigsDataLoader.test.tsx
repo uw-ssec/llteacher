@@ -168,6 +168,24 @@ describe("LLM config form (#31, #98)", () => {
     expect(screen.getByDisplayValue("Socratic default")).toBeTruthy();
   });
 
+  it("saves the platform gateway as llmoxie", async () => {
+    let savedBody: Record<string, unknown> | undefined;
+    stub((_url, init) => {
+      if (init?.method === "PATCH") {
+        savedBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify(DEFAULT_CONFIG), { status: 200 });
+      }
+      return listResponse([DEFAULT_CONFIG]);
+    });
+    renderLoader({ kind: "edit", configId: "cfg-1" });
+    await waitFor(() => screen.getByDisplayValue("Socratic default"));
+
+    fireEvent.click(screen.getByRole("button", { name: /Save changes/i }));
+
+    await waitFor(() => expect(savedBody).toBeDefined());
+    expect(savedBody?.provider).toBe("llmoxie");
+  });
+
   it("shows what the model said, and does not save when testing", async () => {
     const fetchMock = stub((url, init) => {
       if (init?.method === "POST" && url.includes("/test")) {
@@ -278,4 +296,3 @@ describe("shared vs course-owned configurations (#367)", () => {
     expect(screen.queryByText("Organization default")).toBeNull();
   });
 });
-

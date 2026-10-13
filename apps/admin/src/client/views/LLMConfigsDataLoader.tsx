@@ -27,13 +27,13 @@ export type ConfigScreen =
  *  enabled option) and the API speaks in the schema's. One translation,
  *  here, rather than the form knowing about `llm_provider` enum values.
  *
- *  "platform" maps to openrouter because that IS the platform gateway --
- *  #332's decision. When instructor-supplied credentials land (#323), this
- *  is the function that grows a second branch. */
+ *  "platform" maps to llmoxie because that is UW SSEC's shared LiteLLM
+ *  gateway. When instructor-supplied credentials land (#323), this is the
+ *  function that grows a second branch. */
 function toWriteBody(values: LLMConfigFormValues): LlmConfigWriteBody {
   return {
     name: values.name,
-    provider: "openrouter",
+    provider: "llmoxie",
     modelName: values.modelName,
     basePrompt: values.basePrompt,
     temperature: values.temperature,

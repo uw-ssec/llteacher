@@ -418,4 +418,51 @@ describe.skipIf(!DATABASE_URL)("scripts/migrate.ts two-stage split (real DB, #34
     },
     60_000,
   );
+
+  it(
+    "repairs platform configs saved as OpenRouter without changing valid OpenRouter slugs",
+    async () => {
+      const dbName = `llteacher_migrate_test_platform_provider_${crypto.randomUUID().replace(/-/g, "")}`;
+      dbNames.push(dbName);
+      const scratchUrl = await createScratchDatabase(adminPool, dbName);
+      const through0060 = buildFolderThrough("0060_genui_toolkits");
+      const pool = new Pool({ connectionString: scratchUrl });
+      const db = drizzle(pool);
+      try {
+        await applyMigrationsFolder(pool, db, through0060);
+        await db.execute(sql`
+          INSERT INTO organizations (id, slug, name)
+          VALUES ('75555555-5555-4555-8555-555555555555', 'provider-repair-org', 'Provider Repair Org')
+        `);
+        await db.execute(sql`
+          INSERT INTO llm_configs
+            (id, organization_id, name, provider, model_name, temperature, max_completion_tokens, is_default, is_active)
+          VALUES
+            ('76666666-6666-4666-8666-666666666661', '75555555-5555-4555-8555-555555555555', 'Broken platform config', 'openrouter', 'gpt-5.3-codex', 0.7, 1000, true, true),
+            ('76666666-6666-4666-8666-666666666662', '75555555-5555-4555-8555-555555555555', 'Valid OpenRouter config', 'openrouter', 'openai/gpt-5.3-codex', 0.7, 1000, false, true),
+            ('76666666-6666-4666-8666-666666666663', '75555555-5555-4555-8555-555555555555', 'Existing LLMoxie config', 'llmoxie', 'gpt-5.4-mini', 0.7, 1000, false, true)
+        `);
+      } finally {
+        fs.rmSync(through0060, { recursive: true, force: true });
+        await pool.end();
+      }
+
+      await runMigrations(scratchUrl);
+
+      const verifyPool = new Pool({ connectionString: scratchUrl });
+      try {
+        const rows = await verifyPool.query<{ name: string; provider: string }>(
+          "SELECT name, provider::text AS provider FROM llm_configs ORDER BY name",
+        );
+        expect(rows.rows).toEqual([
+          { name: "Broken platform config", provider: "llmoxie" },
+          { name: "Existing LLMoxie config", provider: "llmoxie" },
+          { name: "Valid OpenRouter config", provider: "openrouter" },
+        ]);
+      } finally {
+        await verifyPool.end();
+      }
+    },
+    60_000,
+  );
 });
