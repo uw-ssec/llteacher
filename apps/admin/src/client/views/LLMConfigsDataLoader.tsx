@@ -27,15 +27,14 @@ export type ConfigScreen =
  *  enabled option) and the API speaks in the schema's. One translation,
  *  here, rather than the form knowing about `llm_provider` enum values.
  *
- *  "platform" maps to openrouter for a new config -- #332's decision. An
- *  edit keeps the provider the config already has: the org default is on
- *  the LLMoxie gateway (migration 0035), and saving it must not quietly move
- *  it to OpenRouter. When instructor-supplied credentials land (#323), this
- *  is the function that grows a second branch. */
-function toWriteBody(values: LLMConfigFormValues, existing?: LlmConfigPayload): LlmConfigWriteBody {
+ *  "platform" maps to llmoxie because that is UW SSEC's shared LiteLLM
+ *  gateway. This also repairs a legacy openrouter-labelled config when an
+ *  instructor saves it. When instructor-supplied credentials land (#323),
+ *  this is the function that grows a second branch. */
+function toWriteBody(values: LLMConfigFormValues): LlmConfigWriteBody {
   return {
     name: values.name,
-    provider: existing?.provider ?? "openrouter",
+    provider: "llmoxie",
     modelName: values.modelName,
     basePrompt: values.basePrompt,
     temperature: values.temperature,
@@ -89,7 +88,7 @@ export function LLMConfigsDataLoader({
   const save = useCallback(
     async (values: LLMConfigFormValues, existing: LlmConfigPayload | undefined) => {
       setActionError(null);
-      const body = toWriteBody(values, existing);
+      const body = toWriteBody(values);
       const configId = existing?.id ?? null;
       // Deliberately NOT caught here: LLMConfigFormView's own submit handler
       // turns a rejection into its inline "couldn't be saved" state and

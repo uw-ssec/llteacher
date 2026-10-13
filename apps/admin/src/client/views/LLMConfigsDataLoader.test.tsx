@@ -168,13 +168,13 @@ describe("LLM config form (#31, #98)", () => {
     expect(screen.getByDisplayValue("Socratic default")).toBeTruthy();
   });
 
-  it("keeps an LLMoxie config on LLMoxie when it is edited, and creates new ones on OpenRouter", async () => {
-    const LLMOXIE = { ...DEFAULT_CONFIG, provider: "llmoxie" as const };
+  it("saves new and previously mislabelled platform configs on LLMoxie", async () => {
+    const SAVED = { ...DEFAULT_CONFIG, provider: "llmoxie" as const };
     const fetchMock = stub((_url, init) => {
       if (init?.method === "PATCH" || init?.method === "POST") {
-        return new Response(JSON.stringify({ config: LLMOXIE }), { status: 200, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify({ config: SAVED }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      return listResponse([LLMOXIE]);
+      return listResponse([DEFAULT_CONFIG]);
     });
     const sentProvider = (method: string) => {
       const call = fetchMock.mock.calls.find(([, init]) => init?.method === method);
@@ -193,7 +193,7 @@ describe("LLM config form (#31, #98)", () => {
     fireEvent.change(name, { target: { value: "New config" } });
     fireEvent.click(screen.getByRole("button", { name: /Create|Save/i }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
-    expect(sentProvider("POST")).toBe("openrouter");
+    expect(sentProvider("POST")).toBe("llmoxie");
   });
 
   it("shows what the model said, and does not save when testing", async () => {
@@ -306,4 +306,3 @@ describe("shared vs course-owned configurations (#367)", () => {
     expect(screen.queryByText("Organization default")).toBeNull();
   });
 });
-
