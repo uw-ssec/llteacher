@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  cleanup,
+} from "@testing-library/react";
 import type { LlmConfigPayload } from "@llteacher/ui/api";
 import { HomeworkForm } from "./HomeworkForm";
 
@@ -19,8 +25,9 @@ const LLM_CONFIGS: LlmConfigPayload[] = [
     fallbackLlmConfigId: null,
     isDefault: true,
     isActive: true,
-  knowledgeEnabled: true, genuiToolkits: [],
-  scopeCourseId: null,
+    knowledgeEnabled: true,
+    genuiToolkits: [],
+    scopeCourseId: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
   },
@@ -30,6 +37,7 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe("HomeworkForm", () => {
@@ -37,26 +45,40 @@ describe("HomeworkForm", () => {
     const onSubmit = vi.fn();
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
-    await waitFor(() => expect(screen.getByText(/title required/i)).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByText(/title required/i)).toBeTruthy(),
+    );
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("shows a due date required alert when due date is left blank", async () => {
     const onSubmit = vi.fn();
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
-    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "New HW" } });
-    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "desc" } });
+    fireEvent.change(screen.getByLabelText(/^title$/i), {
+      target: { value: "New HW" },
+    });
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: "desc" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
-    await waitFor(() => expect(screen.getByText(/due date required/i)).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByText(/due date required/i)).toBeTruthy(),
+    );
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("adds a section, fills it out, and submits with order renumbered", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
-    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "New HW" } });
-    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "desc" } });
-    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.change(screen.getByLabelText(/^title$/i), {
+      target: { value: "New HW" },
+    });
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: "desc" },
+    });
+    fireEvent.change(screen.getByLabelText(/due date/i), {
+      target: { value: "2099-01-01T00:00" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /add section/i }));
     const titleInputs = screen.getAllByLabelText(/section title/i);
     fireEvent.change(titleInputs[0]!, { target: { value: "Sec 1" } });
@@ -65,19 +87,35 @@ describe("HomeworkForm", () => {
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     const payload = onSubmit.mock.calls[0][0];
-    expect(payload.sections).toEqual([{ title: "Sec 1", content: "Sec 1 content", order: 1, solutionContent: undefined, type: "conversation" }]);
+    expect(payload.sections).toEqual([
+      {
+        title: "Sec 1",
+        content: "Sec 1 content",
+        order: 1,
+        solutionContent: undefined,
+        type: "conversation",
+      },
+    ]);
   });
 
   it("removing a section drops it and renumbers the rest", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
-    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
-    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
-    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.change(screen.getByLabelText(/^title$/i), {
+      target: { value: "HW" },
+    });
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: "d" },
+    });
+    fireEvent.change(screen.getByLabelText(/due date/i), {
+      target: { value: "2099-01-01T00:00" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /add section/i }));
     fireEvent.click(screen.getByRole("button", { name: /add section/i }));
-    fireEvent.click(screen.getAllByRole("button", { name: /remove section/i })[0]!);
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /remove section/i })[0]!,
+    );
     const titleInputs = screen.getAllByLabelText(/section title/i);
     expect(titleInputs).toHaveLength(1);
   });
@@ -119,21 +157,28 @@ describe("HomeworkForm", () => {
   it("adds and removes exactly one beforeunload listener per mount/unmount (no leak)", () => {
     const addSpy = vi.spyOn(window, "addEventListener");
     const removeSpy = vi.spyOn(window, "removeEventListener");
-    const { unmount } = render(<HomeworkForm onSubmit={vi.fn()} llmConfigs={LLM_CONFIGS} />);
+    const { unmount } = render(
+      <HomeworkForm onSubmit={vi.fn()} llmConfigs={LLM_CONFIGS} />,
+    );
 
-    const addCalls = addSpy.mock.calls.filter((c) => c[0] === "beforeunload").length;
+    const addCalls = addSpy.mock.calls.filter(
+      (c) => c[0] === "beforeunload",
+    ).length;
     expect(addCalls).toBe(1);
 
     unmount();
 
-    const removeCalls = removeSpy.mock.calls.filter((c) => c[0] === "beforeunload").length;
+    const removeCalls = removeSpy.mock.calls.filter(
+      (c) => c[0] === "beforeunload",
+    ).length;
     expect(removeCalls).toBe(1);
   });
 
   it("rejects submit past 20 sections", async () => {
     const onSubmit = vi.fn();
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
-    for (let i = 0; i < 21; i++) fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    for (let i = 0; i < 21; i++)
+      fireEvent.click(screen.getByRole("button", { name: /add section/i }));
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
     await waitFor(() => expect(screen.getByText(/20 sections/i)).toBeTruthy());
     expect(onSubmit).not.toHaveBeenCalled();
@@ -150,7 +195,9 @@ describe("HomeworkForm", () => {
     // the DOM order (fieldset children) matches the intended tab sequence,
     // which is what actually determines native tab order.
     const fieldset = title.closest("fieldset")!;
-    const focusable = Array.from(fieldset.querySelectorAll("input, textarea, button"));
+    const focusable = Array.from(
+      fieldset.querySelectorAll("input, textarea, button"),
+    );
     expect(focusable[0]).toBe(title);
   });
 
@@ -158,14 +205,26 @@ describe("HomeworkForm", () => {
   it("defaults a new section's type to Conversation, and includes a changed type in the submit payload", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
-    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
-    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
-    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.change(screen.getByLabelText(/^title$/i), {
+      target: { value: "HW" },
+    });
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: "d" },
+    });
+    fireEvent.change(screen.getByLabelText(/due date/i), {
+      target: { value: "2099-01-01T00:00" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /add section/i }));
-    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
-    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, {
+      target: { value: "Sec 1" },
+    });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, {
+      target: { value: "c" },
+    });
 
-    const typeSelect = screen.getByLabelText(/section type/i) as HTMLSelectElement;
+    const typeSelect = screen.getByLabelText(
+      /section type/i,
+    ) as HTMLSelectElement;
     expect(typeSelect.value).toBe("conversation");
     fireEvent.change(typeSelect, { target: { value: "non_interactive" } });
 
@@ -179,18 +238,32 @@ describe("HomeworkForm", () => {
   it("renders a controllable Hidden checkbox and expires-at field, included in the submit payload", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
-    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
-    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
-    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.change(screen.getByLabelText(/^title$/i), {
+      target: { value: "HW" },
+    });
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: "d" },
+    });
+    fireEvent.change(screen.getByLabelText(/due date/i), {
+      target: { value: "2099-01-01T00:00" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /add section/i }));
-    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
-    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, {
+      target: { value: "Sec 1" },
+    });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, {
+      target: { value: "c" },
+    });
 
-    const hiddenCheckbox = screen.getByLabelText(/^hidden/i) as HTMLInputElement;
+    const hiddenCheckbox = screen.getByLabelText(
+      /^hidden/i,
+    ) as HTMLInputElement;
     expect(hiddenCheckbox.checked).toBe(false);
     fireEvent.click(hiddenCheckbox);
     expect(hiddenCheckbox.checked).toBe(true);
-    fireEvent.change(screen.getByLabelText(/expires at/i), { target: { value: "2099-06-01T00:00" } });
+    fireEvent.change(screen.getByLabelText(/expires at/i), {
+      target: { value: "2099-06-01T00:00" },
+    });
 
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
@@ -203,36 +276,70 @@ describe("HomeworkForm", () => {
   it("adding a progress widget row renders both prompt inputs and includes them in the submit payload", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
-    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
-    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
-    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.change(screen.getByLabelText(/^title$/i), {
+      target: { value: "HW" },
+    });
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: "d" },
+    });
+    fireEvent.change(screen.getByLabelText(/due date/i), {
+      target: { value: "2099-01-01T00:00" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /add section/i }));
-    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
-    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, {
+      target: { value: "Sec 1" },
+    });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, {
+      target: { value: "c" },
+    });
 
-    fireEvent.click(screen.getByRole("button", { name: /add progress widget/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /add progress widget/i }),
+    );
     expect(screen.getByLabelText(/pre-section prompt/i)).toBeTruthy();
     expect(screen.getByLabelText(/post-section prompt/i)).toBeTruthy();
-    fireEvent.change(screen.getByLabelText(/pre-section prompt/i), { target: { value: "Confidence before?" } });
-    fireEvent.change(screen.getByLabelText(/post-section prompt/i), { target: { value: "Confidence after?" } });
+    fireEvent.change(screen.getByLabelText(/pre-section prompt/i), {
+      target: { value: "Confidence before?" },
+    });
+    fireEvent.change(screen.getByLabelText(/post-section prompt/i), {
+      target: { value: "Confidence after?" },
+    });
 
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     const payload = onSubmit.mock.calls[0][0];
-    expect(payload.widgets).toEqual([{ prePrompt: "Confidence before?", postPrompt: "Confidence after?", order: 1 }]);
+    expect(payload.widgets).toEqual([
+      {
+        prePrompt: "Confidence before?",
+        postPrompt: "Confidence after?",
+        order: 1,
+      },
+    ]);
   });
 
   it("removing a progress widget row drops it from the submit payload, no confirmation required", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
-    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
-    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
-    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.change(screen.getByLabelText(/^title$/i), {
+      target: { value: "HW" },
+    });
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: "d" },
+    });
+    fireEvent.change(screen.getByLabelText(/due date/i), {
+      target: { value: "2099-01-01T00:00" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /add section/i }));
-    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
-    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, {
+      target: { value: "Sec 1" },
+    });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, {
+      target: { value: "c" },
+    });
 
-    fireEvent.click(screen.getByRole("button", { name: /add progress widget/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /add progress widget/i }),
+    );
     fireEvent.click(screen.getByRole("button", { name: /remove widget/i }));
     expect(screen.queryByLabelText(/pre-section prompt/i)).toBeNull();
 
@@ -242,17 +349,88 @@ describe("HomeworkForm", () => {
     expect(payload.widgets).toEqual([]);
   });
 
-  it("shows a friendly error and does not throw when onSubmit rejects", async () => {
-    const onSubmit = vi.fn().mockRejectedValue(new Error("network error"));
+  it("shows the exact save error and confirms a preserved draft when a later step rejects", async () => {
+    const onSubmit = vi.fn().mockRejectedValue(
+      Object.assign(new Error("Release time must be in the future"), {
+        savedState: "draft",
+      }),
+    );
     render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
-    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "HW" } });
-    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: "d" } });
-    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T00:00" } });
+    fireEvent.change(screen.getByLabelText(/^title$/i), {
+      target: { value: "HW" },
+    });
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: "d" },
+    });
+    fireEvent.change(screen.getByLabelText(/due date/i), {
+      target: { value: "2099-01-01T00:00" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /add section/i }));
-    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, { target: { value: "Sec 1" } });
-    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, { target: { value: "c" } });
+    fireEvent.change(screen.getAllByLabelText(/section title/i)[0]!, {
+      target: { value: "Sec 1" },
+    });
+    fireEvent.change(screen.getAllByLabelText(/section content/i)[0]!, {
+      target: { value: "c" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
-    await waitFor(() => expect(screen.getByText(/failed to save/i)).toBeTruthy());
+    await waitFor(() =>
+      expect(
+        screen.getByText(/couldn't completely save your homework/i),
+      ).toBeTruthy(),
+    );
+    expect(screen.getByText("Release time must be in the future")).toBeTruthy();
+    expect(
+      screen.getByText(/saved a draft for you in the meantime/i),
+    ).toBeTruthy();
+  });
+
+  it("makes draft, immediate publication, and scheduled publication distinct choices", () => {
+    render(<HomeworkForm onSubmit={vi.fn()} llmConfigs={LLM_CONFIGS} />);
+
+    expect(
+      (
+        screen.getByRole("radio", {
+          name: /save as draft/i,
+        }) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
+    expect(screen.getByRole("radio", { name: /publish now/i })).toBeTruthy();
+    expect(
+      screen.getByRole("radio", { name: /schedule for later/i }),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText(/release date and time/i)).toBeNull();
+
+    fireEvent.click(screen.getByRole("radio", { name: /schedule for later/i }));
+    expect(screen.getByLabelText(/release date and time/i)).toBeTruthy();
+  });
+
+  it("sends a scheduled local time as an absolute timestamp", async () => {
+    vi.stubEnv("TZ", "America/Los_Angeles");
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} />);
+    fireEvent.change(screen.getByLabelText(/^title$/i), {
+      target: { value: "HW" },
+    });
+    fireEvent.change(screen.getByLabelText(/due date/i), {
+      target: { value: "2099-01-01T00:00" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.change(screen.getByLabelText(/section title/i), {
+      target: { value: "Sec 1" },
+    });
+    fireEvent.change(screen.getByLabelText(/section content/i), {
+      target: { value: "Question" },
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /schedule for later/i }));
+    fireEvent.change(screen.getByLabelText(/release date and time/i), {
+      target: { value: "2099-02-01T09:00" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload.publish).toBe(true);
+    expect(payload.releasedAt).toBe("2099-02-01T17:00:00.000Z");
   });
 
   // #317 review, "strongly recommend before merge": an inactive/unavailable
@@ -299,7 +477,9 @@ describe("HomeworkForm", () => {
     expect(select.value).toBe("cfg-inactive");
 
     // Edit something unrelated and save -- the override must survive.
-    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "Renamed HW" } });
+    fireEvent.change(screen.getByLabelText(/^title$/i), {
+      target: { value: "Renamed HW" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /save/i }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
@@ -315,12 +495,15 @@ describe("HomeworkForm", () => {
   // announces the in-progress save.
   it("keeps Save focusable and announces progress while isLoading is true", () => {
     const onSubmit = vi.fn();
-    render(<HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} isLoading />);
-    const saveButton = screen.getByRole("button", { name: /save/i }) as HTMLButtonElement;
+    render(
+      <HomeworkForm onSubmit={onSubmit} llmConfigs={LLM_CONFIGS} isLoading />,
+    );
+    const saveButton = screen.getByRole("button", {
+      name: /save/i,
+    }) as HTMLButtonElement;
     expect(saveButton.disabled).toBe(false);
     expect(saveButton.getAttribute("aria-disabled")).toBe("true");
     expect(saveButton.getAttribute("aria-busy")).toBe("true");
     expect(screen.getByRole("status").textContent).toBe("Saving homework…");
   });
-
 });

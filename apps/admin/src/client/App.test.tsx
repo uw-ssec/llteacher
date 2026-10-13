@@ -105,6 +105,45 @@ describe("App selected-course context", () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/courses/course-b/homeworks")).toBe(true);
     window.localStorage.clear();
   });
+
+  async function saveNewHomework(failReload = false) {
+    let listLoads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/profile") return new Response(JSON.stringify({ userId: "u1", role: "instructor", courses: [courses[0]] }), { status: 200 });
+      if (url.endsWith("/llm-configs")) return new Response(JSON.stringify({ configs: [] }), { status: 200 });
+      if (url === "/api/courses/course-a/homeworks" && init?.method === "POST") return new Response(JSON.stringify({ id: "homework-new" }), { status: 201 });
+      if (url === "/api/courses/course-a/homeworks/homework-new" && init?.method === "PATCH") return new Response(null, { status: 200 });
+      if (url === "/api/courses/course-a/homeworks") {
+        listLoads += 1;
+        return failReload && listLoads > 1
+          ? new Response(null, { status: 503 })
+          : new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
+      }
+      throw new Error(`unexpected fetch ${init?.method ?? "GET"} ${url}`);
+    }));
+    renderApp();
+    await screen.findByRole("heading", { name: "STAT 311 · Autumn 2026" });
+    fireEvent.click(screen.getByRole("button", { name: "New homework" }));
+    fireEvent.change(screen.getByLabelText(/^title$/i), { target: { value: "Homework 1" } });
+    fireEvent.change(screen.getByLabelText(/due date/i), { target: { value: "2099-01-01T09:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /add section/i }));
+    fireEvent.change(screen.getByLabelText(/section title/i), { target: { value: "Question 1" } });
+    fireEvent.change(screen.getByLabelText(/section content/i), { target: { value: "Submit your age" } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+  }
+
+  it("confirms a successful homework save after returning to the homework list", async () => {
+    await saveNewHomework();
+    expect(await screen.findByText(/homework saved/i)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "STAT 311 · Autumn 2026" })).toBeTruthy();
+  });
+
+  it("still confirms a successful save when reloading the homework list fails", async () => {
+    await saveNewHomework(true);
+    expect(await screen.findByText(/homework saved/i)).toBeTruthy();
+    expect(screen.getByText(/homework list didn't load/i)).toBeTruthy();
+  });
 });
 
 /** #316: a super admin or a granted platform instructor may have ZERO real
