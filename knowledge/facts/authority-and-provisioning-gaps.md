@@ -1,9 +1,9 @@
 ---
 type: Fact
-title: "Authorization model and known gaps: course-scoped roles, super admins, no course creation"
-description: "All authority is course-scoped (course_memberships roles; TA is a grader with per-course grants); org-level config is editable by any course instructor (#367); there is no course-creation path (#464, M13)."
+title: "Authorization and provisioning across platform, organization, and course"
+description: "Super admins provision the local org, course shells and instructor access; Org Admins own shared LLM configs, while instructors need active course membership to run courses and use their own Canvas tokens."
 tags: [authz, roles, multi-tenancy, admin]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-08T20:08:07Z" }
+generated: { by: "codex-desktop:gpt-6.1-sol", at: "2026-10-13T20:31:48Z" }
 status: stable
 governance: constraint
 code_refs: [apps/web/src/server/middleware/roles.ts, apps/web/src/lib/services/SuperAdminService.ts, apps/web/src/db/schema/identity.ts, packages/ui]
@@ -19,27 +19,17 @@ sources:
   - resource: "issue #246"
 ---
 
-## Model
+## Current model (merged through 2026-10-13)
 
-- `course_memberships.role` has the values `instructor | ta | student | observer | admin`. **Every authority is a course key.** There is no org-level membership table.
-- `rolesMiddleware` resolves each course membership **once per request**, so `isMemberOf`, `isInstructorOf`, `isGraderOf`, `canViewSolutionsIn` and `canViewDraftsIn` agree by construction (PR #209). Dropped memberships (`dropped_at`) are filtered from every access decision (#139).
-- **TA = grader, not author** (PR #209). `GRADER_ROLES` covers instructor, admin and ta. `AUTHOR_ROLES` covers instructor and admin. Both are defined once and pinned against the Postgres enum by `courseRoleParity.test.ts`. The per-course flags `can_view_solutions` and `can_view_drafts` are granted only by instructors. Section transcripts are readable at grader tier (#246).
-- Guards: `requireRole`, `requireCourseMember`, `requireInstructorOf`, `requireGraderOf`, and `requireSuperAdmin` (PR #464).
+- Course authority still comes from active `course_memberships` roles (`instructor | ta | student | observer | admin`). TAs are graders, not authors; their solution/draft permissions are course-specific. Super admins have a deployment-level allowlist; Org Admins are separate organization-level members who manage the shared LLM configuration pool (PR #484).
+- A platform instructor grant opens the instructor console but does not itself authorize any course. To see and run a course, the instructor also needs an active instructor membership on that course. Super admins can grant platform access, create the first local organization and a course shell, and assign one or more instructors (PR #487). Local organization creation uses deployment-scoped allowed domains and does not create or edit a WorkOS organization.
+- Canvas is optional for a local shell. An assigned instructor supplies an encrypted, instructor-scoped Canvas token, can link their course to Canvas, import its roster, and assign TAs. The token is reusable across that instructor's courses, not shared with other instructors (PR #487).
+- Course Setup supports adding and editing instructor memberships (PR #491). Removing one instructor from a course does not revoke their platform access or memberships on other courses. The course edit path may remove the last instructor; platform-wide instructor revocation is a separate, explicitly confirmed operation that refuses to orphan a course.
 
-## Super admins and provisioning (PR #464, closing #316)
+## Superseded observations
 
-- Before PR #464, the only way to create a course membership was a hand-written SQL `INSERT` against production.
-- `SuperAdminService` holds a hardcoded allowlist checked by blind-index equality. It grants elevated access across every course-scoped guard (`isSuperAdmin`) without changing `guards.ts`.
-- `POST /api/courses/:courseId/members` (super admin only) adds people to existing courses through the existing `upsertCourseMember` pipeline.
-- `POST /api/platform/instructors` creates a courseless **platform instructor** grant. It only gets the person past the console gate and grants no course access.
-- **No course-creation path exists in production code.** Only `scripts/seed.ts` creates courses. Course and org management are M13 (#68–#72), with TA assignment in #171.
+Before PR #484 there was no Org Admin membership, and before PR #487 there was no application path to create a local organization or course shell. Those earlier gaps are no longer current. Do not infer that an instructor who has only a platform grant is assigned to a course.
 
-## Known gaps (open)
+## Still separate
 
-- **#367:** `llm_configs` is per org, but `requireInstructorOf` on any course in the org can edit it, including the org default. The plan is an **Org Admin** role. PR #363 documents this widening as a tracked gap, not a design choice.
-- #183: whether TA grants survive deprovisioning.
-- #237: TA section conversations are recorded as student work.
-- #377: transcript paging counts rows a draft-restricted TA cannot see.
-
-# Related Concepts
-- [Org Admin owns the shared LLM config pool; course instructors own course-scoped configs](../decisions/org-admin-role-and-course-scoped-configs.md): #367 closed the org-level LLM config gap with an Org Admin role
+Open TA deprovisioning and transcript-access questions must be checked against their current issues before changing permission logic; the merged provisioning work did not establish their resolution.

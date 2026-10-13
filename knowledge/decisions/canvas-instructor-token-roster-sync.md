@@ -1,9 +1,9 @@
 ---
 type: Decision
 title: "Canvas integration uses an instructor-pasted API token and roster sync, with LTI 1.3 deferred"
-description: "M11 links an existing course to a Canvas course using an instructor-supplied token encrypted with IdentityCipher, and syncs enrollments idempotently on canvasEnrollmentId; LTI 1.3, NRPS and grade passback are out of scope."
+description: "Canvas roster sync uses an encrypted instructor-scoped API token reusable across that instructor's courses; Canvas linking is optional after local course creation, and LTI 1.3 remains deferred."
 tags: [canvas, lms, integration, roster]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T22:32:35Z" }
+generated: { by: "codex-desktop:gpt-6.1-sol", at: "2026-10-13T20:30:47Z" }
 status: stable
 governance: context
 code_refs: [apps/web/src/lib/canvas-api.ts, apps/web/src/lib/services/CanvasRosterSyncService.ts, apps/web/src/server/routes/canvasCredentials.ts, apps/web/src/server/routes/canvasSync.ts, apps/web/src/server/repositories/organizationCredentials.ts, apps/web/src/server/repositories/lmsIntegrations.ts, apps/web/src/server/repositories/roster.ts, docs/operations/canvas-token-setup.md]
@@ -26,7 +26,7 @@ sources:
 ## Spec proposed
 The generalization plan (phase 5) and data-model §3.4 planned **Canvas LTI 1.3**: OIDC launch, NRPS rosters, and deep linking, with grade passback as a v1 non-goal. They expected UW-IT developer-key provisioning to be the calendar bottleneck. On 2026-07-28 the team learned that institutional LTI and API access was blocked until about Sept-Oct. M11 therefore chose a token-based path.
 
-## Implemented (PR #457, 2026-09-15; milestone closed)
+## Initial implementation (PR #457, 2026-09-15; superseded where noted below)
 - **Token storage (decision 1):** a nullable `encryptedSecret` on `organization_credentials`, encrypted with the same AES-256-GCM `IdentityCipher`. A CHECK enforces exactly one of `secretRef` or `encryptedSecret`. The token is masked at response time, never stored masked or logged. The LLM credential path still reads only `secretRef`.
 - **LMS integration (decision 2):** the LTI triple is nullable, behind a partial unique index. The row adds `canvasBaseUrl` (per org, not hard-coded to UW) and sync-status columns.
 - **WorkOS pre-population (decision 3):** handled by reuse. Sync creates **pending users** through `roster.ts`'s `upsertCourseMembers`, and they are claimed by email blind index on first WorkOS login.
@@ -39,7 +39,7 @@ The generalization plan (phase 5) and data-model §3.4 planned **Canvas LTI 1.3*
 - LTI 1.3 now.
 - The WorkOS bulk-invite API.
 - Course creation from Canvas.
-- Multiple credentials per org (`apiCredentialId` is written but not used).
+- Multiple credentials per org (`apiCredentialId` was written but not used in the initial implementation). This historical rejection was superseded by instructor-scoped credentials in PR #487.
 
 ## Consequences
 - Instructors handle personal Canvas tokens (see the runbook).
@@ -67,3 +67,7 @@ A personal token carries the instructor's full Canvas permissions. Roster sync d
 
 # Related Concepts
 - [Roles live on per-course memberships instead of global Teacher/Student profiles](course-membership-roles.md): Roster sync creates course memberships
+
+## Current credential ownership (PR #487, merged 2026-10-08)
+
+Canvas API tokens are encrypted and instructor-scoped, not course-scoped or shared across the organization. One instructor can reuse their own token across multiple courses they teach; another instructor cannot use that token to sync a course. A super admin creates the local organization and course shell, assigns the instructor, and leaves Canvas linking optional. The instructor signs in, supplies their own Canvas token, optionally links the shell to Canvas, and can import the roster. This changed the initial organization-credential scope described above without changing the decision to defer LTI 1.3. Do not infer a Canvas token or linked Canvas course from the presence of a local course shell.

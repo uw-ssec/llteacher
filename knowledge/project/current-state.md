@@ -1,9 +1,9 @@
 ---
 type: Fact
-title: Project state as of 2026-10-06
-description: "As of 2026-10-08: parity milestones M1-M5 and M11 are closed; the first AWS production release is being brought up and needs an Org Admin granted per org; RAG, analytics, FERPA, branding, course management and M12 remain open."
+title: Project state as of 2026-10-13
+description: "As of 2026-10-13, v0.2.0 deployed successfully; v0.2.1 is awaiting production approval, and M13 has partial merged provisioning, instructor-management and CSV-template work."
 tags: [project, status, roadmap]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-08T20:53:11Z" }
+generated: { by: "codex-desktop:gpt-6.1-sol", at: "2026-10-13T20:31:48Z" }
 status: stable
 governance: context
 code_refs: [infra/account/bootstrap.sh, infra/README.md, .github/workflows/release.yml, docs/adr/0001-operator-owned-production-secrets.md]
@@ -27,6 +27,15 @@ sources:
   - resource: "PR #412"
   - resource: "PR #473"
 ---
+
+## Current snapshot: 2026-10-13
+
+- `v0.2.0` completed both release-artifact tests and the production deployment job (GitHub run 37919978803). At this snapshot, `v0.2.1` points to staging commit `e246a3c`: staging CI (run 38458751464) and release-artifact tests passed, while the production job was waiting for GitHub environment approval (run 38461850269). A pushed tag is not evidence that the new version is live; re-check the run after approval.
+- M13 provisioning is partially implemented, not fully closed: PR #487 added first-run local organization creation, super-admin course shells and instructor access without WorkOS organization writes; instructors own reusable Canvas credentials and may link Canvas after shell creation. PR #491 added course-scoped add/edit instructor actions; Course Setup may remove the last instructor, while platform-wide revocation guards against orphaning a course. PR #492 exposed the student CSV template; its import contract is `email` required, `name` and `role` optional. A work-item-by-work-item M13 closeout remains to be done.
+- PR #493 changed post-merge CI to run on `staging` pushes (not `llteacher01`), so release readiness must be checked against the exact current staging SHA. PR #490 then fixed instructor LLMoxie configuration saves on staging and is the only code change since `v0.2.0` in `v0.2.1`.
+- The older snapshot below is historical. Its claims that the first production release was unconfirmed, M13 was untouched, and course creation was unavailable have been superseded.
+
+## Prior snapshot (2026-10-06 to 2026-10-08; historical)
 
 Snapshot taken 2026-10-06 from GitHub (`-R uw-ssec/llteacher`): 417 issues, 126 open and 291 closed. 47 PRs merged, 3 open.
 

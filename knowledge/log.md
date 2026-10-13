@@ -1,3 +1,13 @@
+## 2026-10-13
+* **Update**: Updated concept `project/current-state.md`.
+* **Update**: Updated concept `facts/authority-and-provisioning-gaps.md`.
+* **Update**: Updated concept `decisions/course-instructor-editing.md`.
+* **Update**: Updated concept `project/current-state.md`.
+* **Update**: Updated concept `decisions/course-instructor-editing.md`.
+* **Update**: Updated concept `facts/authority-and-provisioning-gaps.md`.
+* **Update**: Updated concept `decisions/canvas-instructor-token-roster-sync.md`.
+* **Update**: Updated concept `architecture/ci-release-pipeline.md`.
+
 ## 2026-10-09
 * **Update**: Updated concept `decisions/course-instructor-editing.md`.
 * **Update**: Linked `decisions/course-instructor-editing.md` to `decisions/course-membership-roles.md` (Course removal preserves the per-course role model and keeps platform recognition separate from membership authority.).

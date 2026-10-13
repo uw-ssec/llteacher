@@ -1,9 +1,9 @@
 ---
 type: Architecture
 title: CI and release pipeline
-description: "test.yml (PRs, pushes to llteacher01) runs a migration-index collision check plus Postgres-backed migrate/seed/typecheck/test/build and an ECS image smoke; release.yml on v* tags builds, tests and deploys a candidate task to production."
+description: "test.yml validates PRs and each merged staging commit with Postgres-backed tests and an ECS image smoke; release.yml on v* tags retests one artifact and deploys after production approval."
 tags: [architecture, ci, github-actions, release]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T22:32:36Z" }
+generated: { by: "codex-desktop:gpt-6.1-sol", at: "2026-10-13T20:30:47Z" }
 status: stable
 governance: constraint
 code_refs: [.github/workflows/test.yml, .github/workflows/release.yml, infra/scripts/aws-release-common.sh, infra/scripts/prepare-aws-release.sh, infra/scripts/run-aws-migrations.sh, infra/src/validate-production-inputs.ts, Dockerfile.aws]
@@ -15,7 +15,7 @@ sources:
   - resource: 871941b
 ---
 
-**test.yml** (on every `pull_request` and pushes to `llteacher01`, the main branch; read-only token; concurrency cancels stale runs):
+**test.yml** (on every `pull_request` and pushes to `staging` after merge; read-only token; concurrency cancels stale runs):
 
 1. `migration-index-collision` (PRs only): diffs `apps/web/src/db/migrations/NNNN_*.sql` between PR base and head; fails if the PR adds a file whose 4-digit index exists on base under another name.
 2. `web` job with a `pgvector/pgvector:pg16` service (`DATABASE_URL=postgres://llteacher:dev@localhost:5432/llteacher`): `npm ci` -> generate throwaway `ENCRYPTION_KEY`/`BLIND_INDEX_KEY` -> install psql and okf v0.3.0 (checksum-verified) -> `psql -f apps/web/src/db/init/01_extensions.sql` -> `npm run db:migrate` (in apps/web) -> `npm run db:seed -- --reset` -> `npm run typecheck` -> `npm test` -> `npm run build` -> build `Dockerfile.aws` and curl `/` and `/admin` from the running container with fake env.
@@ -31,3 +31,7 @@ Invariant: migrations complete before the service moves; a failed migration stop
 # Related Concepts
 - [DB-backed tests silently skip without DATABASE_URL](../facts/code-db-tests-skip-without-database-url.md): What CI's Postgres service enables that local runs skip
 - [Review process: 11-dimension audits, findings filed as issues, live-DB verification](../facts/eleven-dimension-review-process.md): The review process around PRs
+
+## Update: staging release gate (PR #493, 2026-10-09)
+
+Pushes to `staging` run the full test workflow on the exact merged commit. The former `llteacher01` push trigger was removed. Before cutting a production tag, verify the successful `staging` CI run is for the current `staging` HEAD; PR checks alone do not establish that. The `release.yml` tag workflow then independently tests and smoke-checks the release artifact before its protected production approval gate.

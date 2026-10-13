@@ -1,9 +1,9 @@
 ---
 type: Decision
 title: Course instructor edits are scoped membership changes
-description: "Course Setup removal stays course-scoped; All Instructors platform revocation atomically removes every active membership and grant, but cannot orphan a course."
+description: "Course Setup edits only that course's instructor memberships and may leave it instructorless; separate platform revocation clears all instructor access only when no course would be orphaned."
 tags: [auth, course, roles, super-admin]
-generated: { by: "codex-desktop:gpt-6", at: "2026-10-09T08:42:35Z" }
+generated: { by: "codex-desktop:gpt-6.1-sol", at: "2026-10-13T20:31:48Z" }
 status: stable
 governance: constraint
 code_refs: [apps/web/src/server/repositories/courseProvisioning.ts, apps/web/src/server/routes/courseProvisioning.ts, apps/admin/src/client/views/CourseSetupView.tsx]
@@ -12,7 +12,7 @@ code_refs: [apps/web/src/server/repositories/courseProvisioning.ts, apps/web/src
 ## Decision
 Course Setup has separate Add instructor and Edit instructors actions. Edit marks one or more active instructor memberships for removal, supports undo, and saves a batch. The batch is atomic: a stale or nonmatching selection changes nothing. Each removed membership is soft-dropped and audited.
 
-Course Setup removal is intentionally course-scoped. Platform instructor recognition on the user remains unchanged, as do memberships on other courses. A course may temporarily have no instructors so a super admin can correct a mistaken assignment. Re-adding an instructor restores the dropped membership through the existing add flow.
+Course Setup removal is intentionally course-scoped. Platform instructor recognition on the user remains unchanged, as do memberships on other courses. The course edit path may leave a course with no active instructor so a super admin can correct a mistaken assignment; this is distinct from the platform-wide revocation safeguard. Re-adding an instructor restores the dropped membership through the existing add flow.
 
 The All Instructors table exposes a separate platform-wide Remove instructor action. After explicit confirmation, it atomically soft-drops every active course membership for that user across organizations and clears both the platform instructor grant and grantor. The operation is rejected without changes when the user is the only active instructor or admin for any assigned course; the error names those courses. Successful platform and membership revocations are audited.
 
