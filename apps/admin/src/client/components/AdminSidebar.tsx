@@ -222,7 +222,7 @@ export function AdminSidebar({
 
       <div className="admin-sidebar__meta">
         <span className="admin-sidebar__meta-dot" aria-hidden="true" />
-        <span className="admin-sidebar__meta-text">admin · port 2312</span>
+        <span className="admin-sidebar__meta-text">admin</span>
       </div>
     </aside>
   );

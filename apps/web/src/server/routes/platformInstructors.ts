@@ -2,16 +2,17 @@ import { Effect } from "effect";
 import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 import { IdentityCipher } from "../../lib/crypto/identity-cipher";
 import { grantPlatformInstructor } from "../repositories/users";
+import { revokePlatformInstructor } from "../repositories/courseProvisioning";
 import { listPlatformInstructors } from "../repositories/platformListings";
 import { getDeploymentOrganization } from "../repositories/organizations";
 import { unsafeOrgScope } from "../repositories/scope";
 import { AUDIT_ACTIONS, AUDIT_TARGET_TYPES, auditBestEffort } from "../utils/audit";
 import type { AuthContext } from "../middleware/roles";
 import type { GrantPlatformInstructorBody, GrantPlatformInstructorResponse } from "../../shared/types";
-import { BadRequest, Conflict, Forbidden } from "../effect/errors";
+import { BadRequest, Conflict, Forbidden, NotFound } from "../effect/errors";
 import { effectHandler } from "../effect/http";
 import { query } from "../effect/services";
-import type { PlatformInstructorListResponse } from "@llteacher/ui/api";
+import type { PlatformInstructorListResponse, RevokePlatformInstructorResponse } from "@llteacher/ui/api";
 
 export const listPlatformInstructorsHandler = effectHandler((c) => Effect.gen(function* () {
   const authContext = c.get("authContext") as AuthContext | undefined;
@@ -89,4 +90,48 @@ export const grantPlatformInstructorHandler = effectHandler((c) => Effect.gen(fu
     grantedAt: result.grantedAt,
   };
   return c.json(responseBody);
+}));
+
+export const revokePlatformInstructorHandler = effectHandler((c) => Effect.gen(function* () {
+  const authContext = c.get("authContext") as AuthContext | undefined;
+  if (!authContext?.isSuperAdmin) {
+    return yield* new Forbidden({ message: "Super admin access required" });
+  }
+  const userId = c.req.param("userId");
+  if (!userId) return yield* new NotFound({ message: "Instructor not found" });
+
+  const organization = yield* query("getDeploymentOrganization", (db) => getDeploymentOrganization(db));
+  if (!organization) return yield* new NotFound({ message: "Instructor not found" });
+  const result = yield* query("revokePlatformInstructor", (db) => revokePlatformInstructor(db, userId));
+  if (result.status === "instructor_missing") {
+    return yield* new NotFound({ message: "Instructor not found" });
+  }
+  if (result.status === "sole_instructor") {
+    const courses = result.courses.map((course) => `${course.code} (${course.term})`).join(", ");
+    return yield* new Conflict({
+      message: `Assign another instructor to ${courses} before removing this instructor.`,
+    });
+  }
+
+  yield* query("auditBestEffort", (db) => auditBestEffort(db, [unsafeOrgScope(organization.id)], {
+    actorUserId: authContext.session.userId,
+    action: AUDIT_ACTIONS.PLATFORM_INSTRUCTOR_REVOKED,
+    targetType: AUDIT_TARGET_TYPES.USER,
+    targetId: userId,
+    requestMetadata: { removedMembershipCount: result.removed.length },
+  }));
+  for (const membership of result.removed) {
+    yield* query("auditBestEffort", (db) => auditBestEffort(db, [unsafeOrgScope(membership.organizationId)], {
+      actorUserId: authContext.session.userId,
+      action: AUDIT_ACTIONS.COURSE_MEMBERSHIP_REVOKED,
+      targetType: AUDIT_TARGET_TYPES.MEMBERSHIP,
+      targetId: membership.membershipId,
+      requestMetadata: { courseId: membership.courseId, userId, role: membership.role },
+    }));
+  }
+
+  return c.json({
+    status: "revoked",
+    removedMembershipCount: result.removed.length,
+  } satisfies RevokePlatformInstructorResponse);
 }));

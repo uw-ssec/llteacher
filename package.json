@@ -26,6 +26,7 @@
     "lint:design-system": "eslint apps/web/src/client apps/admin/src/client packages/ui/src --max-warnings=0",
     "test:design-system": "node --test scripts/design-system-lint.test.mjs",
     "screenshots:design-system": "node scripts/design-system-screenshots.mjs",
+    "screenshots:generative-ui": "tsx scripts/generative-ui-screenshots.mjs",
     "test": "turbo run test",
     "clean": "turbo run clean && rm -rf node_modules",
     "tutor:eval": "npm run tutor:eval --workspace=evals"

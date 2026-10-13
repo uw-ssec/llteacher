@@ -17,6 +17,50 @@ import { DefinitionCard } from "./DefinitionCard";
 import { CodeExecution, type RCodeResult } from "./renderers/CodeExecution";
 import { SectionCompleteSuggestion } from "./renderers/SectionCompleteSuggestion";
 import { isRenderableToolPartType } from "./renderableTools";
+import { ToolPartErrorBoundary } from "./ToolPartErrorBoundary";
+import { FigureSkeleton } from "./figure/FigurePlate";
+import { WorkedSteps } from "./renderers/WorkedSteps";
+import { MacroModelDiagram } from "./renderers/econ/MacroModelDiagram";
+import { GdpComposition } from "./renderers/econ/GdpComposition";
+import { MultiplierRounds } from "./renderers/econ/MultiplierRounds";
+import { LaborForce } from "./renderers/econ/LaborForce";
+import { PriceIndex } from "./renderers/econ/PriceIndex";
+import { DistributionPlot } from "./renderers/stats/DistributionPlot";
+import { KnowledgeCheck } from "./renderers/KnowledgeCheck";
+import { DiagnosticAccuracy } from "./renderers/clinical/DiagnosticAccuracy";
+import { PrevalenceEffect } from "./renderers/clinical/PrevalenceEffect";
+import { RocCurve } from "./renderers/clinical/RocCurve";
+import { PatientTimeline } from "./renderers/clinical/PatientTimeline";
+import { CdsRule } from "./renderers/clinical/CdsRule";
+import {
+  parseCdsRuleInput,
+  parseDiagnosticAccuracyInput,
+  parsePatientTimelineInput,
+  parsePrevalenceEffectInput,
+  parseRocCurveInput,
+} from "./toolInputs.clinical";
+import { QuadrupleAim } from "./renderers/informatics/QuadrupleAim";
+import { SociotechnicalModel } from "./renderers/informatics/SociotechnicalModel";
+import { Dikw } from "./renderers/informatics/Dikw";
+import { WorkflowComparison } from "./renderers/informatics/WorkflowComparison";
+import { StandardsMap } from "./renderers/informatics/StandardsMap";
+import { HealthItTimeline } from "./renderers/informatics/HealthItTimeline";
+import { RunChart } from "./renderers/informatics/RunChart";
+import { UsabilityScore } from "./renderers/informatics/UsabilityScore";
+import { AdoptionCurve } from "./renderers/informatics/AdoptionCurve";
+import { parseDikwInput, parseQuadrupleAimInput, parseSociotechnicalInput } from "./toolInputs.frameworks";
+import { parseHealthItTimelineInput, parseStandardsMapInput, parseWorkflowComparisonInput } from "./toolInputs.systems";
+import { parseAdoptionCurveInput, parseRunChartInput, parseUsabilityScoreInput } from "./toolInputs.measurement";
+import {
+  parseDistributionInput,
+  parseGdpCompositionInput,
+  parseInflationInput,
+  parseKnowledgeCheckInput,
+  parseLaborForceInput,
+  parseMacroModelInput,
+  parseMultiplierInput,
+  parseWorkedStepsInput,
+} from "./toolInputs";
 
 /* The minimal shape of a tool part we care about. AI SDK v5 emits parts
    with `type: 'tool-<toolName>'` and a state machine on `state`. */
@@ -28,6 +72,8 @@ export interface ToolPart {
     | "output-available"
     | "output-error";
   input?: unknown;
+  /** The AI SDK's id for this call; knowledgeCheck answers reference it. */
+  toolCallId?: string;
 }
 
 /** Runtime-validates the untrusted `input` of a `tool-showDefinition` part
@@ -100,9 +146,70 @@ export function parseExecuteRCodeInput(
  *  exactly as it did before `tool-executeRCode` existed. */
 export interface ToolPartHandlers {
   onRunRCode?: (code: string) => Promise<RCodeResult>;
+  /** #36: answers already given in this conversation (toolCallId ->
+   *  option index), and how to send a new one. Absent = read-only checks. */
+  knowledgeCheck?: {
+    answers: ReadonlyMap<string, number>;
+    onAnswer?: (toolCallId: string, question: string, options: string[], selectedIndex: number) => Promise<void>;
+  };
 }
 
+/* Subject figures (shared worked steps, and the subject packs an instructor
+   enables): every one is "validate the model's JSON, then draw", so they
+   share one table rather than near-identical branches. While the arguments are still
+   streaming and don't yet validate, a skeleton plate holds the space;
+   once streaming has finished, input that still doesn't validate renders
+   nothing (the deny-by-default contract above). */
+interface FigureTool<P> {
+  kicker: string;
+  parse: (input: unknown) => P | null;
+  render: (props: P, isPartial: boolean) => ReactNode;
+}
+
+function figureTool<P>(tool: FigureTool<P>): FigureTool<unknown> {
+  return tool as FigureTool<unknown>;
+}
+
+const FIGURE_TOOLS: Record<string, FigureTool<unknown>> = {
+  "tool-showWorkedSteps": figureTool({ kicker: "Worked steps", parse: parseWorkedStepsInput, render: (p, partial) => <WorkedSteps {...p} isPartial={partial} /> }),
+  "tool-showMacroModel": figureTool({ kicker: "Macro model", parse: parseMacroModelInput, render: (p, partial) => <MacroModelDiagram {...p} isPartial={partial} /> }),
+  "tool-showGdpComposition": figureTool({ kicker: "National income", parse: parseGdpCompositionInput, render: (p, partial) => <GdpComposition {...p} isPartial={partial} /> }),
+  "tool-showMultiplier": figureTool({ kicker: "Fiscal policy", parse: parseMultiplierInput, render: (p, partial) => <MultiplierRounds {...p} isPartial={partial} /> }),
+  "tool-showLaborForce": figureTool({ kicker: "Unemployment", parse: parseLaborForceInput, render: (p, partial) => <LaborForce {...p} isPartial={partial} /> }),
+  "tool-showDistribution": figureTool({ kicker: "Probability distribution", parse: parseDistributionInput, render: (p, partial) => <DistributionPlot {...p} isPartial={partial} /> }),
+  "tool-showInflation": figureTool({ kicker: "Inflation", parse: parseInflationInput, render: (p, partial) => <PriceIndex {...p} isPartial={partial} /> }),
+  "tool-showDiagnosticAccuracy": figureTool({ kicker: "Diagnostic accuracy", parse: parseDiagnosticAccuracyInput, render: (p, partial) => <DiagnosticAccuracy {...p} isPartial={partial} /> }),
+  "tool-showPrevalenceEffect": figureTool({ kicker: "Prevalence and predictive value", parse: parsePrevalenceEffectInput, render: (p, partial) => <PrevalenceEffect {...p} isPartial={partial} /> }),
+  "tool-showRocCurve": figureTool({ kicker: "ROC curve", parse: parseRocCurveInput, render: (p, partial) => <RocCurve {...p} isPartial={partial} /> }),
+  "tool-showPatientTimeline": figureTool({ kicker: "Patient timeline", parse: parsePatientTimelineInput, render: (p, partial) => <PatientTimeline {...p} isPartial={partial} /> }),
+  "tool-showCdsRule": figureTool({ kicker: "Decision support rule", parse: parseCdsRuleInput, render: (p, partial) => <CdsRule {...p} isPartial={partial} /> }),
+  "tool-showQuadrupleAim": figureTool({ kicker: "Quadruple Aim", parse: parseQuadrupleAimInput, render: (p, partial) => <QuadrupleAim {...p} isPartial={partial} /> }),
+  "tool-showSociotechnicalModel": figureTool({ kicker: "Sociotechnical model", parse: parseSociotechnicalInput, render: (p, partial) => <SociotechnicalModel {...p} isPartial={partial} /> }),
+  "tool-showDikw": figureTool({ kicker: "Data → wisdom", parse: parseDikwInput, render: (p, partial) => <Dikw {...p} isPartial={partial} /> }),
+  "tool-showWorkflowComparison": figureTool({ kicker: "Workflow comparison", parse: parseWorkflowComparisonInput, render: (p, partial) => <WorkflowComparison {...p} isPartial={partial} /> }),
+  "tool-showStandardsMap": figureTool({ kicker: "Standards map", parse: parseStandardsMapInput, render: (p, partial) => <StandardsMap {...p} isPartial={partial} /> }),
+  "tool-showHealthItTimeline": figureTool({ kicker: "Health IT timeline", parse: parseHealthItTimelineInput, render: (p, partial) => <HealthItTimeline {...p} isPartial={partial} /> }),
+  "tool-showRunChart": figureTool({ kicker: "Run chart", parse: parseRunChartInput, render: (p, partial) => <RunChart {...p} isPartial={partial} /> }),
+  "tool-showUsabilityScore": figureTool({ kicker: "System Usability Scale", parse: parseUsabilityScoreInput, render: (p, partial) => <UsabilityScore {...p} isPartial={partial} /> }),
+  "tool-showAdoptionCurve": figureTool({ kicker: "Diffusion of innovations", parse: parseAdoptionCurveInput, render: (p, partial) => <AdoptionCurve {...p} isPartial={partial} /> }),
+};
+
+/** The figure-tool part types, exported for the registry lockstep test. */
+export const FIGURE_TOOL_PART_TYPES: readonly string[] = Object.keys(FIGURE_TOOLS);
+
+/** #38: every tool part renders inside its own error boundary, so one
+ *  renderer that throws costs one figure, not the whole transcript. */
 export function renderToolPart(part: ToolPart, key: string, handlers?: ToolPartHandlers): ReactNode {
+  const node = renderToolPartInner(part, handlers);
+  if (node === null) return null;
+  return (
+    <ToolPartErrorBoundary key={key} toolName={part.type.slice("tool-".length)}>
+      {node}
+    </ToolPartErrorBoundary>
+  );
+}
+
+function renderToolPartInner(part: ToolPart, handlers?: ToolPartHandlers): ReactNode {
   // Final review of #307/#342: the same set the SERVER's persistence/replay
   // gate consults (chat.ts's hasRenderableContent). Checked here, ahead of
   // the dispatch, so the set cannot claim a name this function silently
@@ -114,7 +221,6 @@ export function renderToolPart(part: ToolPart, key: string, handlers?: ToolPartH
     if (!input) return null;
     return (
       <DefinitionCard
-        key={key}
         term={input.term}
         body={input.body}
         isPartial={part.state === "input-streaming"}
@@ -126,7 +232,6 @@ export function renderToolPart(part: ToolPart, key: string, handlers?: ToolPartH
     if (!input) return null;
     return (
       <CodeExecution
-        key={key}
         code={input.code}
         showSource={input.showSource}
         isPartial={part.state === "input-streaming"}
@@ -143,7 +248,35 @@ export function renderToolPart(part: ToolPart, key: string, handlers?: ToolPartH
   // tool-input-available/tool-output-available writes) still renders the
   // same suggestion card it did live.
   if (part.type === "tool-markSectionComplete") {
-    return <SectionCompleteSuggestion key={key} isPartial={part.state === "input-streaming"} />;
+    return <SectionCompleteSuggestion isPartial={part.state === "input-streaming"} />;
+  }
+  // #36: interactive, so it needs the call id (answers reference it) and the
+  // app's send path; without either it renders read-only.
+  if (part.type === "tool-knowledgeCheck") {
+    const isPartial = part.state === "input-streaming";
+    const input = parseKnowledgeCheckInput(part.input);
+    if (!input) return isPartial ? <FigureSkeleton kicker="Check your understanding" /> : null;
+    const callId = part.toolCallId;
+    const kc = handlers?.knowledgeCheck;
+    const onAnswer = callId && kc?.onAnswer
+      ? (index: number) => kc.onAnswer!(callId, input.question, input.options, index)
+      : undefined;
+    return (
+      <KnowledgeCheck
+        question={input.question}
+        options={input.options}
+        answeredIndex={callId ? kc?.answers.get(callId) : undefined}
+        onAnswer={onAnswer}
+        isPartial={isPartial}
+      />
+    );
+  }
+  const figure = FIGURE_TOOLS[part.type];
+  if (figure) {
+    const isPartial = part.state === "input-streaming";
+    const input = figure.parse(part.input);
+    if (!input) return isPartial ? <FigureSkeleton kicker={figure.kicker} /> : null;
+    return figure.render(input, isPartial);
   }
   return null;
 }

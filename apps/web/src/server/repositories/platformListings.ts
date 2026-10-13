@@ -69,7 +69,7 @@ export async function listPlatformInstructors(db: Db, cipher: IdentityCipher): P
     columns: { id: true },
   });
   const assignments = organization
-    ? await db.select({ userId: courseMemberships.userId, courseId: courseMemberships.courseId })
+    ? await db.select({ userId: courseMemberships.userId, courseId: courseMemberships.courseId, code: courses.code, term: courses.term })
       .from(courseMemberships)
       .innerJoin(courses, eq(courseMemberships.courseId, courses.id))
       .where(and(
@@ -78,11 +78,11 @@ export async function listPlatformInstructors(db: Db, cipher: IdentityCipher): P
         isNull(courseMemberships.droppedAt),
       ))
     : [];
-  const counts = new Map<string, Set<string>>();
+  const assignedCourses = new Map<string, Map<string, { code: string; term: string }>>();
   for (const assignment of assignments) {
-    const ids = counts.get(assignment.userId) ?? new Set<string>();
-    ids.add(assignment.courseId);
-    counts.set(assignment.userId, ids);
+    const byCourse = assignedCourses.get(assignment.userId) ?? new Map<string, { code: string; term: string }>();
+    byCourse.set(assignment.courseId, { code: assignment.code, term: assignment.term });
+    assignedCourses.set(assignment.userId, byCourse);
   }
 
   const decrypted = await Promise.all(instructorRows.map(async (row) => ({
@@ -90,7 +90,9 @@ export async function listPlatformInstructors(db: Db, cipher: IdentityCipher): P
     email: await cipher.decryptString(row.email),
     status: row.isPending ? "pending" as const : "signed_in" as const,
     grantedAt: row.grantedAt!.toISOString(),
-    assignedCourseCount: counts.get(row.userId)?.size ?? 0,
+    assignedCourseCount: assignedCourses.get(row.userId)?.size ?? 0,
+    assignedCourses: [...(assignedCourses.get(row.userId)?.values() ?? [])]
+      .sort((a, b) => a.code.localeCompare(b.code) || a.term.localeCompare(b.term)),
   })));
   return decrypted.sort((a, b) => a.email.localeCompare(b.email));
 }

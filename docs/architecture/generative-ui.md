@@ -86,9 +86,9 @@ const TOOLS: ToolSet = {
 !!! warning "Why `jsonSchema()` and not Zod"
     Zod's deeply parameterized types collide with `ToolSet` generic inference and trigger `TS2589: Type instantiation is excessively deep and possibly infinite`. The `jsonSchema<T>()` helper provides equivalent type safety with the same runtime validation, without the type-system explosion. Use this pattern for all future tools.
 
-### Display-only tools have no `execute`
+### Display tools return a sentinel from `execute`
 
-`showDefinition` has no server-side `execute` callback — its only purpose is to stream `term` and `body` to the client for rendering. Tools that need server-side work (a DB lookup, an external API call) would add `execute: async ({ args }) => result`.
+Display tools (`showDefinition` and the subject figures) still have a server-side `execute`. It returns a sentinel such as `{ status: "displayed" }`. Without a tool result, the history becomes invalid on the student's next message: the model sees an unanswered tool call. The sentinel also lets the model continue with follow-up text in the same turn (`stopWhen`).
 
 ### System prompt
 
@@ -230,6 +230,51 @@ if (part.type === "tool-showDistribution") {
 ```
 
 That's the entire surface area. No client transport changes, no message-mapping changes, no streaming protocol changes.
+
+## Subject figures and instructor-chosen packs
+
+Two kinds of tool are always available. Every other figure tool belongs to a subject pack, and a pack is opt-in per LLM config.
+
+**Always available (subject-neutral):**
+- `showDefinition`;
+- `showWorkedSteps`;
+- `knowledgeCheck` (an interactive multiple-choice question, #36);
+- `executeRCode`.
+
+**Subject packs** (`packages/ui/src/generative/toolkits.ts`; components in [components.md](../design-system/components.md#subject-figures-figureplate-family)):
+
+| Pack id | Label | Tools |
+|---|---|---|
+| `economics` | Economics (intro macro) | `showMacroModel`, `showGdpComposition`, `showMultiplier`, `showLaborForce`, `showInflation` |
+| `clinical-informatics` | Clinical informatics (built for NMETH 527, nursing) | `showQuadrupleAim`, `showSociotechnicalModel`, `showDikw`, `showWorkflowComparison`, `showStandardsMap`, `showHealthItTimeline`, `showRunChart`, `showUsabilityScore`, `showAdoptionCurve`, `showPatientTimeline`, `showCdsRule`, `showPrevalenceEffect` |
+| `test-evaluation` | Screening and test evaluation | `showDiagnosticAccuracy`, `showRocCurve`, `showPrevalenceEffect` |
+| `statistics` | Statistics | `showDistribution` (#35) |
+
+### How packs are chosen and enforced
+
+- **Choosing.** An instructor ticks packs under **Subject figures** on the LLM config form, in the admin console. The choice is stored in `llm_configs.genui_toolkits` (`text[]`, default `{}`, migration 0056). Packs are therefore optional, and nothing is enabled until someone opts in. Because the choice lives on the config, a homework or course that pins a config gets that config's packs, through the same homework → course → org resolution as the model and the knowledge-access switch.
+- **Enforcing.** `toolsForConversation` (`routes/chat.ts`) withholds every pack tool whose pack the resolved config hasn't enabled. A withheld tool is not in the turn's `tools`, so the model can't call it. It's also not in the generated tool paragraph, so the model isn't told it exists. Students can therefore only be shown figures from the packs their instructor chose.
+- **Shared tools.** A tool can belong to more than one pack. `showPrevalenceEffect` serves alert fatigue in informatics and screening in test evaluation, and it's offered when either pack is on.
+- **Already-saved figures still render.** Turning a pack off later doesn't hide figures already in a transcript. A turn's history is what happened, and the renderer still draws it.
+- **Validation.** The route validates the list: an unknown pack id is a 400 that names it. The list is stored normalized (known ids, de-duplicated, in catalog order). An update that omits the field keeps the stored packs, so an older client can't silently wipe them.
+
+### Contract every figure follows
+
+- **Computed, not trusted.** The model supplies arguments only. The figure computes everything it states, in `packages/ui/src/generative/lib/` (`econ.ts`, `clinical.ts`, `frameworks.ts`, `measurement.ts`, `systems.ts`, `stats.ts`, all unit-tested): equilibrium movement, GDP, the rates, PPV/NPV, AUC, rule firing, run-chart shifts and trends, SUS scores, adoption categories, workflow handoffs, tail probabilities. Framework figures also own their reference content: the aims, Sittig & Singh's eight dimensions, the DIKW levels, the SUS items, the standards catalog and the health IT milestones. The model picks from that content, so it can't misstate a date or a definition. Tool descriptions therefore tell the model to name what to draw, not the result.
+- **One table.** `render.tsx`'s `FIGURE_TOOLS` maps each part type to a kicker, a deny-by-default parser (`toolInputs*.ts`) and a renderer. Input that hasn't validated yet shows a skeleton while streaming, and nothing once streaming has finished.
+- **Per-part error boundary and lockstep (#38).**
+  - `renderToolPart` wraps every tool part in `ToolPartErrorBoundary`, so a renderer that throws costs one figure, not the transcript.
+  - `figures.test.tsx` and `toolkits.test.ts` check, in `packages/ui`, that every pack tool is renderable and has a renderer.
+  - `routes/toolCatalog.test.ts` checks, in `apps/web`, that every server tool is either renderable or deliberately server-only (`requestHint`, `searchKnowledge`, `showKnowledge`), and that every pack tool exists on the server.
+
+### The knowledge check's response path (#36)
+
+`knowledgeCheck` is the first interactive tool. The spec changed from the original issue: messages are AI SDK `parts` with no separate content type, and there is no answer key anywhere.
+
+1. **The model poses the question.** It calls `knowledgeCheck` with `{ question, options }`. The schema has **no answer field** (tested), so nothing in the browser can reveal the answer. The model already knows it and judges the student's choice on its next turn.
+2. **The student answers.** `KnowledgeCheck` is a native radio group with one Submit button. The answer is sent as an ordinary user turn: a text part (`My answer to the check "…": B. …`) plus a `data-knowledge-check-response` part with `{ toolCallId, selectedIndex }`. The chat surface's `sendKnowledgeCheckAnswer` does this (`useConversationSurface.tsx`).
+3. **The server validates the answer.** `routes/knowledgeCheckAnswer.ts` finds the referenced `tool-knowledgeCheck` call in the conversation's own recent history. It refuses a call that doesn't exist, an out-of-range index, a second answer, or two answers in one message. It then **rebuilds both parts from the stored check**, so the question, the options and the chosen option's text come from the server's record, not the client.
+4. **The answer is stored and used.** The message is stored with the data part, which is the durable record for M8's per-section analytics. The model reads the text part; the AI SDK drops data parts from model input. On replay, `collectKnowledgeCheckAnswers` locks the check on the stored answer. On surfaces with no send path, such as transcripts, checks render read-only.
 
 ## Streaming behavior
 

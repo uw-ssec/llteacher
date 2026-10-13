@@ -195,6 +195,18 @@
 
   /* Accent warm — UW Heritage Gold, reserved for AI-voice markers */
   --color-accent-warm:        var(--raw-accent-warm);
+
+  /* Generative figures: one categorical order shared by every chart, so an
+     entity keeps its colour across figures (AD is always slot 1). Validated
+     with the dataviz palette checker against --color-bg in both modes
+     (adjacent CVD dE 9.2 light / 9.4 dark). Slots 3 and 5 sit under 3:1 on
+     paper, so every mark carries a visible text label -- never colour alone.
+     Heritage Gold is deliberately absent: it marks the tutor's voice. */
+  --viz-1: #2A78D6;   /* blue */
+  --viz-2: #EB6834;   /* orange */
+  --viz-3: #1BAF7A;   /* aqua */
+  --viz-4: #4A3AA7;   /* violet */
+  --viz-5: #E87BA4;   /* magenta */
   --color-accent-warm-hover:  var(--raw-accent-warm-hover);
 
   /* Semantic alias for the warm accent's intended use */
@@ -297,6 +309,14 @@
 
   /* UW Husky Gold (print value) — works as the warm marker on dark */
   --color-accent-warm:        #B7A57A;   /* UW Husky Gold */
+
+  /* Generative figures: the dark steps of the same five hues, validated
+     against the dark --color-bg (not an automatic flip). */
+  --viz-1: #3987E5;
+  --viz-2: #D95926;
+  --viz-3: #199E70;
+  --viz-4: #9085E9;
+  --viz-5: #D55181;
   --color-accent-warm-hover:  #C8B88C;
 
   --color-stream:     var(--color-accent-warm);
@@ -8808,3 +8828,2008 @@ tr:focus-within .admin-knowledge__row-tools {
     flex-wrap: wrap;
   }
 }
+
+/* ==========================================================================
+   Generative figures (shared worked steps and the subject packs)
+
+   One plate for every figure: the language of a textbook figure, not a
+   dashboard card. A Geist Mono kicker with the same Heritage Gold tick the
+   tutor's own turns carry (this was produced by the tutor), a title, a
+   hairline-ruled figure area on paper, a one-line computed takeaway, and a
+   "Show the numbers" disclosure that is the figure's table view.
+
+   Data marks use the --viz-N categorical tokens; text never wears a data
+   colour (values and labels stay in text tokens, identity rides a swatch
+   or the mark beside them). Lines are 2px, markers r>=4 with a 2px
+   surface ring, gridlines hairline and recessive.
+   ========================================================================== */
+
+.gen-figure {
+  container-type: inline-size;
+  margin-block: var(--space-6);
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  transition: opacity 240ms ease-out;
+}
+
+.gen-figure--partial {
+  opacity: 0.55;
+}
+
+.gen-figure__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-block-end: var(--space-4);
+}
+
+.gen-figure__kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+/* The tutor's mark: same 4px Heritage Gold tick as an AI turn. */
+.gen-figure__kicker::before {
+  content: "";
+  width: 4px;
+  height: 0.9em;
+  border-radius: 1px;
+  background-color: var(--color-accent-warm);
+}
+
+.gen-figure__title {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.012em;
+  line-height: var(--leading-tight);
+  color: var(--color-text);
+}
+
+.gen-figure__body {
+  border-block: 1px solid var(--color-border);
+  padding-block: var(--space-4);
+}
+
+.gen-figure__takeaway {
+  margin: var(--space-3) 0 0;
+  font-size: var(--font-size-base);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+}
+
+.gen-figure__note {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.gen-figure__data {
+  margin-top: var(--space-3);
+  font-size: var(--font-size-sm);
+}
+
+.gen-figure__data summary {
+  cursor: pointer;
+  width: fit-content;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-accent);
+}
+
+.gen-figure__data summary:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.gen-figure__table-wrap {
+  overflow-x: auto;
+  margin-top: var(--space-2);
+}
+
+.gen-figure__table {
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+
+.gen-figure__table th,
+.gen-figure__table td {
+  padding: var(--space-1) var(--space-3) var(--space-1) 0;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+}
+
+.gen-figure__table th {
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+
+.gen-figure__table .gen-num {
+  text-align: right;
+}
+
+.gen-figure__skeleton {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.gen-figure__error {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+/* Legend: swatch + text-token label, wrapping row. */
+.gen-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.gen-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.gen-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.gen-swatch--1 { background-color: var(--viz-1); }
+.gen-swatch--2 { background-color: var(--viz-2); }
+.gen-swatch--3 { background-color: var(--viz-3); }
+.gen-swatch--4 { background-color: var(--viz-4); }
+.gen-swatch--5 { background-color: var(--viz-5); }
+
+/* SVG plates ------------------------------------------------------------- */
+
+.gen-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  font-family: var(--font-sans);
+}
+
+.gen-svg text {
+  fill: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.gen-svg .gen-svg__label {
+  fill: var(--color-text);
+  font-weight: var(--weight-medium);
+}
+
+.gen-svg .gen-svg__mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.gen-svg .gen-svg__axis-title {
+  fill: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.gen-axis {
+  stroke: var(--color-text-muted);
+  stroke-width: 1.25;
+  fill: none;
+}
+
+.gen-grid {
+  stroke: var(--color-border);
+  stroke-width: 1;
+}
+
+.gen-guide {
+  stroke: var(--color-text-muted);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+  fill: none;
+}
+
+.gen-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.gen-line--1 { stroke: var(--viz-1); }
+.gen-line--2 { stroke: var(--viz-2); }
+.gen-line--3 { stroke: var(--viz-3); }
+.gen-line--4 { stroke: var(--viz-4); }
+.gen-line--5 { stroke: var(--viz-5); }
+
+/* The position a curve shifted AWAY from: same identity, de-emphasised. */
+.gen-line--before {
+  stroke: var(--color-text-muted);
+  stroke-dasharray: 5 4;
+  stroke-width: 1.5;
+}
+
+.gen-fill--1 { fill: var(--viz-1); }
+.gen-fill--2 { fill: var(--viz-2); }
+.gen-fill--3 { fill: var(--viz-3); }
+.gen-fill--4 { fill: var(--viz-4); }
+.gen-fill--5 { fill: var(--viz-5); }
+
+.gen-arrow {
+  stroke: var(--color-text);
+  stroke-width: 1.5;
+  fill: none;
+}
+
+.gen-arrowhead {
+  fill: var(--color-text);
+}
+
+.gen-dot {
+  stroke: var(--color-surface);
+  stroke-width: 2;
+}
+
+.gen-dot--now { fill: var(--color-text); }
+.gen-dot--before { fill: var(--color-text-muted); }
+
+.gen-node {
+  fill: var(--color-text-secondary);
+}
+
+.gen-branch {
+  stroke: var(--color-text);
+  stroke-width: 1.5;
+  fill: none;
+  stroke-linecap: square;
+}
+
+/* Worked steps (shared) --------------------------------------------------- */
+
+.gen-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: gen-step;
+}
+
+.gen-steps__item {
+  display: grid;
+  grid-template-columns: 2.25rem minmax(0, 1fr);
+  gap: 0 var(--space-3);
+  padding-block: var(--space-3);
+  counter-increment: gen-step;
+}
+
+.gen-steps__item + .gen-steps__item {
+  border-top: 1px solid var(--color-border);
+}
+
+.gen-steps__item::before {
+  content: counter(gen-step, decimal-leading-zero);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  padding-top: 0.15em;
+}
+
+.gen-steps__label {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-steps__expr {
+  display: block;
+  margin-top: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  overflow-x: auto;
+  background-color: var(--color-code-bg);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  white-space: pre;
+}
+
+.gen-steps__why {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-secondary);
+  line-height: var(--leading-normal);
+}
+
+.gen-steps__result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 2px solid var(--color-text);
+}
+
+.gen-steps__result-label {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.gen-steps__result-value {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+/* An identity line should wrap at a term boundary, not scroll sideways. */
+.gen-identity {
+  white-space: normal;
+  word-spacing: 0.05em;
+}
+
+/* Stat chips (alignment, translation summaries) --------------------------- */
+
+.gen-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-6);
+  margin: 0 0 var(--space-4);
+}
+
+.gen-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gen-stat dt {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.gen-stat dd {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+
+/* SVG text is in viewBox units, so it shrinks with the figure. On a phone
+   (a figure under ~460px wide) set it larger, so it lands near 11px on
+   screen instead of ~8px. Sized against the plates' 440-unit viewBoxes. */
+@container (max-width: 460px) {
+  .gen-svg text { font-size: 17px; }
+  .gen-svg .gen-svg__mono,
+  .gen-svg .gen-svg__axis-title { font-size: 16px; }
+}
+
+/* Per-part error boundary (#38) -------------------------------------------- */
+
+.gen-figure--failed {
+  border-style: dashed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gen-figure {
+    transition: none;
+  }
+}
+
+/* Distribution plot (#35): the shaded region of a density, and the muted
+   bars outside a binomial region. */
+.gen-area-shade {
+  fill: var(--viz-1);
+  opacity: 0.28;
+}
+
+.gen-fill--muted {
+  fill: var(--color-border-strong);
+}
+
+/* Knowledge check (#36): option rows as large, calm targets; the chosen
+   one carries an accent rule AND a filled letter, never colour alone. */
+.gen-check {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.gen-check__options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.gen-check__option {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.gen-check__option:hover {
+  border-color: var(--color-accent);
+}
+
+.gen-check__option:focus-within {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.gen-check__option--selected {
+  border-color: var(--color-accent);
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}
+
+.gen-check__options:disabled .gen-check__option {
+  cursor: default;
+}
+
+.gen-check__options:disabled .gen-check__option:not(.gen-check__option--selected) {
+  color: var(--color-text-secondary);
+}
+
+/* The radio is drawn from tokens: the native control's disabled look varies by
+   browser and theme (solid grey discs in dark), which hid the chosen option. */
+.gen-check__option input[type="radio"] {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  border: 1.5px solid var(--color-border-strong);
+  border-radius: 50%;
+  background-color: var(--color-surface);
+}
+
+.gen-check__option input[type="radio"]::before {
+  content: "";
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background-color: var(--color-accent);
+  transform: scale(0);
+}
+
+.gen-check__option input[type="radio"]:checked {
+  border-color: var(--color-accent);
+}
+
+.gen-check__option input[type="radio"]:checked::before {
+  transform: scale(1);
+}
+
+.gen-check__option input[type="radio"]:focus-visible {
+  outline: none;
+}
+
+.gen-check__letter {
+  display: inline-grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 50%;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.gen-check__option--selected .gen-check__letter {
+  border-color: var(--color-accent);
+  background-color: var(--color-accent);
+  color: var(--color-surface);
+}
+
+.gen-check__text {
+  line-height: var(--leading-normal);
+}
+
+.gen-check__submit {
+  align-self: flex-start;
+  padding: var(--space-2) var(--space-5);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-accent);
+  color: var(--color-surface);
+  font: inherit;
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+
+.gen-check__submit:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.gen-check__submit:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.gen-check__error {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+}
+
+/* ==========================================================================
+   Clinical informatics figures
+
+   Diagnostic accuracy (mosaic + 2x2), predictive value by prevalence, ROC,
+   patient timeline and a decision support rule card. Same plate and marks
+   as the other packs; state (abnormal, met / not met / missing, fires) is
+   always carried by a shape, symbol or word as well, never colour alone.
+   ========================================================================== */
+
+/* Mosaic cells are tinted, so the TP / FP / FN / TN labels on them stay in
+   a text token at full contrast; the outline carries the slot colour. */
+.gen-mosaic__cell {
+  fill-opacity: 0.22;
+  stroke-width: 1.5;
+}
+
+.gen-mosaic__cell--1 { fill: var(--viz-1); stroke: var(--viz-1); }
+.gen-mosaic__cell--2 { fill: var(--viz-2); stroke: var(--viz-2); }
+
+.gen-mosaic__stats {
+  margin: var(--space-4) 0 0;
+}
+
+/* Area under the ROC curve: a faint wash of the curve's own slot. */
+.gen-roc__area {
+  fill: var(--viz-1);
+  fill-opacity: 0.1;
+  stroke: none;
+}
+
+/* Patient timeline --------------------------------------------------------- */
+
+/* The abnormal flag: a ring around the marker, in ink. */
+.gen-timeline__ring {
+  fill: none;
+  stroke: var(--color-text);
+  stroke-width: 1.5;
+}
+
+.gen-timeline__ring-key {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--color-text);
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Lanes past the five categorical slots (orders, notes) are neutral. */
+.gen-timeline__neutral {
+  background-color: var(--color-text-secondary);
+}
+
+.gen-timeline__list {
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-size-sm);
+}
+
+.gen-timeline__item {
+  display: grid;
+  grid-template-columns: 7.5rem 7.5rem minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  align-items: baseline;
+  padding-block: var(--space-2);
+}
+
+.gen-timeline__item + .gen-timeline__item {
+  border-top: 1px solid var(--color-border);
+}
+
+.gen-timeline__time {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.gen-timeline__cat {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-secondary);
+}
+
+.gen-timeline__event {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gen-timeline__label {
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.gen-timeline__detail {
+  color: var(--color-text-secondary);
+}
+
+.gen-timeline__flag {
+  justify-self: start;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-text);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+/* On a phone: time and category on one line, the event beneath. */
+@container (max-width: 460px) {
+  .gen-timeline__item {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .gen-timeline__event,
+  .gen-timeline__flag {
+    grid-column: 1 / -1;
+  }
+}
+
+/* Decision support rule card ----------------------------------------------- */
+
+.gen-cds {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.gen-cds__logic {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text-secondary);
+}
+
+.gen-cds__keyword {
+  margin-inline-end: var(--space-1);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.12em;
+  color: var(--color-text);
+}
+
+.gen-cds__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-cds__row {
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: start;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+/* Missing is a gap in the data: drawn as a dashed edge, not a colour. */
+.gen-cds__row--missing {
+  border-style: dashed;
+  border-color: var(--color-border-strong);
+}
+
+.gen-cds__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 1.5px solid var(--color-text-muted);
+  border-radius: 50%;
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-cds__row--met .gen-cds__mark {
+  border-color: var(--color-text);
+  background-color: var(--color-text);
+  color: var(--color-surface);
+}
+
+.gen-cds__row--missing .gen-cds__mark {
+  border-style: dashed;
+}
+
+.gen-cds__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gen-cds__label {
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.gen-cds__expr {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.gen-cds__value {
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+
+.gen-cds__result {
+  padding-top: 0.3em;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.gen-cds__row--met .gen-cds__result {
+  color: var(--color-text);
+}
+
+.gen-cds__outcome {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.gen-cds__outcome--fires {
+  border: 2px solid var(--color-text);
+}
+
+.gen-cds__outcome--blocked {
+  border-style: dashed;
+}
+
+.gen-cds__verdict {
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-cds__tally {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-normal);
+  color: var(--color-text-muted);
+}
+
+.gen-cds__action {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text-secondary);
+}
+
+@container (max-width: 460px) {
+  .gen-cds__row {
+    grid-template-columns: 1.5rem minmax(0, 1fr);
+  }
+
+  .gen-cds__result {
+    grid-column: 2;
+    padding-top: 0;
+  }
+}
+
+/* >>> genui:frameworks */
+/* ==========================================================================
+   Health informatics framework figures
+
+   Quadruple Aim cards, the sociotechnical model's eight dimensions and the
+   DIKW staircase. HTML layouts that reflow; the frameworks' own entities
+   (an aim, a DIKW level) keep a categorical slot via .gen-swatch--N, and
+   state (improves / worsens, contributing / protective) is always a symbol
+   and a word as well -- never colour alone. Text stays in text tokens.
+   ========================================================================== */
+
+/* Small mono label shared by the three figures ("Measure", "Action"). */
+.gen-fw-label {
+  margin-inline-end: var(--space-1);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+/* Quadruple Aim ------------------------------------------------------------ */
+
+.gen-fw-aims {
+  display: flex;
+  flex-direction: column;
+}
+
+.gen-fw-aims__tally {
+  margin-bottom: var(--space-3);
+}
+
+.gen-fw-aims__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-fw-aim {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+/* Mixed and worsens are the trade-offs: a heavier edge, plus the word. */
+.gen-fw-aim--worsens,
+.gen-fw-aim--mixed {
+  border: 2px solid var(--color-text);
+}
+
+/* Unclear is a gap in the evidence: dashed, like missing data. */
+.gen-fw-aim--unclear {
+  border-style: dashed;
+}
+
+.gen-fw-aim__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.gen-fw-aim__name {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-fw-aim__def {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-normal);
+  color: var(--color-text-muted);
+}
+
+.gen-fw-aim__effect {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text);
+}
+
+.gen-fw-aim__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 1.5px solid var(--color-text);
+  border-radius: 50%;
+  font-size: var(--font-size-sm);
+  letter-spacing: 0;
+}
+
+.gen-fw-aim--improves .gen-fw-aim__mark {
+  background-color: var(--color-text);
+  color: var(--color-surface);
+}
+
+.gen-fw-aim--unclear .gen-fw-aim__mark {
+  border-style: dashed;
+  border-color: var(--color-text-muted);
+}
+
+.gen-fw-aim__flag {
+  padding: 0 var(--space-1);
+  border: 1px solid var(--color-text);
+  border-radius: var(--radius-sm);
+  font-weight: var(--weight-normal);
+}
+
+.gen-fw-aim__why {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+}
+
+.gen-fw-aim__measure {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text-secondary);
+}
+
+@container (max-width: 460px) {
+  .gen-fw-aims__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Sociotechnical model ----------------------------------------------------- */
+
+.gen-fw-stm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* The overview: eight numbered cells. Contributing is solid ink, protective
+   an ink outline, not assessed a dashed muted outline -- each with its own
+   symbol, so the strip reads in greyscale. */
+.gen-fw-stm__strip {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-fw-stm__cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  min-width: 1.5rem;
+  min-height: 1.5rem;
+  padding: var(--space-1);
+  border: 1.5px solid var(--color-text);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text);
+}
+
+.gen-fw-stm__strip .gen-fw-stm__cell {
+  display: flex;
+  flex-direction: column;
+  min-height: 3rem;
+}
+
+.gen-fw-stm__cell--contributing {
+  background-color: var(--color-text);
+  color: var(--color-surface);
+}
+
+.gen-fw-stm__cell--none {
+  border-style: dashed;
+  border-color: var(--color-text-muted);
+  color: var(--color-text-muted);
+}
+
+.gen-fw-stm__n {
+  font-weight: var(--weight-semibold);
+}
+
+.gen-fw-stm__cell-mark {
+  font-weight: var(--weight-semibold);
+}
+
+.gen-fw-stm__key {
+  margin: 0;
+}
+
+.gen-fw-stm__list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-fw-stm__row {
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 1fr) 8.5rem;
+  gap: var(--space-3);
+  align-items: start;
+  padding-block: var(--space-2);
+}
+
+.gen-fw-stm__row + .gen-fw-stm__row {
+  border-top: 1px solid var(--color-border);
+}
+
+.gen-fw-stm__num {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+.gen-fw-stm__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gen-fw-stm__name {
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.gen-fw-stm__def {
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-normal);
+  color: var(--color-text-muted);
+}
+
+.gen-fw-stm__finding {
+  margin-top: 2px;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+}
+
+.gen-fw-stm__role {
+  padding-top: 0.15em;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.gen-fw-stm__row--contributing .gen-fw-stm__role {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-fw-stm__row--none .gen-fw-stm__name {
+  color: var(--color-text-secondary);
+}
+
+.gen-fw-stm__row--none .gen-fw-stm__role {
+  color: var(--color-text-muted);
+}
+
+@container (max-width: 460px) {
+  .gen-fw-stm__strip .gen-fw-stm__cell {
+    min-height: 2.5rem;
+    padding: 2px;
+  }
+
+  .gen-fw-stm__row {
+    grid-template-columns: 1.5rem minmax(0, 1fr);
+    gap: var(--space-1) var(--space-3);
+  }
+
+  .gen-fw-stm__role {
+    grid-column: 2;
+    padding-top: 0;
+  }
+}
+
+/* DIKW staircase ----------------------------------------------------------- */
+
+.gen-fw-dikw {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Four steps rising left to right: each starts lower on the page than the
+   next, so the tops climb from data to wisdom; all stretch to one floor. */
+.gen-fw-dikw__stairs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: stretch;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-fw-dikw__step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-top-width: 3px;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface-raised);
+}
+
+.gen-fw-dikw__step--1 { margin-top: var(--space-12); border-top-color: var(--viz-1); }
+.gen-fw-dikw__step--2 { margin-top: var(--space-8); border-top-color: var(--viz-2); }
+.gen-fw-dikw__step--3 { margin-top: var(--space-4); border-top-color: var(--viz-3); }
+.gen-fw-dikw__step--4 { margin-top: 0; border-top-color: var(--viz-4); }
+
+.gen-fw-dikw__level {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.gen-fw-dikw__n {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.gen-fw-dikw__name {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-fw-dikw__def {
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-normal);
+  color: var(--color-text-muted);
+}
+
+.gen-fw-dikw__example {
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+}
+
+.gen-fw-dikw__action {
+  margin: 0;
+  padding: var(--space-3);
+  border: 2px solid var(--color-text);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text);
+}
+
+/* On a phone: stacked bands, each indented a little more, so the climb
+   still reads top to bottom from data to wisdom. */
+@container (max-width: 460px) {
+  .gen-fw-dikw__stairs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gen-fw-dikw__step--1 { margin: 0; }
+  .gen-fw-dikw__step--2 { margin: 0 0 0 var(--space-3); }
+  .gen-fw-dikw__step--3 { margin: 0 0 0 var(--space-6); }
+  .gen-fw-dikw__step--4 { margin: 0 0 0 var(--space-8); }
+}
+/* <<< genui:frameworks */
+
+/* >>> genui:systems */
+/* ==========================================================================
+   Health information systems figures (gen-sy-)
+
+   Workflow swimlanes (current vs future state), a standards map and the
+   health IT history timeline. Text-heavy, so all three are HTML that
+   reflows: the swimlane grid becomes an ordered list on a phone. A step's
+   kind, a standard's category and a milestone's category are a coloured
+   edge or swatch AND a word; text stays in text tokens.
+   ========================================================================== */
+
+/* Workflow comparison ------------------------------------------------------ */
+
+.gen-sy-legend {
+  margin: 0 0 var(--space-3);
+}
+
+.gen-sy-glyph {
+  display: inline-block;
+  min-width: 1em;
+  text-align: center;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-flow + .gen-sy-flow {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.gen-sy-flow__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-sy-flow__label {
+  font-weight: var(--weight-normal);
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-flow__label::before {
+  content: "· ";
+}
+
+.gen-sy-flow__stats {
+  gap: var(--space-2) var(--space-5);
+  margin: var(--space-2) 0 var(--space-3);
+}
+
+.gen-sy-flow__stats dd {
+  font-size: var(--font-size-base);
+}
+
+.gen-sy-scroll {
+  overflow-x: auto;
+}
+
+/* One grid per state: a column per role (lane), a header row, then one
+   row per step, so the order reads top to bottom and a handoff is a move
+   to another column. */
+.gen-sy-lanes {
+  display: grid;
+  column-gap: var(--space-2);
+}
+
+.gen-sy-roles--1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.gen-sy-roles--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.gen-sy-roles--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.gen-sy-roles--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.gen-sy-roles--5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.gen-sy-roles--6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+
+.gen-sy-n--1 { grid-template-rows: auto repeat(1, auto); }
+.gen-sy-n--2 { grid-template-rows: auto repeat(2, auto); }
+.gen-sy-n--3 { grid-template-rows: auto repeat(3, auto); }
+.gen-sy-n--4 { grid-template-rows: auto repeat(4, auto); }
+.gen-sy-n--5 { grid-template-rows: auto repeat(5, auto); }
+.gen-sy-n--6 { grid-template-rows: auto repeat(6, auto); }
+.gen-sy-n--7 { grid-template-rows: auto repeat(7, auto); }
+.gen-sy-n--8 { grid-template-rows: auto repeat(8, auto); }
+.gen-sy-n--9 { grid-template-rows: auto repeat(9, auto); }
+.gen-sy-n--10 { grid-template-rows: auto repeat(10, auto); }
+.gen-sy-n--11 { grid-template-rows: auto repeat(11, auto); }
+.gen-sy-n--12 { grid-template-rows: auto repeat(12, auto); }
+.gen-sy-n--13 { grid-template-rows: auto repeat(13, auto); }
+.gen-sy-n--14 { grid-template-rows: auto repeat(14, auto); }
+.gen-sy-n--15 { grid-template-rows: auto repeat(15, auto); }
+.gen-sy-n--16 { grid-template-rows: auto repeat(16, auto); }
+.gen-sy-n--17 { grid-template-rows: auto repeat(17, auto); }
+.gen-sy-n--18 { grid-template-rows: auto repeat(18, auto); }
+.gen-sy-n--19 { grid-template-rows: auto repeat(19, auto); }
+.gen-sy-n--20 { grid-template-rows: auto repeat(20, auto); }
+
+.gen-sy-lane--1 { grid-column: 1; }
+.gen-sy-lane--2 { grid-column: 2; }
+.gen-sy-lane--3 { grid-column: 3; }
+.gen-sy-lane--4 { grid-column: 4; }
+.gen-sy-lane--5 { grid-column: 5; }
+.gen-sy-lane--6 { grid-column: 6; }
+
+.gen-sy-at--1 { grid-row: 2; }
+.gen-sy-at--2 { grid-row: 3; }
+.gen-sy-at--3 { grid-row: 4; }
+.gen-sy-at--4 { grid-row: 5; }
+.gen-sy-at--5 { grid-row: 6; }
+.gen-sy-at--6 { grid-row: 7; }
+.gen-sy-at--7 { grid-row: 8; }
+.gen-sy-at--8 { grid-row: 9; }
+.gen-sy-at--9 { grid-row: 10; }
+.gen-sy-at--10 { grid-row: 11; }
+.gen-sy-at--11 { grid-row: 12; }
+.gen-sy-at--12 { grid-row: 13; }
+.gen-sy-at--13 { grid-row: 14; }
+.gen-sy-at--14 { grid-row: 15; }
+.gen-sy-at--15 { grid-row: 16; }
+.gen-sy-at--16 { grid-row: 17; }
+.gen-sy-at--17 { grid-row: 18; }
+.gen-sy-at--18 { grid-row: 19; }
+.gen-sy-at--19 { grid-row: 20; }
+.gen-sy-at--20 { grid-row: 21; }
+
+/* A lane: a full-height band, every other one faintly washed. */
+.gen-sy-band {
+  grid-row: 1 / -1;
+  border-radius: var(--radius-sm);
+}
+
+.gen-sy-band.gen-sy-lane--1,
+.gen-sy-band.gen-sy-lane--3,
+.gen-sy-band.gen-sy-lane--5 {
+  background-color: var(--color-bg);
+}
+
+.gen-sy-lane {
+  grid-row: 1;
+  align-self: end;
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  border-bottom: 1px solid var(--color-border-strong);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+/* The steps join the lane grid directly; on a phone they are a list. */
+.gen-sy-steps {
+  display: contents;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-sy-step {
+  position: relative;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: var(--space-1) var(--space-1) 0;
+  padding: var(--space-2);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  line-height: var(--leading-tight);
+}
+
+/* Breathing room under the last step in each lane band. */
+.gen-sy-step:last-child {
+  margin-bottom: var(--space-1);
+}
+
+/* Kinds take slots 1-5 in the fixed order: task, decision, documentation,
+   communication, wait. The edge is the colour; the word is the meaning. */
+.gen-sy-kind--1 { border-left-color: var(--viz-1); }
+.gen-sy-kind--2 { border-left-color: var(--viz-2); }
+.gen-sy-kind--3 { border-left-color: var(--viz-3); }
+.gen-sy-kind--4 { border-left-color: var(--viz-4); }
+.gen-sy-kind--5 { border-left-color: var(--viz-5); }
+
+.gen-sy-step__top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.gen-sy-step__num {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+
+/* The lane already names the role on a wide figure: keep it for screen
+   readers only, and show it on a phone where the lanes are gone. */
+.gen-sy-step__role {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.gen-sy-step__action {
+  font-size: var(--font-size-xs);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.gen-sy-step__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-step__kind {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.gen-sy-step__min {
+  font-variant-numeric: tabular-nums;
+}
+
+.gen-sy-step__handoff {
+  padding-top: var(--space-1);
+  border-top: 1px dashed var(--color-border-strong);
+  font-size: 0.6875rem;
+  color: var(--color-text-secondary);
+}
+
+/* Standards map ------------------------------------------------------------ */
+
+.gen-sy-map {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.gen-sy-cat,
+.gen-sy-exchange {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.gen-sy-cat__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-std {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-left-width: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.gen-sy-std--1 { border-left-color: var(--viz-1); }
+.gen-sy-std--2 { border-left-color: var(--viz-2); }
+.gen-sy-std--3 { border-left-color: var(--viz-3); }
+
+.gen-sy-std__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+}
+
+.gen-sy-std__name {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+.gen-sy-std__count {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.gen-sy-std__about {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-std__steward {
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.gen-sy-std__list {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-sy-el {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: var(--space-1) var(--space-4);
+  padding-block: var(--space-2);
+  border-top: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+}
+
+.gen-sy-el__name {
+  color: var(--color-text);
+}
+
+.gen-sy-el__code {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gen-sy-el__value {
+  padding: 0 var(--space-1);
+  background-color: var(--color-code-bg);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.gen-sy-el__display {
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-el__caveat {
+  font-size: var(--font-size-xs);
+  font-style: italic;
+  color: var(--color-text-muted);
+}
+
+.gen-sy-exchange {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.gen-sy-exchange__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+/* Health IT timeline ------------------------------------------------------- */
+
+.gen-sy-tl-legend {
+  margin: 0 0 var(--space-3);
+}
+
+.gen-sy-tl__key {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--color-text-muted);
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.gen-sy-tl__key--hi {
+  border-color: var(--color-text);
+  background-color: var(--color-text);
+}
+
+.gen-sy-tl__key--local {
+  border-color: var(--color-text-secondary);
+  border-style: dashed;
+  border-radius: 2px;
+}
+
+.gen-sy-tl {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-sy-tl__decade + .gen-sy-tl__decade {
+  margin-top: var(--space-3);
+}
+
+.gen-sy-tl__decade-head {
+  margin: 0;
+  padding-bottom: var(--space-1);
+  border-bottom: 1px solid var(--color-border);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.04em;
+  color: var(--color-text);
+}
+
+.gen-sy-tl__empty {
+  margin: var(--space-2) 0 0 calc(3rem + var(--space-3));
+  font-size: var(--font-size-sm);
+  font-style: italic;
+  color: var(--color-text-muted);
+}
+
+.gen-sy-tl__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-sy-tl__item {
+  display: grid;
+  grid-template-columns: 3rem minmax(0, 1fr);
+  column-gap: var(--space-3);
+}
+
+.gen-sy-tl__year {
+  padding-top: var(--space-2);
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+
+/* The rule runs down the left edge of the bodies; each entry hangs a
+   marker on it: hollow for context, filled for highlighted. */
+.gen-sy-tl__body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--space-2) 0 var(--space-2) var(--space-4);
+  border-left: 2px solid var(--color-border-strong);
+}
+
+.gen-sy-tl__body::before {
+  content: "";
+  position: absolute;
+  top: calc(var(--space-2) + 0.3em);
+  left: -7px;
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--color-text-muted);
+  border-radius: 50%;
+  background-color: var(--color-surface);
+}
+
+.gen-sy-tl__item--hi .gen-sy-tl__body::before,
+.gen-sy-tl__item--all .gen-sy-tl__body::before {
+  border-color: var(--color-text);
+  background-color: var(--color-text);
+}
+
+.gen-sy-tl__item--local .gen-sy-tl__body::before {
+  border-style: dashed;
+  border-color: var(--color-text-secondary);
+  border-radius: 2px;
+}
+
+.gen-sy-tl__label {
+  font-size: var(--font-size-sm);
+  line-height: var(--leading-normal);
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-tl__item--hi .gen-sy-tl__label {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+
+/* Everything highlighted: nothing to set apart, so plain ink. */
+.gen-sy-tl__item--all .gen-sy-tl__label {
+  color: var(--color-text);
+}
+
+.gen-sy-tl__item--local .gen-sy-tl__label {
+  padding: var(--space-1) var(--space-2);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+}
+
+.gen-sy-tl__cat {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+.gen-sy-tl__local {
+  font-size: var(--font-size-xs);
+  font-style: italic;
+  color: var(--color-text-secondary);
+}
+
+/* On a phone ---------------------------------------------------------------- */
+
+@container (max-width: 460px) {
+  /* The lanes become an ordered list: number, role, then the step. */
+  .gen-sy-scroll {
+    overflow: visible;
+  }
+
+  .gen-sy-lanes {
+    display: block;
+  }
+
+  .gen-sy-band,
+  .gen-sy-lane {
+    display: none;
+  }
+
+  .gen-sy-steps {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .gen-sy-step {
+    align-self: stretch;
+    margin: 0;
+    font-size: var(--font-size-sm);
+  }
+
+  .gen-sy-step__role {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+    white-space: normal;
+    font-weight: var(--weight-semibold);
+    color: var(--color-text);
+  }
+
+  .gen-sy-step__action {
+    font-size: var(--font-size-sm);
+  }
+
+  .gen-sy-step__meta,
+  .gen-sy-step__handoff {
+    font-size: var(--font-size-xs);
+  }
+
+  .gen-sy-el {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gen-sy-tl__item {
+    grid-template-columns: 2.75rem minmax(0, 1fr);
+    column-gap: var(--space-3);
+  }
+
+  .gen-sy-tl__empty {
+    margin-left: calc(2.75rem + var(--space-3));
+  }
+}
+
+/* Narrow: the state's label takes its own line, without the separator dot
+   that would otherwise wrap to the start of a line. */
+@container (max-width: 460px) {
+  .gen-sy-flow__label {
+    flex-basis: 100%;
+  }
+
+  .gen-sy-flow__label::before {
+    content: none;
+  }
+}
+/* <<< genui:systems */
+
+/* >>> genui:measurement */
+/* ==========================================================================
+   Measurement figures (clinical informatics): run chart, System Usability
+   Scale, adoption curve. Same plate and marks as the other packs. Signals,
+   the mean and "now" are drawn in ink with a shape or a word, never colour
+   alone; the data keep slot 1.
+   ========================================================================== */
+
+/* Run chart: the median in ink; dashed where a baseline median is extended. */
+.gen-ms-median {
+  stroke: var(--color-text-secondary);
+  stroke-width: 1.5;
+  fill: none;
+}
+
+.gen-ms-median--ext {
+  stroke-dasharray: 6 4;
+}
+
+/* A point that belongs to a shift or trend: an ink ring around the marker. */
+.gen-ms-ring {
+  fill: none;
+  stroke: var(--color-text);
+  stroke-width: 1.5;
+}
+
+.gen-ms-bracket {
+  fill: none;
+  stroke: var(--color-text-secondary);
+  stroke-width: 1.25;
+}
+
+/* Legend keys for the marks above. */
+.gen-ms-key-median,
+.gen-ms-key-change {
+  display: inline-block;
+  width: 16px;
+  height: 0;
+  flex-shrink: 0;
+  border-top: 1.5px solid var(--color-text-secondary);
+}
+
+.gen-ms-key-change {
+  border-top: 1.5px dotted var(--color-text-muted);
+}
+
+.gen-ms-key-ring {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border: 1.5px solid var(--color-text);
+  border-radius: 50%;
+}
+
+/* SUS: the mean as a solid ink rule (68 is a dotted guide). */
+.gen-ms-mean {
+  stroke: var(--color-text);
+  stroke-width: 2;
+}
+
+.gen-ms-subhead {
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+
+/* Adoption bell curve: the adopted share in slot 1, the rest a neutral wash. */
+.gen-ms-reached {
+  fill: var(--viz-1);
+  fill-opacity: 0.35;
+  stroke: none;
+}
+
+.gen-ms-unreached {
+  fill: var(--color-border);
+  fill-opacity: 0.5;
+  stroke: none;
+}
+
+.gen-ms-curve {
+  fill: none;
+  stroke: var(--color-text-secondary);
+  stroke-width: 1.5;
+}
+
+.gen-ms-boundary {
+  stroke: var(--color-surface);
+  stroke-width: 1.5;
+}
+
+.gen-ms-now {
+  stroke: var(--color-text);
+  stroke-width: 1.5;
+}
+
+/* Adopter categories: a row each, status in words. */
+.gen-ms-cats {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-size-sm);
+}
+
+.gen-ms-cat {
+  display: grid;
+  grid-template-columns: minmax(0, 9rem) minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  align-items: baseline;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.gen-ms-cat__name {
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.gen-ms-cat__share {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-secondary);
+}
+
+.gen-ms-cat__status {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+/* Next to adopt: a heavier ink edge and ink status word. */
+.gen-ms-cat--next {
+  border: 2px solid var(--color-text);
+}
+
+.gen-ms-cat--next .gen-ms-cat__status,
+.gen-ms-cat--adopted .gen-ms-cat__status {
+  color: var(--color-text);
+}
+
+/* Not yet reached: a dashed edge. */
+.gen-ms-cat--ahead {
+  border-style: dashed;
+}
+
+@container (max-width: 460px) {
+  .gen-ms-cat {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .gen-ms-cat__share {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
+/* <<< genui:measurement */

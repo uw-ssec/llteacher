@@ -179,6 +179,38 @@ describe("cancellation (#33)", () => {
 });
 
 describe("request shapes (#33)", () => {
+  it("revokes platform instructor access using an encoded user ID", async () => {
+    const mock = stub(() => json({ status: "revoked", removedMembershipCount: 2 }));
+    const result = await apiClient.platformInstructors.revoke("user/one", opts);
+    expect(mock.mock.calls[0]).toEqual([
+      "/api/platform/instructors/user%2Fone",
+      expect.objectContaining({ method: "DELETE" }),
+    ]);
+    expect(result).toEqual({ status: "revoked", removedMembershipCount: 2 });
+  });
+
+  it("adds a course instructor using an encoded course ID and JSON body", async () => {
+    const mock = stub(() => json({
+      instructor: { userId: "u2", email: "second@uw.edu" }, membershipAdded: true,
+    }, 201));
+    const result = await apiClient.platformCourses.addInstructor("course/one", { instructorEmail: "second@uw.edu" }, opts);
+    expect(mock.mock.calls[0]).toEqual([
+      "/api/platform/courses/course%2Fone/instructors",
+      expect.objectContaining({ method: "POST", body: '{"instructorEmail":"second@uw.edu"}' }),
+    ]);
+    expect(result).toEqual({ instructor: { userId: "u2", email: "second@uw.edu" }, membershipAdded: true });
+  });
+
+  it("saves course instructor removals as a batch", async () => {
+    const mock = stub(() => json({ removedUserIds: ["u1"] }));
+    const result = await apiClient.platformCourses.removeInstructors("course/one", { removeUserIds: ["u1"] }, opts);
+    expect(mock.mock.calls[0]).toEqual([
+      "/api/platform/courses/course%2Fone/instructors",
+      expect.objectContaining({ method: "PATCH", body: '{"removeUserIds":["u1"]}' }),
+    ]);
+    expect(result).toEqual({ removedUserIds: ["u1"] });
+  });
+
   it("encodes path segments so an id cannot escape its position", async () => {
     const mock = stub(() => json({ membershipId: "m" }));
     await apiClient.tas.remove("c/1", "../../admin", opts);

@@ -22,12 +22,13 @@
    -------------------------------------------------------------------------- */
 
 import { useCallback, useMemo, useRef, useState } from "react";
-import { CloudArrowDown, Users, UploadSimple, Warning } from "@phosphor-icons/react";
+import { CloudArrowDown, DownloadSimple, Users, UploadSimple, Warning } from "@phosphor-icons/react";
 import type { CanvasSyncResponse, RosterMemberPayload, RosterMemberStatus } from "@llteacher/ui/api";
 import { PageHeader } from "../components/PageHeader";
 import { ViewEmpty, ViewError, ViewLoading } from "../components/ViewState";
 import { RosterImportPanel } from "../components/RosterImportPanel";
 import { apiClient, ApiError } from "../lib/api-client";
+import { downloadRosterCsvTemplate } from "../lib/rosterCsvTemplate";
 import { useApiResource } from "../lib/useApiResource";
 
 /** Copy per status, `satisfies Record<...>` so a status added to the wire
@@ -222,6 +223,14 @@ export function StudentsView({
         subtitle="Everyone enrolled in this course, including people who have been added but have not signed in yet."
         actions={
           <>
+            <button
+              type="button"
+              className="admin-accession__open"
+              onClick={downloadRosterCsvTemplate}
+            >
+              <DownloadSimple size={15} weight="regular" aria-hidden="true" />
+              Download CSV template
+            </button>
             <button
               type="button"
               className="admin-accession__open"

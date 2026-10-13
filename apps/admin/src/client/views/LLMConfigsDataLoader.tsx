@@ -44,6 +44,7 @@ function toWriteBody(values: LLMConfigFormValues, existing?: LlmConfigPayload): 
     isActive: values.isActive,
     isDefault: values.isDefault,
     knowledgeEnabled: values.knowledgeEnabled,
+    genuiToolkits: values.genuiToolkits,
   };
 }
 

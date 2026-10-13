@@ -268,3 +268,73 @@ Props: `term` (string), `body` (string), `isPartial` (boolean, default `false`).
 **Accessibility:** The `<aside>` element carries `aria-label={`Definition of ${term}`}`. All decorative SVG and ornaments use `aria-hidden="true"`. Text content uses semantic foreground tokens so contrast against the warm wash meets WCAG AA.
 
 **CSS hook:** `.definition-card`, `.definition-card--partial`, `.definition-card__term`, `.definition-card__signature`, `.definition-card__body` in `packages/ui/styles.css`.
+
+### Subject figures (FigurePlate family)
+
+These tools draw a figure inline in an AI turn. Like `DefinitionCard`, they are created only by the tool render registry from streamed tool arguments, never by hand in app code.
+
+The **Pack** column says when the tutor can use each one:
+- **shared** tools are always available;
+- every other tool belongs to a subject pack, which the instructor turns on under **Subject figures** on the LLM config form;
+- a pack that isn't enabled is never offered to the model.
+
+[generative-ui.md](../architecture/generative-ui.md#subject-figures-and-instructor-chosen-packs) has the details.
+
+| Tool | Component | Pack | What it draws |
+|---|---|---|---|
+| `showWorkedSteps` | `WorkedSteps` | shared | Numbered calculation or derivation steps, with a final result |
+| `showMacroModel` | `MacroModelDiagram` | ECON | AD-AS, loanable-funds or money-market curve shifts, with E₁ → E₂ |
+| `showGdpComposition` | `GdpComposition` | ECON | GDP = C + I + G + NX as a stacked bar; a negative NX sits left of zero |
+| `showMultiplier` | `MultiplierRounds` | ECON | The spending multiplier, round by round |
+| `showLaborForce` | `LaborForce` | ECON | Employed, unemployed and not in the labor force, with the three rates |
+| `showInflation` | `PriceIndex` | ECON | A price index over time and the inflation it implies |
+| `showDiagnosticAccuracy` | `DiagnosticAccuracy` | Test evaluation | A 2×2 table against a reference standard, with sensitivity, specificity, PPV and NPV |
+| `showPrevalenceEffect` | `PrevalenceEffect` | Clinical informatics, test evaluation | How PPV and NPV move with prevalence when sensitivity and specificity are fixed |
+| `showRocCurve` | `RocCurve` | Test evaluation | An ROC curve from threshold points, with the trapezoidal AUC and the best Youden's J threshold marked |
+| `showPatientTimeline` | `PatientTimeline` | Clinical informatics | A patient's encounters, labs, medications and events on one dated axis |
+| `showCdsRule` | `CdsRule` | Clinical informatics | A decision-support rule's conditions, each one evaluated against a patient, and whether the rule fires |
+| `showQuadrupleAim` | `QuadrupleAim` | Clinical informatics | One intervention against the Quadruple Aim (optionally Quintuple, with equity), with the computed trade-offs |
+| `showSociotechnicalModel` | `SociotechnicalModel` | Clinical informatics | A case against Sittig & Singh's eight sociotechnical dimensions: contributing, protective, not assessed |
+| `showDikw` | `Dikw` | Clinical informatics | The data → information → knowledge → wisdom steps for one clinical scenario |
+| `showWorkflowComparison` | `WorkflowComparison` | Clinical informatics | Current vs future workflow as role swimlanes, with steps, handoffs, documentation steps, waits and minutes |
+| `showStandardsMap` | `StandardsMap` | Clinical informatics | Data elements mapped to terminologies (incl. nursing terminologies) and the exchange standard; codes marked unverified |
+| `showHealthItTimeline` | `HealthItTimeline` | Clinical informatics | Health IT and nursing informatics milestones from a fixed reference list, plus tutor-added events marked as such |
+| `showRunChart` | `RunChart` | Clinical informatics | A QI run chart with median, IHI shift and trend signals, and the change marked |
+| `showUsabilityScore` | `UsabilityScore` | Clinical informatics | System Usability Scale scores from raw responses, against the average of 68, with item contributions |
+| `showAdoptionCurve` | `AdoptionCurve` | Clinical informatics | Rogers' adopter categories with how far a staff rollout has reached |
+| `showDistribution` | `DistributionPlot` | Statistics | A normal, t, chi-square or binomial distribution, with a shaded region and its probability |
+| `knowledgeCheck` | `KnowledgeCheck` | shared | A multiple-choice check the student answers in place; the tutor judges the answer on its next turn (#36) |
+
+**Computed, never trusted.** The model supplies only arguments. Every number, direction and sentence a figure states is computed from those arguments in `packages/ui/src/generative/lib/` (econ geometry and rates; 2×2 test metrics, Bayes' rule, AUC and rule evaluation; distribution PDFs and CDFs), so the figure cannot contradict itself or the subject. A ratio with a zero denominator reads "undefined", with a note on why, never NaN. Each tool has a deny-by-default parser in `toolInputs.ts` or `toolInputs.clinical.ts`: input that is wrong in type or in meaning renders nothing. Examples are an MPC of 1, ROC points whose sensitivity falls as the false-positive rate rises, or a curve the model doesn't have. The knowledge check has no answer field at all, so nothing in the browser can reveal the answer early.
+
+**Plate.** Every figure sits in `FigurePlate`, styled like a textbook figure rather than a dashboard card:
+- a Geist Mono kicker with the same 4px Heritage Gold tick as an AI turn (the tutor produced it);
+- a title, then a hairline-ruled figure area on `--color-surface`;
+- a computed one-line takeaway;
+- a "Show the numbers" disclosure, which is the figure's table view, the same idea as UW DawgPath's "Display data as a table".
+
+**Colour.** Marks use `--viz-1` to `--viz-5`, one categorical order shared by every figure: blue, orange, aqua, violet, magenta. An entity keeps its slot across figures; for example, AD and Consumption are always slot 1.
+- The palette was validated with the dataviz checker in both themes; adjacent colourblind separation is ΔE 9.2 in light and 9.4 in dark. The dark steps are chosen separately, not flipped.
+- Slots 3 and 5 sit under 3:1 on paper, so every mark carries a visible text label.
+- Text never wears a data colour, and Heritage Gold is never used as a data colour.
+
+**Marks.** Lines are 2px. Markers have r ≥ 4 with a 2px surface ring. Gridlines are 1px `--color-border`. A curve's old position is dashed and muted. Axis titles are horizontal, never rotated. Labels are selective: endpoints and the value the story is about.
+
+**Responsive.** SVG text is in viewBox units. A container query (`.gen-figure` is an inline-size container) enlarges it when the figure is narrower than about 460px, so labels stay about 11px on a phone. Steps, the CDS rule's conditions and the knowledge check's options are HTML and reflow.
+
+**States.**
+- `input-streaming` before the input validates: a "Drawing the figure…" skeleton plate.
+- `input-available` or `output-available`: the figure. Persisted turns replay through `output-available`.
+- `output-error` with bad input: nothing.
+
+The whole plate dims to 55% while `isPartial`. Every tool part renders inside `ToolPartErrorBoundary`, so a renderer that throws becomes a quiet "Figure unavailable" plate, not a broken transcript.
+
+**Accessibility.**
+- Each `<figure>` carries an `aria-label` that states the computed outcome. For example: "AD shifts left. Price level falls and real GDP falls. Output is below potential: a recessionary gap."
+- Each SVG has `role="img"`, and native `<title>` tooltips sit on the marks.
+- State is never colour alone: a CDS condition says "met" or "not met" in words, and a shaded region states its probability in text.
+- The knowledge check is a native radio group in a `fieldset`, so arrow keys work. Once answered, it locks and says which option was chosen.
+
+**CSS hooks:** `.gen-figure*`, `.gen-svg*`, `.gen-line--N`, `.gen-fill--N`, `.gen-swatch--N`, `.gen-steps*`, `.gen-stat*`, `.gen-area-shade`, `.gen-check*` the clinical figures' hooks (under "Clinical informatics figures") and the `gen-fw-*`, `gen-ms-*` and `gen-sy-*` blocks (marked `genui:frameworks`, `genui:measurement` and `genui:systems`) in `packages/ui/styles.css`.
+
+**Visual review:** with the student app on :2311, run `npm run screenshots:generative-ui`. It renders ECON 201, two NMETH 527 clinical informatics threads, a screening-test thread and a statistics thread (with knowledge checks) in the real student app (light and dark, 1440, 768 and 390px), saves each figure, and fails on page errors, missing figures or overflow.

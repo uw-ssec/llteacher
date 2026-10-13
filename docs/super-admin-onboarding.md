@@ -34,6 +34,20 @@ LLTeacher creates or reuses the pending instructor identity, grants instructor-p
 
 The instructor can now sign in with the exact email entered above. Their course appears in the top navigation; instructors teaching multiple courses can switch there.
 
+## Add an instructor to an existing course
+
+1. In **Course Setup**, find the course under **All courses**.
+2. Select **Add instructor** in that course's row.
+3. Enter the instructor's institutional email and select **Add instructor**.
+
+This grants instructor-portal access and assigns the instructor to that course.
+All existing instructors remain assigned. Repeating an assignment is safe, and
+a previously removed membership is restored rather than duplicated. The course
+list refreshes after success. The instructor should sign in with that exact
+email (or refresh their portal if already signed in) and select the course.
+
+This action does not remove instructors or change WorkOS settings.
+
 ## Instructor-owned course setup
 
 The instructor performs the remaining course work:
