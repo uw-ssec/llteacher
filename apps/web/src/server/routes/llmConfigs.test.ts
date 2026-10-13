@@ -317,6 +317,11 @@ describe("POST/PATCH validation (#31)", () => {
     expect((await post({ ...VALID_BODY, knowledgeEnabled: "no" })).status).toBe(400);
   });
 
+  it("saves a config on the platform LLMoxie gateway, every org's default provider", async () => {
+    expect((await post({ ...VALID_BODY, provider: "llmoxie" })).status).toBe(201);
+    expect(createMock.mock.calls.at(-1)![2]).toMatchObject({ provider: "llmoxie" });
+  });
+
   it("stores subject figure packs, normalised, and refuses an unknown pack by name", async () => {
     await post({ ...VALID_BODY, genuiToolkits: ["statistics", "economics", "economics"] });
     // Catalog order, de-duplicated.
