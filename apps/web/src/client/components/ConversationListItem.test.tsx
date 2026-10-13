@@ -60,27 +60,28 @@ describe("ConversationListItem", () => {
     expect(description?.textContent).toContain("6 messages");
   });
 
-  // #295 redesign: the row itself is now a plain, non-interactive <div> --
-  // NOT role="button" (see this file's own #295 doc comment for why: a
-  // nested real <button> inside role="button" is an ARIA violation user
-  // agents prune). The title TEXT is the select control, rendered as a
-  // real sibling <button> by EditableTitle (its `onActivateValue` prop).
+  // The row stays a plain grouping element so its rename/delete controls
+  // are never nested inside another interactive element. A real sibling
+  // button covers the row's selection surface instead.
   describe("select (#295 redesign)", () => {
-    it("calls onSelect when the title text/button is clicked", async () => {
+    it("calls onSelect when the title is clicked", async () => {
       const { onSelect } = renderItem();
       await userEvent.click(screen.getByText("Understanding p-values"));
       expect(onSelect).toHaveBeenCalledTimes(1);
     });
 
-    // #295: the outer row is deliberately non-interactive now -- clicking
-    // its background (away from the title button) does nothing. This
-    // replaces the old row-is-role="button" test that asserted the
-    // opposite; that behavior is exactly what #295 removed.
-    it("does not call onSelect when clicking the row background away from the title/pencil", async () => {
+    it("calls onSelect when clicking the row background below the title", async () => {
       const { onSelect, container } = renderItem();
       const row = container.querySelector(".tutor-conversation-item")!;
       await userEvent.click(row);
-      expect(onSelect).not.toHaveBeenCalled();
+      expect(onSelect).toHaveBeenCalledTimes(1);
+    });
+
+    it("calls onSelect when clicking the conversation metadata", async () => {
+      const { onSelect, container } = renderItem();
+      const metadata = container.querySelector(".tutor-conversation-item__meta")!;
+      await userEvent.click(metadata);
+      expect(onSelect).toHaveBeenCalledTimes(1);
     });
 
     it("is keyboard-reachable and activatable via Enter/Space, carrying an aria-label", async () => {
