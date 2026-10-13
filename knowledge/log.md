@@ -1,3 +1,7 @@
+## 2026-10-13
+* **Update**: Updated concept `decisions/llm-provider-gateway-and-failover.md`.
+* **Update**: Updated concept `facts/workos-deprovisioning-session-epoch.md`.
+
 ## 2026-10-09
 * **Update**: Updated concept `decisions/course-instructor-editing.md`.
 * **Update**: Linked `decisions/course-instructor-editing.md` to `decisions/course-membership-roles.md` (Course removal preserves the per-course role model and keeps platform recognition separate from membership authority.).
