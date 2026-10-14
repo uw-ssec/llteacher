@@ -208,6 +208,7 @@ describe("KnowledgeDocumentView", () => {
     render(<KnowledgeDocumentView courseId="c1" documentId="d1" onBack={vi.fn()} />);
     const editor = (await screen.findByLabelText(/document body/i)) as HTMLTextAreaElement;
 
+    await waitFor(() => expect(editor.value).toBe(DOCUMENT.body));
     fireEvent.change(editor, { target: { value: "a fresh edit" } });
     await waitFor(() => screen.getByText(/updates the searchable document/i));
 
