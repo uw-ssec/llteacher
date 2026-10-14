@@ -62,6 +62,7 @@ export type HomeworksViewProps = {
      permission-shaped prop to the permissive value hides the notice from
      exactly the callers who need it. */
   canViewDrafts: boolean;
+  saveConfirmation?: string;
 };
 
 const STATUS_LABEL: Record<HomeworkStatus, string> = {
@@ -104,6 +105,7 @@ export function HomeworksView({
   onNewHomework,
   canAuthor,
   canViewDrafts,
+  saveConfirmation,
 }: HomeworksViewProps) {
   const activeCount = homeworks.filter((h) => h.status === "active").length;
   const [query, setQuery] = useState("");
@@ -170,6 +172,12 @@ export function HomeworksView({
           ) : undefined
         }
       />
+
+      {saveConfirmation && (
+        <div className="admin-alert" role="status">
+          {saveConfirmation}
+        </div>
+      )}
 
       {!canViewDrafts && (
         // Same admin-alert + role="status" treatment as the solutions notice

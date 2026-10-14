@@ -435,7 +435,7 @@ describe("TutorConversationsList selection feedback (#290)", () => {
     // region, which correctly says one of them is still loading.
     expect(document.querySelectorAll('[aria-current="true"]').length).toBe(1);
     // ...and it is the one actually on screen, not the one loading.
-    expect(document.querySelector('[aria-current="true"]')?.textContent).toContain(CONV_A.title);
+    expect(document.querySelector('[aria-current="true"]')?.getAttribute("aria-label")).toContain(CONV_A.title);
     // The pending row still reads as busy -- the click is still visibly
     // registered, which is what #290 was for.
     expect(document.querySelector('[aria-busy="true"]')).not.toBeNull();

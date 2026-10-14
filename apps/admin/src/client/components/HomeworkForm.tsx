@@ -21,7 +21,10 @@ export type SectionDetail = {
   content: string;
   solutionContent?: string;
 };
-import { computeSectionDiff, type FormSection } from "../lib/computeSectionDiff";
+import {
+  computeSectionDiff,
+  type FormSection,
+} from "../lib/computeSectionDiff";
 import { AdminNotice } from "./AdminNotice";
 
 /** #165: an authored pre/post prompt pair, before the order-renumbering
@@ -46,7 +49,7 @@ export interface HomeworkFormValues {
   llmConfigId: string | undefined;
   sections: FormSection[];
   widgets: FormWidget[];
-  publish: boolean;
+  releaseMode: "draft" | "now" | "scheduled";
   releasedAt: string | undefined;
   hidden: boolean;
   expiresAt: string | undefined;
@@ -73,11 +76,21 @@ export interface HomeworkFormInitialData {
 export interface HomeworkFormProps {
   initialData?: HomeworkFormInitialData;
   onSubmit: (payload: {
-    title: string; description: string; dueDate: string; llmConfigId?: string;
+    title: string;
+    description: string;
+    dueDate: string;
+    llmConfigId?: string;
     sections: ReturnType<typeof computeSectionDiff>;
-    widgets: { id?: string; prePrompt: string; postPrompt: string; order: number }[];
-    publish: boolean; releasedAt?: string;
-    hidden: boolean; expiresAt?: string;
+    widgets: {
+      id?: string;
+      prePrompt: string;
+      postPrompt: string;
+      order: number;
+    }[];
+    publish: boolean;
+    releasedAt?: string;
+    hidden: boolean;
+    expiresAt?: string;
   }) => Promise<void>;
   llmConfigs: LlmConfigPayload[];
   isLoading?: boolean;
@@ -85,32 +98,76 @@ export interface HomeworkFormProps {
 
 const MAX_SECTIONS = 20;
 
-/* `submitError` carries two unrelated kinds of message: this one (the network
-   save actually failed) and form-shape complaints like "No more than 20
-   sections". Only the former earns the reassurance copy about unsaved edits,
-   so the render branch compares against this constant rather than dressing
-   every submit error as a server failure. */
-const SAVE_FAILED = "Failed to save homework. Please try again.";
+type SubmitError =
+  | { kind: "validation"; message: string }
+  | { kind: "save"; detail: string; savedState: "none" | "draft" | "partial" };
 
-export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: HomeworkFormProps) {
-  const [submitError, setSubmitError] = useState<string | null>(null);
+/** A multi-step save can preserve a draft before a later request fails. */
+export class HomeworkSaveError extends Error {
+  constructor(
+    message: string,
+    readonly savedState: "none" | "draft" | "partial",
+  ) {
+    super(message);
+    this.name = "HomeworkSaveError";
+  }
+}
+
+export function HomeworkForm({
+  initialData,
+  onSubmit,
+  llmConfigs,
+  isLoading,
+}: HomeworkFormProps) {
+  const [submitError, setSubmitError] = useState<SubmitError | null>(null);
   const {
-    register, control, handleSubmit, watch, formState: { errors, isDirty },
+    register,
+    control,
+    handleSubmit,
+    watch,
+    formState: { errors, isDirty },
   } = useForm<HomeworkFormValues>({
     defaultValues: initialData
       ? {
-          title: initialData.title, description: initialData.description, dueDate: initialData.dueDate,
+          title: initialData.title,
+          description: initialData.description,
+          dueDate: initialData.dueDate,
           llmConfigId: initialData.llmConfigId ?? undefined,
-          sections: initialData.sections.map((s) => ({ id: s.id, title: s.title, content: s.content, solutionContent: s.solutionContent, type: s.type })),
-          widgets: initialData.widgets.map((w) => ({ id: w.id, prePrompt: w.prePrompt, postPrompt: w.postPrompt })),
-          publish: initialData.publishedAt !== null,
+          sections: initialData.sections.map((s) => ({
+            id: s.id,
+            title: s.title,
+            content: s.content,
+            solutionContent: s.solutionContent,
+            type: s.type,
+          })),
+          widgets: initialData.widgets.map((w) => ({
+            id: w.id,
+            prePrompt: w.prePrompt,
+            postPrompt: w.postPrompt,
+          })),
+          releaseMode:
+            initialData.publishedAt !== null &&
+            initialData.releasedAt !== null &&
+            new Date(initialData.releasedAt).getTime() > Date.now()
+              ? "scheduled"
+              : initialData.publishedAt !== null
+                ? "now"
+                : "draft",
           releasedAt: initialData.releasedAt ?? undefined,
           hidden: initialData.isHidden,
           expiresAt: initialData.expiresAt ?? undefined,
         }
       : {
-          title: "", description: "", dueDate: "", llmConfigId: undefined, sections: [], widgets: [], publish: false, releasedAt: undefined,
-          hidden: false, expiresAt: undefined,
+          title: "",
+          description: "",
+          dueDate: "",
+          llmConfigId: undefined,
+          sections: [],
+          widgets: [],
+          releaseMode: "draft",
+          releasedAt: undefined,
+          hidden: false,
+          expiresAt: undefined,
         },
   });
   /* #317 review, "strongly recommend before merge" -- carried across the
@@ -131,10 +188,24 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
   const assignedConfigId = initialData?.llmConfigId ?? undefined;
   const selectableConfigs: { id: string; name: string }[] =
     assignedConfigId && !llmConfigs.some((cfg) => cfg.id === assignedConfigId)
-      ? [...llmConfigs, { id: assignedConfigId, name: "Currently assigned (inactive or unavailable)" }]
+      ? [
+          ...llmConfigs,
+          {
+            id: assignedConfigId,
+            name: "Currently assigned (inactive or unavailable)",
+          },
+        ]
       : llmConfigs;
-  const { fields, append, remove } = useFieldArray({ control, name: "sections" });
-  const { fields: widgetFields, append: appendWidget, remove: removeWidget } = useFieldArray({ control, name: "widgets" });
+  const { fields, append, remove } = useFieldArray({
+    control,
+    name: "sections",
+  });
+  const {
+    fields: widgetFields,
+    append: appendWidget,
+    remove: removeWidget,
+  } = useFieldArray({ control, name: "widgets" });
+  const releaseMode = watch("releaseMode");
 
   useUnsavedChangesGuard(isDirty);
 
@@ -145,13 +216,47 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
   // callback. Checking `fields.length` directly (from useFieldArray, always
   // in sync with the array) sidesteps that.
   const onValid = handleSubmit(async (values) => {
-    if (values.sections.length === 0) { setSubmitError("At least 1 section is required"); return; }
+    if (values.sections.length === 0) {
+      setSubmitError({
+        kind: "validation",
+        message: "At least 1 section is required",
+      });
+      return;
+    }
     setSubmitError(null);
+    let releasedAt: string | undefined;
+    if (values.releaseMode === "scheduled") {
+      if (!values.releasedAt) {
+        setSubmitError({
+          kind: "validation",
+          message: "Choose a release date and time",
+        });
+        return;
+      }
+      const releaseDate = new Date(values.releasedAt);
+      if (
+        Number.isNaN(releaseDate.getTime()) ||
+        releaseDate.getTime() <= Date.now()
+      ) {
+        setSubmitError({
+          kind: "validation",
+          message: "Release date and time must be in the future",
+        });
+        return;
+      }
+      // datetime-local deliberately has no timezone. Convert the instructor's
+      // local wall-clock choice to an absolute instant before crossing the API
+      // boundary, otherwise a UTC server can reject a valid local future time.
+      releasedAt = releaseDate.toISOString();
+    }
     // Uncontrolled `register`-ed textareas fall back to the DOM's actual
     // value ("") when a section's solutionContent was left untouched, even
     // though it was appended as `undefined` -- normalize back to undefined
     // so an empty optional field doesn't get treated as "has a solution".
-    const sections = values.sections.map((s) => ({ ...s, solutionContent: s.solutionContent || undefined }));
+    const sections = values.sections.map((s) => ({
+      ...s,
+      solutionContent: s.solutionContent || undefined,
+    }));
     // react-hook-form's handleSubmit rethrows whatever its callback throws
     // (verified against the installed react-hook-form: it catches only to
     // update internal form state, then rethrows) -- and `submit` below calls
@@ -169,21 +274,38 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
     }));
     try {
       await onSubmit({
-        title: values.title, description: values.description, dueDate: values.dueDate,
-        llmConfigId: values.llmConfigId, sections: computeSectionDiff(sections),
+        title: values.title,
+        description: values.description,
+        dueDate: values.dueDate,
+        llmConfigId: values.llmConfigId,
+        sections: computeSectionDiff(sections),
         widgets,
-        publish: values.publish, releasedAt: values.releasedAt,
-        hidden: values.hidden, expiresAt: values.expiresAt,
+        publish: values.releaseMode !== "draft",
+        releasedAt,
+        hidden: values.hidden,
+        expiresAt: values.expiresAt,
       });
-    } catch {
-      setSubmitError(SAVE_FAILED);
+    } catch (error) {
+      const detail =
+        error instanceof Error ? error.message : "An unexpected error occurred";
+      const savedState =
+        typeof error === "object" &&
+        error !== null &&
+        "savedState" in error &&
+        (error.savedState === "draft" || error.savedState === "partial")
+          ? error.savedState
+          : "none";
+      setSubmitError({ kind: "save", detail, savedState });
     }
   });
 
   const submit = (e: FormEvent<HTMLFormElement>) => {
     if (fields.length > MAX_SECTIONS) {
       e.preventDefault();
-      setSubmitError(`No more than ${MAX_SECTIONS} sections`);
+      setSubmitError({
+        kind: "validation",
+        message: `No more than ${MAX_SECTIONS} sections`,
+      });
       return;
     }
     void onValid(e);
@@ -206,35 +328,70 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
 
       <div className="admin-form-field">
         <label htmlFor="hw-due-date">Due date</label>
-        <input id="hw-due-date" type="datetime-local" {...register("dueDate", { required: "Due date required" })} />
+        <input
+          id="hw-due-date"
+          type="datetime-local"
+          {...register("dueDate", { required: "Due date required" })}
+        />
         <p className="admin-form-hint">
-          The deadline. Once it passes the homework reads as past due and <strong>stays visible</strong> to students.
+          The deadline. Once it passes the homework reads as past due and{" "}
+          <strong>stays visible</strong> to students.
         </p>
-        {errors.dueDate && <p role="alert" className="admin-field-error">{errors.dueDate.message}</p>}
+        {errors.dueDate && (
+          <p role="alert" className="admin-field-error">
+            {errors.dueDate.message}
+          </p>
+        )}
       </div>
 
       <div className="admin-form-field">
         <label htmlFor="hw-llm-config">LLM config</label>
         <select id="hw-llm-config" {...register("llmConfigId")}>
           <option value="">(course/org default)</option>
-          {selectableConfigs.map((cfg) => <option key={cfg.id} value={cfg.id}>{cfg.name}</option>)}
+          {selectableConfigs.map((cfg) => (
+            <option key={cfg.id} value={cfg.id}>
+              {cfg.name}
+            </option>
+          ))}
         </select>
       </div>
 
       <fieldset className="admin-form-group">
-        <legend>Publish</legend>
-        {/* The checkbox's own text and its qualifier are separate lines now.
-            Inline, "Published" and "Release at (optional, future only)" ran
-            together into one unreadable run of text. */}
+        <legend>Publication</legend>
         <label className="admin-form-check">
-          <input type="checkbox" {...register("publish")} />
-          <span className="admin-form-check__label">Published</span>
+          <input type="radio" value="draft" {...register("releaseMode")} />
+          <span className="admin-form-check__label">
+            Save as draft
+            <span>Keep this homework unavailable to students.</span>
+          </span>
         </label>
-        <div className="admin-form-field">
-          <label htmlFor="hw-released-at">Release at</label>
-          <input id="hw-released-at" type="datetime-local" {...register("releasedAt")} />
-          <p className="admin-form-hint">Optional. Must be in the future.</p>
-        </div>
+        <label className="admin-form-check">
+          <input type="radio" value="now" {...register("releaseMode")} />
+          <span className="admin-form-check__label">
+            Publish now
+            <span>Make this homework available to students immediately.</span>
+          </span>
+        </label>
+        <label className="admin-form-check">
+          <input type="radio" value="scheduled" {...register("releaseMode")} />
+          <span className="admin-form-check__label">
+            Schedule for later
+            <span>Publish automatically at a future date and time.</span>
+          </span>
+        </label>
+        {releaseMode === "scheduled" && (
+          <div className="admin-form-field">
+            <label htmlFor="hw-released-at">Release date and time</label>
+            <input
+              id="hw-released-at"
+              type="datetime-local"
+              {...register("releasedAt")}
+            />
+            <p className="admin-form-hint">
+              Uses your local timezone and must be in the future.
+            </p>
+          </div>
+        )}
       </fieldset>
 
       <fieldset className="admin-form-group">
@@ -248,21 +405,30 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         </label>
         <div className="admin-form-field">
           <label htmlFor="hw-expires-at">Expires at</label>
-          <input id="hw-expires-at" type="datetime-local" {...register("expiresAt")} />
+          <input
+            id="hw-expires-at"
+            type="datetime-local"
+            {...register("expiresAt")}
+          />
           {/* #328: "auto-hides once passed" never explained how this differs
               from the due date, and the two are easy to conflate. Expiry
               outranks every other state in deriveHomeworkStatus, so it is the
               one field here that can silently remove a whole class's access. */}
           <p className="admin-form-hint">
-            Optional, and <strong>not</strong> the due date. Once it passes the homework is hidden from students
-            entirely — including their own submitted work and tutor conversations. Leave empty unless you
-            mean to withdraw access.
+            Optional, and <strong>not</strong> the due date. Once it passes the
+            homework is hidden from students entirely — including their own
+            submitted work and tutor conversations. Leave empty unless you mean
+            to withdraw access.
           </p>
         </div>
       </fieldset>
 
       {fields.map((field, index) => (
-        <fieldset key={field.id} className="admin-form-record" aria-labelledby={`section-${index}-legend`}>
+        <fieldset
+          key={field.id}
+          className="admin-form-record"
+          aria-labelledby={`section-${index}-legend`}
+        >
           {/* Numbered like the list view's HW-001 chip, so a section reads as
               a record rather than as browser fieldset chrome. */}
           <legend id={`section-${index}-legend`}>
@@ -271,36 +437,66 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
 
           <div className="admin-form-field">
             <label htmlFor={`section-${index}-title`}>Section title</label>
-            <input id={`section-${index}-title`} aria-label="Section title" {...register(`sections.${index}.title`, { required: true })} />
+            <input
+              id={`section-${index}-title`}
+              aria-label="Section title"
+              {...register(`sections.${index}.title`, { required: true })}
+            />
           </div>
 
           <div className="admin-form-field">
             <label htmlFor={`section-${index}-type`}>Section type</label>
-            <select id={`section-${index}-type`} aria-label="Section type" {...register(`sections.${index}.type`)}>
+            <select
+              id={`section-${index}-type`}
+              aria-label="Section type"
+              {...register(`sections.${index}.type`)}
+            >
               <option value="conversation">Conversation</option>
-              <option value="non_interactive">Question (student types an answer)</option>
+              <option value="non_interactive">
+                Question (student types an answer)
+              </option>
             </select>
           </div>
 
           <div className="admin-form-field">
             <label htmlFor={`section-${index}-content`}>Section content</label>
-            <textarea id={`section-${index}-content`} aria-label="Section content" {...register(`sections.${index}.content`, { required: true })} />
+            <textarea
+              id={`section-${index}-content`}
+              aria-label="Section content"
+              {...register(`sections.${index}.content`, { required: true })}
+            />
             <p className="admin-form-hint">
-              Markdown. This is the problem statement the student sees, and the context the AI tutor works from.
+              Markdown. This is the problem statement the student sees, and the
+              context the AI tutor works from.
             </p>
-            <div className="admin-markdown-preview" aria-label={`Section ${index + 1} content preview`}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{watch(`sections.${index}.content`) || ""}</ReactMarkdown>
+            <div
+              className="admin-markdown-preview"
+              aria-label={`Section ${index + 1} content preview`}
+            >
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {watch(`sections.${index}.content`) || ""}
+              </ReactMarkdown>
             </div>
           </div>
 
           <div className="admin-form-field">
             <label htmlFor={`section-${index}-solution`}>Solution</label>
-            <textarea id={`section-${index}-solution`} aria-label="Section solution" {...register(`sections.${index}.solutionContent`)} />
+            <textarea
+              id={`section-${index}-solution`}
+              aria-label="Section solution"
+              {...register(`sections.${index}.solutionContent`)}
+            />
             <p className="admin-form-hint">
-              Optional. Never shown to students — visible only to graders holding the solutions capability.
+              Optional. Never shown to students — visible only to graders
+              holding the solutions capability.
             </p>
-            <div className="admin-markdown-preview" aria-label={`Section ${index + 1} solution preview`}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{watch(`sections.${index}.solutionContent`) || ""}</ReactMarkdown>
+            <div
+              className="admin-markdown-preview"
+              aria-label={`Section ${index + 1} solution preview`}
+            >
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {watch(`sections.${index}.solutionContent`) || ""}
+              </ReactMarkdown>
             </div>
           </div>
 
@@ -313,7 +509,12 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
               // #328: the old copy ("cannot be undone until you save") read as
               // "it CAN be undone after you save" -- the opposite of the truth
               // -- and never mentioned the student conversations that go with it.
-              if (window.confirm(`Remove section ${index + 1}? It will be deleted when you save this homework, along with any student conversations in it.`)) remove(index);
+              if (
+                window.confirm(
+                  `Remove section ${index + 1}? It will be deleted when you save this homework, along with any student conversations in it.`,
+                )
+              )
+                remove(index);
             }}
           >
             Remove section
@@ -321,28 +522,54 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
         </fieldset>
       ))}
 
-      {errors.sections && <p role="alert" className="admin-field-error">At least 1 section is required</p>}
+      {errors.sections && (
+        <p role="alert" className="admin-field-error">
+          At least 1 section is required
+        </p>
+      )}
 
       <div className="admin-form-add">
-        <Button type="button" onClick={() => append({ title: "", content: "", solutionContent: undefined, type: "conversation" })}>
+        <Button
+          type="button"
+          onClick={() =>
+            append({
+              title: "",
+              content: "",
+              solutionContent: undefined,
+              type: "conversation",
+            })
+          }
+        >
           + Add section
         </Button>
       </div>
 
       {widgetFields.map((field, index) => (
-        <fieldset key={field.id} className="admin-form-record" aria-labelledby={`widget-${index}-legend`}>
+        <fieldset
+          key={field.id}
+          className="admin-form-record"
+          aria-labelledby={`widget-${index}-legend`}
+        >
           <legend id={`widget-${index}-legend`}>
             WIDGET · {String(index + 1).padStart(3, "0")}
           </legend>
 
           <div className="admin-form-field">
             <label htmlFor={`widget-${index}-pre`}>Pre-section prompt</label>
-            <input id={`widget-${index}-pre`} aria-label="Pre-section prompt" {...register(`widgets.${index}.prePrompt`, { required: true })} />
+            <input
+              id={`widget-${index}-pre`}
+              aria-label="Pre-section prompt"
+              {...register(`widgets.${index}.prePrompt`, { required: true })}
+            />
           </div>
 
           <div className="admin-form-field">
             <label htmlFor={`widget-${index}-post`}>Post-section prompt</label>
-            <input id={`widget-${index}-post`} aria-label="Post-section prompt" {...register(`widgets.${index}.postPrompt`, { required: true })} />
+            <input
+              id={`widget-${index}-post`}
+              aria-label="Post-section prompt"
+              {...register(`widgets.${index}.postPrompt`, { required: true })}
+            />
           </div>
 
           <Button
@@ -365,7 +592,10 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
       ))}
 
       <div className="admin-form-add">
-        <Button type="button" onClick={() => appendWidget({ prePrompt: "", postPrompt: "" })}>
+        <Button
+          type="button"
+          onClick={() => appendWidget({ prePrompt: "", postPrompt: "" })}
+        >
           + Add progress widget
         </Button>
       </div>
@@ -374,13 +604,26 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
           second "Try again" next to it would be two controls for one act. */}
       {submitError && (
         <AdminNotice
-          eyebrow={submitError === SAVE_FAILED ? "Not saved" : "Check this form"}
-          title={submitError}
+          eyebrow={
+            submitError.kind === "save" ? "Save incomplete" : "Check this form"
+          }
+          title={
+            submitError.kind === "save"
+              ? submitError.savedState !== "none"
+                ? "We couldn't completely save your homework."
+                : "We couldn't save your homework."
+              : submitError.message
+          }
           body={
-            submitError === SAVE_FAILED
-              ? "Your edits are still on screen and nothing was written to the server. Nothing is lost until you leave this page."
+            submitError.kind === "save"
+              ? submitError.savedState === "draft"
+                ? "We saved a draft for you in the meantime. Fix the error below and select Save again; we'll update the same draft."
+                : submitError.savedState === "partial"
+                  ? "Some changes were saved, but we couldn't complete the remaining update. Fix the error below and select Save again."
+                  : "Your edits are still on screen. Fix the error below and select Save again."
               : undefined
           }
+          detail={submitError.kind === "save" ? submitError.detail : undefined}
         />
       )}
 
@@ -416,7 +659,9 @@ export function HomeworkForm({ initialData, onSubmit, llmConfigs, isLoading }: H
 function useUnsavedChangesGuard(isDirty: boolean) {
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const handler = (e: BeforeUnloadEvent) => { if (isDirty) e.preventDefault(); };
+    const handler = (e: BeforeUnloadEvent) => {
+      if (isDirty) e.preventDefault();
+    };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
   }, [isDirty]);

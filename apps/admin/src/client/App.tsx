@@ -66,7 +66,7 @@ const selectedCourseKey = (userId: string) => `llteacher:admin-selected-course:$
 
 /* The view-state machine. Adding a view = adding a discriminated case. */
 type View =
-  | { kind: "homeworks" }
+  | { kind: "homeworks"; saveConfirmation?: string }
   | { kind: "create-homework" }
   | { kind: "edit-homework"; homeworkId: string }
   | { kind: "submissions"; homeworkId: string }
@@ -440,6 +440,7 @@ export default function App() {
                     canAuthor={canAuthor}
                     canViewDrafts={CURRENT_COURSE?.canViewDrafts === true}
                     onNewHomework={() => setView({ kind: "create-homework" })}
+                    saveConfirmation={view.saveConfirmation}
                   />
                 ) : (
                   <EmptyView label="No course found for your account yet" body={NO_COURSE_BODY} />
@@ -461,7 +462,7 @@ export default function App() {
                   <HomeworkCreateView
                     courseId={CURRENT_COURSE_ID}
                     llmConfigs={llmConfigs}
-                    onCreated={() => setView({ kind: "homeworks" })}
+                    onCreated={() => setView({ kind: "homeworks", saveConfirmation: "Homework saved." })}
                     onCancel={() => setView({ kind: "homeworks" })}
                   />
                 ) : (
@@ -493,7 +494,7 @@ export default function App() {
                     courseId={CURRENT_COURSE_ID}
                     homeworkId={view.homeworkId}
                     llmConfigs={llmConfigs}
-                    onSaved={() => setView({ kind: "homeworks" })}
+                    onSaved={() => setView({ kind: "homeworks", saveConfirmation: "Homework saved." })}
                     onCancel={() => setView({ kind: "homeworks" })}
                   />
                 )
@@ -855,6 +856,7 @@ function HomeworksDataLoader({
   onNewHomework,
   canAuthor,
   canViewDrafts,
+  saveConfirmation,
 }: {
   courseId: string;
   courseCode: string;
@@ -864,6 +866,7 @@ function HomeworksDataLoader({
   onNewHomework: () => void;
   canAuthor: boolean;
   canViewDrafts: boolean;
+  saveConfirmation?: string;
 }) {
   const [homeworks, setHomeworks] = useState<HomeworkListItemResponse[] | null>(null);
   const [loadError, setLoadError] = useState(false);
@@ -881,13 +884,16 @@ function HomeworksDataLoader({
   }, [courseId, attempt]);
   if (loadError)
     return (
-      <AdminNotice
-        eyebrow="Could not load"
-        title="The homework list didn't load"
-        body="The console reached the server but the course's homeworks came back empty-handed. This is usually a dropped connection rather than missing data — retrying is safe."
-        detail={`GET /api/courses/${courseId}/homeworks`}
-        onRetry={() => setAttempt((n) => n + 1)}
-      />
+      <div className="admin-view">
+        {saveConfirmation && <div className="admin-alert" role="status">{saveConfirmation}</div>}
+        <AdminNotice
+          eyebrow="Could not load"
+          title="The homework list didn't load"
+          body="The console reached the server but the course's homeworks came back empty-handed. This is usually a dropped connection rather than missing data — retrying is safe."
+          detail={`GET /api/courses/${courseId}/homeworks`}
+          onRetry={() => setAttempt((n) => n + 1)}
+        />
+      </div>
     );
   if (!homeworks) return null;
   return (
@@ -900,6 +906,7 @@ function HomeworksDataLoader({
       onNewHomework={onNewHomework}
       canAuthor={canAuthor}
       canViewDrafts={canViewDrafts}
+      saveConfirmation={saveConfirmation}
     />
   );
 }

@@ -1029,20 +1029,11 @@ body {
     list-style: none;
   }
 
-  /* #295: this row is a plain, non-interactive <div> -- NOT role="button",
-     which the previous version of this comment defended as necessary to
-     contain EditableTitle's real nested pencil <button>. ARIA 1.2 defines
-     role="button" as Children Presentational: True and normatively
-     prohibits interactive descendants; a real nested <button> inside it is
-     exactly the case that rule exists to prevent, and user agents prune
-     that subtree -- the pencil's role/name were not reliably exposed to
-     AT (#295). The row's own "select this conversation" affordance now
-     lives on the title text itself, rendered as a real sibling <button>
-     by EditableTitle (its onActivateValue prop, passed from
-     ConversationListItem) -- two adjacent buttons (title, pencil), no
-     nesting, no ARIA violation. This div is now purely a layout/hover
-     grouping for the row, not a target itself. */
+  /* The row is a grouping element rather than a button so its rename and
+     delete controls remain valid interactive siblings. The selection button
+     below spans the full card behind those controls. */
   .tutor-conversation-item {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
@@ -1052,6 +1043,30 @@ body {
     border-radius: var(--radius-sm);
     color: var(--color-text);
     transition: background-color 120ms ease-out;
+  }
+
+  .tutor-conversation-item__select {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: none;
+    border-radius: inherit;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  /* Keep the row's secondary actions above the full-card selection layer.
+     Text and metadata remain visually visible through its transparent
+     background, while clicks on the action controls retain their own
+     behavior. */
+  .tutor-conversation-item .editable-title__pencil-btn,
+  .tutor-conversation-item .editable-title__input,
+  .tutor-conversation-item__delete {
+    position: relative;
+    z-index: 1;
   }
 
   .tutor-conversation-item:hover {
