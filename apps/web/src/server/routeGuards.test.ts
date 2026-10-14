@@ -71,7 +71,10 @@ const handlers = {
   addCourseMember: ok("addCourseMember"),
   grantPlatformInstructor: ok("grantPlatformInstructor"),
   listPlatformInstructors: ok("listPlatformInstructors"),
+  revokePlatformInstructor: ok("revokePlatformInstructor"),
   listPlatformCourses: ok("listPlatformCourses"),
+  addCourseInstructor: ok("addCourseInstructor"),
+  removeCourseInstructors: ok("removeCourseInstructors"),
   listLlmConfigs: ok("listLlmConfigs"),
   createLlmConfig: ok("createLlmConfig"),
   getLlmConfig: ok("getLlmConfig"),
@@ -139,8 +142,11 @@ vi.mock("./routes/courseMemberships", () => ({
 vi.mock("./routes/platformInstructors", () => ({
   grantPlatformInstructorHandler: (c: Context) => handlers.grantPlatformInstructor(c),
   listPlatformInstructorsHandler: (c: Context) => handlers.listPlatformInstructors(c),
+  revokePlatformInstructorHandler: (c: Context) => handlers.revokePlatformInstructor(c),
 }));
 vi.mock("./routes/courseProvisioning", () => ({
+  addCourseInstructorHandler: (c: Context) => handlers.addCourseInstructor(c),
+  removeCourseInstructorsHandler: (c: Context) => handlers.removeCourseInstructors(c),
   provisionCourseHandler: (c: Context) => c.json({}, 200),
   listPlatformCoursesHandler: (c: Context) => handlers.listPlatformCourses(c),
 }));
@@ -259,7 +265,13 @@ const ROUTES: { method: string; path: string; handler: HandlerName; admits: Pers
     admits: [] },
   { method: "GET", path: "/api/platform/instructors", handler: "listPlatformInstructors",
     admits: [] },
+  { method: "DELETE", path: `/api/platform/instructors/${HW}`, handler: "revokePlatformInstructor",
+    admits: [] },
   { method: "GET", path: "/api/platform/courses", handler: "listPlatformCourses",
+    admits: [] },
+  { method: "POST", path: "/api/platform/courses/course-a/instructors", handler: "addCourseInstructor",
+    admits: [] },
+  { method: "PATCH", path: "/api/platform/courses/course-a/instructors", handler: "removeCourseInstructors",
     admits: [] },
 
   // #31/#170: repointing the organization at a different model, or changing

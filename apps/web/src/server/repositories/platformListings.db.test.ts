@@ -108,9 +108,10 @@ describe.skipIf(!DATABASE_URL)("platform super-admin listings (real DB)", () => 
     const result = await listPlatformInstructors(db, cipher);
     expect(result.find((instructor) => instructor.userId === signedInUserId)).toMatchObject({
       email: `signed-${suffix}@uw.edu`, status: "signed_in", assignedCourseCount: 1,
+      assignedCourses: [{ code: `VISIBLE-${suffix}`, term: "Autumn 2026" }],
     });
     expect(result.find((instructor) => instructor.userId === pendingUserId)).toMatchObject({
-      email: `pending-${suffix}@uw.edu`, status: "pending", assignedCourseCount: 0,
+      email: `pending-${suffix}@uw.edu`, status: "pending", assignedCourseCount: 0, assignedCourses: [],
     });
   });
 });

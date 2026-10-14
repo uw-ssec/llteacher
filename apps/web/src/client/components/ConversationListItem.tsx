@@ -10,20 +10,11 @@ import type { ConversationListItemResponse } from "../../shared/types";
    lives in apps/web, not packages/ui, since packages/ui has no apps/web
    import anywhere.
 
-   #295 redesign (post-review): the outer row is now a plain, non-
-   interactive <div> -- NOT role="button". The previous version defended
-   role="button" as necessary to contain EditableTitle's real nested pencil
-   <button>, reasoning "a literal <button> can't contain a literal
-   <button>." True, but ARIA 1.2 defines role="button" as Children
-   Presentational: True and normatively prohibits interactive descendants
-   too -- a real nested <button> inside a role="button" div is exactly the
-   case that rule exists to prevent, and user agents prune that subtree
-   (the pencil's role/name were not reliably exposed to assistive tech).
-   The row's "select this conversation" affordance now lives on the title
-   text itself, rendered as a real sibling <button> by EditableTitle (its
-   `onActivateValue` prop, passed below) -- two adjacent buttons (title,
-   pencil), no nesting, no ARIA violation. This div is now purely a
-   layout/hover grouping for the row, not a target itself.
+   The outer row remains a plain grouping <div>, not a role="button"
+   container: its rename and delete buttons must remain independent
+   interactive siblings. A real, absolutely-positioned button spans the
+   card behind those controls, making the title, metadata, and remaining
+   whitespace one selection target without nesting buttons.
    -------------------------------------------------------------------------- */
 
 export interface ConversationListItemProps {
@@ -148,7 +139,24 @@ export const ConversationListItem = memo(function ConversationListItem({
             .join(" ")
         }
         aria-busy={isPending || undefined}
+        onClick={(event) => {
+          // The full-card button normally receives pointer events in the
+          // browser. This fallback also makes clicks dispatched directly
+          // at visible row content select the conversation, while never
+          // turning a rename/delete/input interaction into navigation.
+          const target = event.target as Element;
+          if (target.closest("button, input, textarea, select, a[href]")) return;
+          onSelect();
+        }}
       >
+        <button
+          type="button"
+          className="tutor-conversation-item__select"
+          onClick={onSelect}
+          aria-label={`Select conversation: ${title}`}
+          aria-describedby={metaId}
+          aria-current={isSelected ? "true" : undefined}
+        />
         {/* #403: title and its action controls share a horizontal row.
             .tutor-conversation-item is flex-direction: column, so a delete
             button placed as its direct child became its own row between the
@@ -162,10 +170,6 @@ export const ConversationListItem = memo(function ConversationListItem({
             onSave={onRename}
             isEditable={isEditable}
             className="tutor-conversation-item__title"
-            onActivateValue={onSelect}
-            activateLabel={`Select conversation: ${title}`}
-            activateDescribedBy={metaId}
-            isActive={isSelected}
           />
           {/* #289: DELETE /api/conversations/:id shipped ownership-checked,
               404-on-not-owned and FK-safe, and no client code called it --

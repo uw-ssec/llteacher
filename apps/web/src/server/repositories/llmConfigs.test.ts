@@ -708,3 +708,57 @@ describe.skipIf(!DATABASE_URL)("course-scoped configurations and Org Admin grant
     await db.delete(users).where(eq(users.id, user!.id));
   });
 });
+
+/* Subject figure packs (genui_toolkits): opt-in, kept across an update that
+   doesn't mention them, copied by clone, and read back by the resolver
+   the chat handler uses. Real database: the column default and the array
+   type are what's under test. */
+describe.skipIf(!DATABASE_URL)("llmConfigs subject figure packs", () => {
+  let db: Db;
+  let orgId: string;
+  const base: LlmConfigInput = {
+    name: "Packs",
+    provider: "openrouter",
+    modelName: "google/gemma-4-31b-it:free",
+    basePrompt: "You are a tutor.",
+    knowledgeEnabled: true,
+    temperature: 0.7,
+    maxCompletionTokens: 1000,
+    fallbackLlmConfigId: null,
+    isActive: true,
+    isDefault: false,
+  };
+
+  beforeAll(async () => {
+    db = makeNodeDb(DATABASE_URL!);
+    const [org] = await db
+      .insert(organizations)
+      .values({ slug: `packs-${crypto.randomUUID()}`, name: "Packs org", workosOrganizationId: `w-${crypto.randomUUID()}` })
+      .returning({ id: organizations.id });
+    orgId = org!.id;
+  });
+
+  afterAll(async () => {
+    await db.delete(organizations).where(eq(organizations.id, orgId));
+  });
+
+  it("defaults to no packs, stores a selection, keeps it when an update omits it, and clones it", async () => {
+    const scope = unsafeOrgScope(orgId);
+    const plain = (await createLlmConfig(db, scope, base, "organization"))!;
+    expect(plain.genuiToolkits).toEqual([]);
+
+    const chosen = (await createLlmConfig(db, scope, { ...base, name: "Econ", genuiToolkits: ["economics", "statistics"] }, "organization"))!;
+    expect(chosen.genuiToolkits).toEqual(["economics", "statistics"]);
+
+    // An older client that never sends the field must not wipe the packs.
+    const renamed = (await updateLlmConfig(db, scope, chosen.id, { ...base, name: "Econ 201" }, "organization"))!;
+    expect(renamed.genuiToolkits).toEqual(["economics", "statistics"]);
+
+    const cleared = (await updateLlmConfig(db, scope, chosen.id, { ...base, name: "Econ 201", genuiToolkits: [] }, "organization"))!;
+    expect(cleared.genuiToolkits).toEqual([]);
+
+    await updateLlmConfig(db, scope, chosen.id, { ...base, genuiToolkits: ["clinical-informatics"] }, "organization");
+    const copy = (await cloneLlmConfig(db, scope, chosen.id, "Econ copy", NO_COURSE, "organization"))!;
+    expect(copy.genuiToolkits).toEqual(["clinical-informatics"]);
+  });
+});

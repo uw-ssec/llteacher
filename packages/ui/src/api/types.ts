@@ -66,6 +66,23 @@ export interface ProvisionCourseResponse {
   instructor: { userId: string; email: string };
 }
 
+export interface AddCourseInstructorBody {
+  instructorEmail: string;
+}
+
+export interface AddCourseInstructorResponse {
+  instructor: { userId: string; email: string };
+  membershipAdded: boolean;
+}
+
+export interface RemoveCourseInstructorsBody {
+  removeUserIds: string[];
+}
+
+export interface RemoveCourseInstructorsResponse {
+  removedUserIds: string[];
+}
+
 export interface PlatformCourseListItem extends ProvisionedCoursePayload {
   status: "active" | "inactive";
   instructors: Array<{ userId: string; email: string }>;
@@ -107,6 +124,9 @@ export interface LlmConfigPayload {
   isActive: boolean;
   /** Whether a tutor on this config may search the course knowledge base. */
   knowledgeEnabled: boolean;
+  /** Subject figure packs enabled on this config (ids from
+   *  @llteacher/ui/generative/toolkits). Empty means none. */
+  genuiToolkits: string[];
   /** #367: null for the organization's shared pool (changed only by an Org
    *  Admin), or the one course that owns this configuration. */
   scopeCourseId: string | null;
@@ -134,6 +154,7 @@ export interface LlmConfigWriteBody {
   isActive: boolean;
   isDefault: boolean;
   knowledgeEnabled: boolean;
+  genuiToolkits: string[];
   /** #367: create/clone only -- where the new configuration lives. Omitted:
    *  the shared pool for an Org Admin, this course for anyone else. A course
    *  instructor asking for "organization" is refused. Ignored on update; a
@@ -202,10 +223,16 @@ export interface PlatformInstructorListItem {
   status: "pending" | "signed_in";
   grantedAt: IsoDateTime;
   assignedCourseCount: number;
+  assignedCourses: Array<{ code: string; term: string }>;
 }
 
 export interface PlatformInstructorListResponse {
   instructors: PlatformInstructorListItem[];
+}
+
+export interface RevokePlatformInstructorResponse {
+  status: "revoked";
+  removedMembershipCount: number;
 }
 
 /* -- Roster (#32, #86) ----------------------------------------------------- */

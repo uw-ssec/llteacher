@@ -169,6 +169,8 @@ import { streamWithFallback } from "../llm/streamWithFallback";
 // imported rather than re-declared -- see its doc comment (plain TS, no
 // React, same cross-boundary pattern as @llteacher/ui/auth/courseRole).
 import { isRenderableToolPartType } from "@llteacher/ui/generative/renderableTools";
+import { isToolEnabled } from "@llteacher/ui/generative/toolkits";
+import { normalizeKnowledgeCheckAnswer } from "./knowledgeCheckAnswer";
 import type { AuthContext } from "../middleware/roles";
 // #41: the course knowledge base -- searchKnowledge/showKnowledge (TOOLS,
 // below) read through this service, scoped to the course the conversation
@@ -216,8 +218,8 @@ export const SHOW_BODY_MAX_CHARS = 12_000;
 export const TOOLS: ToolSet = {
   showDefinition: {
     description:
-      "Render a formal definition card for a named statistical concept. " +
-      "Use when introducing a term by name (e.g., 'p-value', 'standard error'). " +
+      "Render a formal definition card for a named concept in the course's subject. " +
+      "Use when introducing a term by name (e.g., 'p-value', 'GDP deflator', 'open reading frame'). " +
       "Keep body to 1-2 sentences in plain language. " +
       "Args: term (the concept name); body (the plain-language definition).",
     inputSchema: jsonSchema<{ term: string; body: string }>({
@@ -437,6 +439,1245 @@ export const TOOLS: ToolSet = {
     }),
     execute: async (_input: Record<string, never>) => ({ status: "suggested" as const }),
   },
+  /* Subject figures: a shared worked-steps layout plus the subject packs
+     an instructor can enable per LLM config (toolkits.ts). All DISPLAY tools, same contract as showDefinition:
+     the model supplies arguments, the sentinel below keeps the tool-call
+     history valid, and packages/ui draws the figure -- COMPUTING every
+     number it shows (equilibrium movement, GDP, rates, the translation,
+     identity) from those arguments rather than trusting the model's own
+     arithmetic. Input that doesn't validate renders nothing. */
+  showWorkedSteps: {
+    description:
+      "Lay out a multi-step calculation or derivation as numbered steps, any subject. Use when walking the student " +
+      "through a computation they should be able to repeat (a GDP deflator, an inflation rate, a Hardy-Weinberg " +
+      "frequency). Args: title; steps (1-12 of { label?, expression?, explanation? }); result? { label, value }.",
+    inputSchema: jsonSchema<{ title: string; steps: Array<{ label?: string; expression?: string; explanation?: string }>; result?: { label: string; value: string } }>({
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        steps: {
+          type: "array",
+          minItems: 1,
+          maxItems: 12,
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string", description: "Short step name, e.g. 'Rearrange for real GDP'" },
+              expression: { type: "string", description: "The math for this step, plain text, e.g. 'real GDP = 27,360 / 1.223'" },
+              explanation: { type: "string", description: "One sentence on why this step" },
+            },
+            additionalProperties: false,
+          },
+        },
+        result: {
+          type: "object",
+          properties: { label: { type: "string" }, value: { type: "string" } },
+          required: ["label", "value"],
+          additionalProperties: false,
+        },
+      },
+      required: ["title", "steps"],
+      additionalProperties: false,
+    }),
+    execute: async ({ title }: { title: string }) => ({ status: "displayed" as const, title }),
+  },
+  showMacroModel: {
+    description:
+      "ECON / macroeconomics: draw a textbook curve-shift diagram -- AD-AS ('ad-as'; curves AD, SRAS, LRAS), the " +
+      "loanable funds market ('loanable-funds'; curves D, S) or the money market ('money-market'; curves MD, MS). " +
+      "Use when explaining what a shock or a policy does to equilibrium. Name only which curves shift and which way; " +
+      "the figure computes and states the outcome, so do not assert one that contradicts it. Args: model; shifts " +
+      "(0-3 of { curve, direction: 'left'|'right', reason? }); title?.",
+    inputSchema: jsonSchema<{ model: "ad-as" | "loanable-funds" | "money-market"; shifts: Array<{ curve: string; direction: "left" | "right"; reason?: string }>; title?: string }>({
+      type: "object",
+      properties: {
+        model: { type: "string", enum: ["ad-as", "loanable-funds", "money-market"] },
+        shifts: {
+          type: "array",
+          maxItems: 3,
+          items: {
+            type: "object",
+            properties: {
+              curve: { type: "string", description: "Curve id: AD, SRAS, LRAS / D, S / MD, MS" },
+              direction: { type: "string", enum: ["left", "right"] },
+              reason: { type: "string", description: "Why it shifts, in a few words, e.g. 'Consumer confidence falls'" },
+            },
+            required: ["curve", "direction"],
+            additionalProperties: false,
+          },
+        },
+        title: { type: "string" },
+      },
+      required: ["model", "shifts"],
+      additionalProperties: false,
+    }),
+    execute: async ({ model }: { model: string }) => ({ status: "displayed" as const, model }),
+  },
+  showGdpComposition: {
+    description:
+      "ECON / macroeconomics: show GDP by the expenditure approach, GDP = C + I + G + NX, as one stacked bar " +
+      "(net exports to the left of zero when negative). Supply the four components; the figure computes GDP " +
+      "and each share. Args: consumption, investment, government, netExports; label? (e.g. 'United States, 2023'); " +
+      "unit? (prose, e.g. 'trillion dollars').",
+    inputSchema: jsonSchema<{ consumption: number; investment: number; government: number; netExports: number; label?: string; unit?: string }>({
+      type: "object",
+      properties: {
+        consumption: { type: "number", minimum: 0 },
+        investment: { type: "number", minimum: 0 },
+        government: { type: "number", minimum: 0 },
+        netExports: { type: "number", description: "Exports minus imports; negative for a trade deficit" },
+        label: { type: "string" },
+        unit: { type: "string", description: "Prose unit, e.g. 'trillion dollars'" },
+      },
+      required: ["consumption", "investment", "government", "netExports"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showMultiplier: {
+    description:
+      "ECON / macroeconomics: show the spending multiplier round by round for a change in spending, with the " +
+      "computed multiplier 1/(1-MPC) and total change in GDP. Args: mpc (0 < mpc < 1); initialChange (negative " +
+      "for a cut); rounds? (3-12, default 8); label? (what changed, e.g. 'Government spending'); unit? (prose).",
+    inputSchema: jsonSchema<{ mpc: number; initialChange: number; rounds?: number; label?: string; unit?: string }>({
+      type: "object",
+      properties: {
+        mpc: { type: "number", exclusiveMinimum: 0, exclusiveMaximum: 1 },
+        initialChange: { type: "number" },
+        rounds: { type: "integer", minimum: 3, maximum: 12 },
+        label: { type: "string" },
+        unit: { type: "string" },
+      },
+      required: ["mpc", "initialChange"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showLaborForce: {
+    description:
+      "ECON / macroeconomics: split the adult population into employed, unemployed and not in the labor force, " +
+      "with the unemployment, participation and employment-population rates computed from the counts. Use when " +
+      "teaching how unemployment is measured. Args: employed, unemployed, notInLaborForce; label?; unit? (e.g. 'millions').",
+    inputSchema: jsonSchema<{ employed: number; unemployed: number; notInLaborForce: number; label?: string; unit?: string }>({
+      type: "object",
+      properties: {
+        employed: { type: "number", minimum: 0 },
+        unemployed: { type: "number", minimum: 0 },
+        notInLaborForce: { type: "number", minimum: 0 },
+        label: { type: "string" },
+        unit: { type: "string" },
+      },
+      required: ["employed", "unemployed", "notInLaborForce"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showInflation: {
+    description:
+      "ECON / macroeconomics: plot a price index (e.g. CPI) over 2-24 periods; the figure computes each period's " +
+      "inflation rate from the index values. Args: series (array of { period, value }); indexName? (e.g. 'CPI-U').",
+    inputSchema: jsonSchema<{ series: Array<{ period: string; value: number }>; indexName?: string }>({
+      type: "object",
+      properties: {
+        series: {
+          type: "array",
+          minItems: 2,
+          maxItems: 24,
+          items: {
+            type: "object",
+            properties: { period: { type: "string" }, value: { type: "number", exclusiveMinimum: 0 } },
+            required: ["period", "value"],
+            additionalProperties: false,
+          },
+        },
+        indexName: { type: "string" },
+      },
+      required: ["series"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showDistribution: {
+    description:
+      "Statistics: plot a probability distribution -- normal (params mean, sd), Student's t (df), chi-square (df) " +
+      "or binomial (n, p) -- with an optional shaded region; the figure computes and states the region's " +
+      "probability, so don't assert a different one. Use when explaining a p-value, a critical value or a tail " +
+      "probability. Args: distribution; params; region? { from?, to?, label? } (either end open); title?.",
+    inputSchema: jsonSchema<{ distribution: "normal" | "t" | "binomial" | "chi-square"; params: { mean?: number; sd?: number; df?: number; n?: number; p?: number }; region?: { from?: number; to?: number; label?: string }; title?: string }>({
+      type: "object",
+      properties: {
+        distribution: { type: "string", enum: ["normal", "t", "binomial", "chi-square"] },
+        params: {
+          type: "object",
+          properties: {
+            mean: { type: "number" },
+            sd: { type: "number", exclusiveMinimum: 0 },
+            df: { type: "number", exclusiveMinimum: 0 },
+            n: { type: "integer", minimum: 1, maximum: 100 },
+            p: { type: "number", minimum: 0, maximum: 1 },
+          },
+          additionalProperties: false,
+        },
+        region: {
+          type: "object",
+          properties: { from: { type: "number" }, to: { type: "number" }, label: { type: "string" } },
+          additionalProperties: false,
+        },
+        title: { type: "string" },
+      },
+      required: ["distribution", "params"],
+      additionalProperties: false,
+    }),
+    execute: async ({ distribution }: { distribution: string }) => ({ status: "displayed" as const, distribution }),
+  },
+  /* Clinical informatics pack (toolkits.ts). As with every figure, the model
+     supplies arguments only; packages/ui/src/generative/lib/clinical.ts
+     computes every measure the figure states. */
+  showDiagnosticAccuracy: {
+    description:
+      "Clinical informatics: show a diagnostic test or alert against a reference standard as a 2×2 mosaic and table, " +
+      "from the four counts. Use it when explaining sensitivity, specificity, PPV, NPV, likelihood ratios, or why a " +
+      "positive result may not mean disease. Supply only the counts; the figure computes every measure and the 'Of N " +
+      "positive results, X have the condition' sentence, so do not state values that contradict it. Args: tp, fp, fn, " +
+      "tn (whole numbers, total > 0); testName?; conditionName? (lower case, e.g. 'sepsis').",
+    inputSchema: jsonSchema<{ tp: number; fp: number; fn: number; tn: number; testName?: string; conditionName?: string }>({
+      type: "object",
+      properties: {
+        tp: { type: "integer", minimum: 0, description: "True positives: test positive and the condition is present" },
+        fp: { type: "integer", minimum: 0, description: "False positives: test positive, condition absent" },
+        fn: { type: "integer", minimum: 0, description: "False negatives: test negative, condition present" },
+        tn: { type: "integer", minimum: 0, description: "True negatives: test negative, condition absent" },
+        testName: { type: "string", maxLength: 80, description: "e.g. 'Sepsis screening alert'" },
+        conditionName: { type: "string", maxLength: 60, description: "Lower-case condition, e.g. 'sepsis'" },
+      },
+      required: ["tp", "fp", "fn", "tn"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showPrevalenceEffect: {
+    description:
+      "Clinical informatics: show how a test's PPV and NPV change with prevalence while its sensitivity and " +
+      "specificity stay fixed, with the population it is used in marked. Use it for screening, alert fatigue, or 'why " +
+      "does a good test give mostly false alarms here?'. The figure computes PPV/NPV by Bayes' theorem and states how " +
+      "many of every 10 positive alerts are false positives. Args: sensitivity, specificity (proportions, 0 < x ≤ 1); " +
+      "prevalence (0 < p < 1, a proportion, not a percent); testName?.",
+    inputSchema: jsonSchema<{ sensitivity: number; specificity: number; prevalence: number; testName?: string }>({
+      type: "object",
+      properties: {
+        sensitivity: { type: "number", exclusiveMinimum: 0, maximum: 1, description: "Proportion, e.g. 0.8 (not 80)" },
+        specificity: { type: "number", exclusiveMinimum: 0, maximum: 1, description: "Proportion, e.g. 0.85" },
+        prevalence: {
+          type: "number",
+          exclusiveMinimum: 0,
+          exclusiveMaximum: 1,
+          description: "Proportion with the condition in the population where the tool is used, e.g. 0.02",
+        },
+        testName: { type: "string", maxLength: 80 },
+      },
+      required: ["sensitivity", "specificity", "prevalence"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showRocCurve: {
+    description:
+      "Clinical informatics: draw a ROC curve from a test's operating points (one per threshold), with the chance " +
+      "diagonal. Use it when comparing thresholds, explaining the sensitivity–specificity trade-off, AUC, or choosing " +
+      "a cut-off. The figure computes the AUC (trapezoid rule) and the threshold with the highest Youden's J; do not " +
+      "state an AUC or best threshold of your own. Points must come from one test, so sensitivity must not fall as " +
+      "1 − specificity rises. Args: points (2-30 of { sensitivity, specificity, threshold? }, proportions 0-1); label?.",
+    inputSchema: jsonSchema<{ points: Array<{ sensitivity: number; specificity: number; threshold?: string | number }>; label?: string }>({
+      type: "object",
+      properties: {
+        points: {
+          type: "array",
+          minItems: 2,
+          maxItems: 30,
+          items: {
+            type: "object",
+            properties: {
+              sensitivity: { type: "number", minimum: 0, maximum: 1 },
+              specificity: { type: "number", minimum: 0, maximum: 1 },
+              threshold: { type: ["string", "number"], description: "The cut-off for this point, e.g. '≥ 4' or 2.0" },
+            },
+            required: ["sensitivity", "specificity"],
+            additionalProperties: false,
+          },
+        },
+        label: { type: "string", maxLength: 120, description: "What is being predicted, e.g. 'Early warning score, ICU transfer within 24 h'" },
+      },
+      required: ["points"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showPatientTimeline: {
+    description:
+      "Clinical informatics: show one (de-identified) patient's record as a swimlane timeline: encounters, vital " +
+      "signs, labs, medications, procedures, orders and notes on a shared time axis, with abnormal results flagged. " +
+      "Use it when walking through a case, a care pathway, or how EHR data accumulate over a stay. The figure orders " +
+      "events, computes the time span and counts abnormal results itself. Args: events (1-40 of { time: ISO date or " +
+      "date-time, category, label, detail?, abnormal? }); patientLabel?. Never include real patient identifiers.",
+    inputSchema: jsonSchema<{
+      patientLabel?: string;
+      events: Array<{ time: string; category: string; label: string; detail?: string; abnormal?: boolean }>;
+    }>({
+      type: "object",
+      properties: {
+        patientLabel: { type: "string", maxLength: 80, description: "De-identified, e.g. 'Patient A, 68 y'" },
+        events: {
+          type: "array",
+          minItems: 1,
+          maxItems: 40,
+          items: {
+            type: "object",
+            properties: {
+              time: {
+                type: "string",
+                description: "ISO 8601 date '2026-03-03' or date-time '2026-03-03T08:40' (all events in one time zone)",
+              },
+              category: { type: "string", enum: ["encounter", "lab", "medication", "vital", "procedure", "order", "note"] },
+              label: { type: "string", maxLength: 120 },
+              detail: { type: "string", maxLength: 200, description: "e.g. '4.1 mmol/L' or '4.5 g IV'" },
+              abnormal: { type: "boolean" },
+            },
+            required: ["time", "category", "label"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["events"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showCdsRule: {
+    description:
+      "Clinical informatics: evaluate a clinical decision support rule (IF all/any of up to 8 conditions THEN an " +
+      "action) against one patient's data, shown as a rule card. Use it when teaching CDS logic, alert design, or how " +
+      "missing data silently suppresses alerts. Give the rule and the patient values; the figure evaluates each " +
+      "condition (met / not met / missing) and computes whether the rule fires, so do not assert the outcome yourself. " +
+      "Args: name; logic ('all'|'any'); conditions (1-8 of { label, field, operator, value, unit? }); patient " +
+      "({ field: number|string|null }); action?.",
+    inputSchema: jsonSchema<{
+      name: string;
+      logic: "all" | "any";
+      conditions: Array<{ label: string; field: string; operator: string; value: number | string; unit?: string }>;
+      patient: Record<string, number | string | null>;
+      action?: string;
+    }>({
+      type: "object",
+      properties: {
+        name: { type: "string", maxLength: 120 },
+        logic: { type: "string", enum: ["all", "any"] },
+        conditions: {
+          type: "array",
+          minItems: 1,
+          maxItems: 8,
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string", maxLength: 120, description: "Plain-language criterion, e.g. 'Lactate ≥ 2 mmol/L'" },
+              field: { type: "string", maxLength: 60, description: "Key into patient, e.g. 'lactate'" },
+              operator: { type: "string", enum: [">", ">=", "<", "<=", "=", "!="] },
+              value: { type: ["number", "string"], description: "Number to compare, or text (text only with '=' or '!=')" },
+              unit: { type: "string", maxLength: 30 },
+            },
+            required: ["label", "field", "operator", "value"],
+            additionalProperties: false,
+          },
+        },
+        patient: {
+          type: "object",
+          maxProperties: 40,
+          additionalProperties: { type: ["number", "string", "null"] },
+          description: "The patient's values by field; omit a field or use null when it was not recorded",
+        },
+        action: { type: "string", maxLength: 200, description: "What the alert recommends when it fires" },
+      },
+      required: ["name", "logic", "conditions", "patient"],
+      additionalProperties: false,
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  /* NMETH 527 clinical informatics figures (toolkits.ts). The figures own
+     their reference content (aims, dimensions, standards, milestones, SUS
+     items) and compute every count and classification they state. */
+  showQuadrupleAim: {
+    description:
+      "Clinical informatics: evaluate one health IT intervention (e.g. a patient portal, BCMA, a sepsis alert, " +
+      "remote patient monitoring) against the Quadruple Aim: patient experience, population health, cost of care, " +
+      "care team well-being; set includeEquity to add health equity (Quintuple Aim). Use it when weighing an " +
+      "intervention's benefits against its costs and burdens. The figure owns the aims and their definitions and " +
+      "computes the tally and the trade-offs (aims that worsen or are mixed while others improve), so do not state " +
+      "the summary yourself. Args: intervention; aims ({ patientExperience, populationHealth, costOfCare, " +
+      "careTeamWellBeing, healthEquity? } each { effect: improves|worsens|mixed|unclear, rationale, measure }); " +
+      "includeEquity?.",
+    inputSchema: jsonSchema<Record<string, unknown>>({
+      "type": "object",
+      "properties": {
+        "intervention": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "The health IT intervention, e.g. 'Bar-code medication administration on a med-surg unit'"
+        },
+        "includeEquity": {
+          "type": "boolean",
+          "description": "Add health equity as a fifth aim (Quintuple Aim)"
+        },
+        "aims": {
+          "type": "object",
+          "properties": {
+            "patientExperience": {
+              "type": "object",
+              "properties": {
+                "effect": {
+                  "type": "string",
+                  "enum": [
+                    "improves",
+                    "worsens",
+                    "mixed",
+                    "unclear"
+                  ],
+                  "description": "For cost of care, 'improves' means cost goes down"
+                },
+                "rationale": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "description": "Why, in one sentence"
+                },
+                "measure": {
+                  "type": "string",
+                  "maxLength": 120,
+                  "description": "How you would measure it, e.g. 'portal activation rate'"
+                }
+              },
+              "required": [
+                "effect",
+                "rationale",
+                "measure"
+              ],
+              "additionalProperties": false
+            },
+            "populationHealth": {
+              "type": "object",
+              "properties": {
+                "effect": {
+                  "type": "string",
+                  "enum": [
+                    "improves",
+                    "worsens",
+                    "mixed",
+                    "unclear"
+                  ],
+                  "description": "For cost of care, 'improves' means cost goes down"
+                },
+                "rationale": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "description": "Why, in one sentence"
+                },
+                "measure": {
+                  "type": "string",
+                  "maxLength": 120,
+                  "description": "How you would measure it, e.g. 'portal activation rate'"
+                }
+              },
+              "required": [
+                "effect",
+                "rationale",
+                "measure"
+              ],
+              "additionalProperties": false
+            },
+            "costOfCare": {
+              "type": "object",
+              "properties": {
+                "effect": {
+                  "type": "string",
+                  "enum": [
+                    "improves",
+                    "worsens",
+                    "mixed",
+                    "unclear"
+                  ],
+                  "description": "For cost of care, 'improves' means cost goes down"
+                },
+                "rationale": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "description": "Why, in one sentence"
+                },
+                "measure": {
+                  "type": "string",
+                  "maxLength": 120,
+                  "description": "How you would measure it, e.g. 'portal activation rate'"
+                }
+              },
+              "required": [
+                "effect",
+                "rationale",
+                "measure"
+              ],
+              "additionalProperties": false
+            },
+            "careTeamWellBeing": {
+              "type": "object",
+              "properties": {
+                "effect": {
+                  "type": "string",
+                  "enum": [
+                    "improves",
+                    "worsens",
+                    "mixed",
+                    "unclear"
+                  ],
+                  "description": "For cost of care, 'improves' means cost goes down"
+                },
+                "rationale": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "description": "Why, in one sentence"
+                },
+                "measure": {
+                  "type": "string",
+                  "maxLength": 120,
+                  "description": "How you would measure it, e.g. 'portal activation rate'"
+                }
+              },
+              "required": [
+                "effect",
+                "rationale",
+                "measure"
+              ],
+              "additionalProperties": false
+            },
+            "healthEquity": {
+              "type": "object",
+              "properties": {
+                "effect": {
+                  "type": "string",
+                  "enum": [
+                    "improves",
+                    "worsens",
+                    "mixed",
+                    "unclear"
+                  ],
+                  "description": "For cost of care, 'improves' means cost goes down"
+                },
+                "rationale": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "description": "Why, in one sentence"
+                },
+                "measure": {
+                  "type": "string",
+                  "maxLength": 120,
+                  "description": "How you would measure it, e.g. 'portal activation rate'"
+                }
+              },
+              "required": [
+                "effect",
+                "rationale",
+                "measure"
+              ],
+              "additionalProperties": false,
+              "description": "Only when includeEquity is true"
+            }
+          },
+          "required": [
+            "patientExperience",
+            "populationHealth",
+            "costOfCare",
+            "careTeamWellBeing"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "intervention",
+        "aims"
+      ],
+      "additionalProperties": false
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showSociotechnicalModel: {
+    description:
+      "Clinical informatics: analyse a health IT problem or safety event with Sittig & Singh's eight-dimension " +
+      "sociotechnical model. Use it for root-cause or implementation discussions (alert overrides, workarounds, " +
+      "downtime). The figure owns the eight dimensions and their definitions, fills omitted ones as not assessed, " +
+      "and computes the counts and which dimensions contribute, so do not state that summary yourself. Args: " +
+      "caseTitle; findings (1-8 of { dimension, role: contributing|protective|not assessed, finding }) with at " +
+      "least one assessed and no dimension twice.",
+    inputSchema: jsonSchema<Record<string, unknown>>({
+      "type": "object",
+      "properties": {
+        "caseTitle": {
+          "type": "string",
+          "maxLength": 140,
+          "description": "The case, e.g. 'Smart infusion pump alerts overridden on a med-surg unit'"
+        },
+        "findings": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "description": "At most one per dimension; omitted dimensions count as not assessed",
+          "items": {
+            "type": "object",
+            "properties": {
+              "dimension": {
+                "type": "string",
+                "enum": [
+                  "infrastructure",
+                  "clinicalContent",
+                  "interface",
+                  "people",
+                  "workflow",
+                  "organization",
+                  "externalRules",
+                  "measurement"
+                ],
+                "description": "1 hardware/software infrastructure, 2 clinical content, 3 human–computer interface, 4 people, 5 workflow and communication, 6 internal policies/procedures/culture, 7 external rules/regulations/pressures, 8 system measurement and monitoring"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "contributing",
+                  "protective",
+                  "not assessed"
+                ]
+              },
+              "finding": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "What was found; required unless not assessed"
+              }
+            },
+            "required": [
+              "dimension",
+              "role"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "caseTitle",
+        "findings"
+      ],
+      "additionalProperties": false
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showDikw: {
+    description:
+      "Clinical informatics: show the data → information → knowledge → wisdom (DIKW) continuum from nursing " +
+      "informatics, with one concrete example per level from a clinical scenario. Use it to show how raw assessment " +
+      "data become clinical judgment. The figure owns the levels, their order and definitions, and builds the " +
+      "takeaway from your examples, so do not restate them as a summary. Args: scenario; examples { data, " +
+      "information, knowledge, wisdom } (all required, all different); action?.",
+    inputSchema: jsonSchema<Record<string, unknown>>({
+      "type": "object",
+      "properties": {
+        "scenario": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "examples": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "Raw facts, e.g. 'HR 118, RR 24, temp 38.6 °C'"
+            },
+            "information": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "Data organized with meaning, e.g. a trend"
+            },
+            "knowledge": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "Synthesized relationships or patterns"
+            },
+            "wisdom": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "Judgment about when and how to act"
+            }
+          },
+          "required": [
+            "data",
+            "information",
+            "knowledge",
+            "wisdom"
+          ],
+          "additionalProperties": false
+        },
+        "action": {
+          "type": "string",
+          "maxLength": 160,
+          "description": "What the nurse does as a result"
+        }
+      },
+      "required": [
+        "scenario",
+        "examples"
+      ],
+      "additionalProperties": false
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showWorkflowComparison: {
+    description:
+      "Clinical informatics: draw a clinical workflow as swimlanes (one lane per role), current state and " +
+      "optionally future state, e.g. medication administration before/after BCMA or paper vs electronic admission " +
+      "assessment. Use it when discussing workflow redesign, handoffs or documentation burden. The figure counts " +
+      "steps, handoffs (consecutive steps by different roles), documentation steps, waits and total minutes (only " +
+      "when every step has minutes), and states the change; do not state these counts or claim the future state is " +
+      "safer. Args: process; roles (2-6); current (1-20 steps of { role, action, kind, minutes? }); future?; " +
+      "currentLabel?; futureLabel?.",
+    inputSchema: jsonSchema<Record<string, unknown>>({
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "process",
+        "roles",
+        "current"
+      ],
+      "properties": {
+        "process": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "The clinical workflow, e.g. 'Medication administration'"
+        },
+        "roles": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 6,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 24
+          },
+          "description": "Swimlanes in order, e.g. 'Nurse','Pharmacist','Patient','EHR'"
+        },
+        "current": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "role",
+              "action",
+              "kind"
+            ],
+            "properties": {
+              "role": {
+                "type": "string",
+                "description": "One of roles"
+              },
+              "action": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "task",
+                  "decision",
+                  "documentation",
+                  "communication",
+                  "wait"
+                ]
+              },
+              "minutes": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1440
+              }
+            }
+          }
+        },
+        "future": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "role",
+              "action",
+              "kind"
+            ],
+            "properties": {
+              "role": {
+                "type": "string",
+                "description": "One of roles"
+              },
+              "action": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "task",
+                  "decision",
+                  "documentation",
+                  "communication",
+                  "wait"
+                ]
+              },
+              "minutes": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1440
+              }
+            }
+          }
+        },
+        "currentLabel": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "e.g. 'Paper MAR'"
+        },
+        "futureLabel": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "e.g. 'BCMA'; only with future"
+        }
+      }
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showStandardsMap: {
+    description:
+      "Clinical informatics: map clinical data elements (e.g. a pain score, a nursing diagnosis, a medication) to " +
+      "the standards that represent them, and optionally the standard that exchanges them. Use it when teaching " +
+      "terminologies, nursing terminologies or interoperability. The figure owns each standard's steward and " +
+      "purpose and groups and counts the elements itself; it shows any code exactly as given, labelled unverified, " +
+      "so give codes only if you are confident and do not restate counts. Args: scenario; elements (1-12 of { " +
+      "element, standard (id), code?, display? }); exchange? { standard, resource }.",
+    inputSchema: jsonSchema<Record<string, unknown>>({
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenario",
+        "elements"
+      ],
+      "properties": {
+        "scenario": {
+          "type": "string",
+          "maxLength": 120,
+          "description": "e.g. 'Admission nursing assessment'"
+        },
+        "elements": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "element",
+              "standard"
+            ],
+            "properties": {
+              "element": {
+                "type": "string",
+                "maxLength": 100,
+                "description": "e.g. 'Pain intensity 7/10'"
+              },
+              "standard": {
+                "type": "string",
+                "enum": [
+                  "loinc",
+                  "snomed-ct",
+                  "icd-10-cm",
+                  "icd-10-pcs",
+                  "cpt",
+                  "rxnorm",
+                  "ucum",
+                  "nanda-i",
+                  "nic",
+                  "noc",
+                  "omaha",
+                  "ccc",
+                  "icnp",
+                  "hl7-v2",
+                  "fhir",
+                  "c-cda",
+                  "dicom",
+                  "ncpdp-script"
+                ]
+              },
+              "code": {
+                "type": "string",
+                "maxLength": 40,
+                "description": "Optional; shown as given, unverified"
+              },
+              "display": {
+                "type": "string",
+                "maxLength": 120
+              }
+            }
+          }
+        },
+        "exchange": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "standard",
+            "resource"
+          ],
+          "properties": {
+            "standard": {
+              "type": "string",
+              "enum": [
+                "hl7-v2",
+                "fhir",
+                "c-cda",
+                "dicom",
+                "ncpdp-script"
+              ]
+            },
+            "resource": {
+              "type": "string",
+              "maxLength": 40,
+              "description": "e.g. FHIR 'Observation', HL7 v2 'ORU^R01'"
+            }
+          }
+        }
+      }
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showHealthItTimeline: {
+    description:
+      "Clinical informatics: show milestones in the history of health IT and nursing informatics on a vertical " +
+      "timeline, from a fixed reference list (HELP 1967 to ONC HTI-1 2023). Use it for history, policy (HIPAA, " +
+      "HITECH, Cures Act) or nursing informatics context. The figure owns every milestone's year, wording and " +
+      "category, and computes the count, span and category breakdown; pick milestones by id and do not restate " +
+      "dates or counts. Args: highlight (milestone ids, or 'all'); range? { from, to }; localEvents? (0-5 of { " +
+      "year, label }, marked as added by you).",
+    inputSchema: jsonSchema<Record<string, unknown>>({
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "highlight"
+      ],
+      "properties": {
+        "highlight": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "all"
+              ]
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 25,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "help-system",
+                  "costar",
+                  "hl7-founded",
+                  "iom-cpr-report",
+                  "ana-nursing-informatics",
+                  "hipaa",
+                  "to-err-is-human",
+                  "quality-chasm",
+                  "onc-created",
+                  "fda-bar-code-rule",
+                  "tiger-initiative",
+                  "triple-aim",
+                  "hitech-act",
+                  "affordable-care-act",
+                  "meaningful-use-stage-1",
+                  "quadruple-aim",
+                  "fhir-dstu1",
+                  "icd-10-transition",
+                  "cures-act",
+                  "promoting-interoperability",
+                  "fhir-r4",
+                  "onc-cures-final-rule",
+                  "information-blocking-effective",
+                  "tefca",
+                  "hti-1"
+                ]
+              }
+            }
+          ]
+        },
+        "range": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "from",
+            "to"
+          ],
+          "properties": {
+            "from": {
+              "type": "integer",
+              "minimum": 1950,
+              "maximum": 2035
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 1950,
+              "maximum": 2035
+            }
+          },
+          "description": "Must include every highlighted milestone and local event"
+        },
+        "localEvents": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "year",
+              "label"
+            ],
+            "properties": {
+              "year": {
+                "type": "integer",
+                "minimum": 1950,
+                "maximum": 2035
+              },
+              "label": {
+                "type": "string",
+                "maxLength": 120
+              }
+            }
+          },
+          "description": "Course or organisation events; shown as added by the tutor"
+        }
+      }
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showRunChart: {
+    description:
+      "Clinical informatics: a quality-improvement run chart (IHI method) for a unit measure over time, such as " +
+      "BCMA scanning compliance, falls, CAUTI or documentation time. Use it when a student asks whether a change " +
+      "made a difference. The figure computes the rate from numerator/denominator, the median, every shift (6+ " +
+      "points on one side of the median) and trend (5+ points rising or falling), and whether each one runs in the " +
+      "better direction. Do not state these yourself. Args: measure, points, optional unit, improvement, " +
+      "changeAfter, changeLabel, baselineCount.",
+    inputSchema: jsonSchema<Record<string, unknown>>({
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "measure",
+        "points"
+      ],
+      "properties": {
+        "measure": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "What is measured, e.g. 'BCMA scanning compliance, 4 West'"
+        },
+        "unit": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "Value mode only, e.g. 'min'. Omit for numerator/denominator points (always percent)."
+        },
+        "points": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 60,
+          "description": "In time order. Either all {label,value} or all {label,numerator,denominator}; labels unique.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "label"
+            ],
+            "properties": {
+              "label": {
+                "type": "string",
+                "maxLength": 24
+              },
+              "value": {
+                "type": "number"
+              },
+              "numerator": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "denominator": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        },
+        "improvement": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down"
+          ],
+          "description": "Which direction is better"
+        },
+        "changeAfter": {
+          "type": "string",
+          "maxLength": 24,
+          "description": "Label of the point after which a change was introduced"
+        },
+        "changeLabel": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "Name of the change, e.g. 'BCMA re-education' (requires changeAfter)"
+        },
+        "baselineCount": {
+          "type": "integer",
+          "minimum": 8,
+          "maximum": 60,
+          "description": "Median from the first N points; default all"
+        }
+      }
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showUsabilityScore: {
+    description:
+      "Clinical informatics: the System Usability Scale (Brooke, 1996) for a clinical system. Use it when students " +
+      "score or interpret SUS survey responses. The figure owns the ten statements and computes each respondent's " +
+      "0–100 score, the mean, range and n, the comparison with the commonly cited average of 68, which Bangor " +
+      "adjective means it falls between, and each item's contribution. Send raw responses only, never scores. Args: systemName, " +
+      "respondents.",
+    inputSchema: jsonSchema<Record<string, unknown>>({
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "systemName",
+        "respondents"
+      ],
+      "properties": {
+        "systemName": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "e.g. 'Flowsheet redesign, med-surg'"
+        },
+        "respondents": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "description": "One array per respondent: the ten raw SUS responses (1 = strongly disagree … 5 = strongly agree) in standard item order",
+          "items": {
+            "type": "array",
+            "minItems": 10,
+            "maxItems": 10,
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5
+            }
+          }
+        }
+      }
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  showAdoptionCurve: {
+    description:
+      "Clinical informatics: Rogers' diffusion of innovations applied to a staff rollout (for example, nurses " +
+      "adopting secure messaging or a new EHR module). The figure owns the five adopter categories and their " +
+      "idealised shares. It computes the percent adopted, which category the next adopters belong to and, from a " +
+      "series, when each mark (2.5/16/50/84%) was reached. Do not state these yourself. Args: innovation, " +
+      "staffCount, staffLabel, and either adoptedCount or series.",
+    inputSchema: jsonSchema<Record<string, unknown>>({
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "innovation",
+        "staffCount"
+      ],
+      "properties": {
+        "innovation": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "e.g. 'Secure messaging'"
+        },
+        "staffCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000,
+          "description": "Everyone who could adopt"
+        },
+        "staffLabel": {
+          "type": "string",
+          "maxLength": 30,
+          "description": "Plural noun, e.g. 'nurses'; default 'staff'"
+        },
+        "adoptedCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Adopters now (omit if series is given)"
+        },
+        "series": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 40,
+          "description": "Cumulative adopter counts over time, oldest first, never decreasing, at most staffCount; labels unique",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "label",
+              "adoptedCount"
+            ],
+            "properties": {
+              "label": {
+                "type": "string",
+                "maxLength": 24
+              },
+              "adoptedCount": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      }
+    }),
+    execute: async () => ({ status: "displayed" as const }),
+  },
+  /* #36: an inline multiple-choice question. Deliberately NO answer field:
+     the model judges the student's choice on its next turn, so nothing in
+     the browser can reveal the answer early. The student's answer comes back
+     as a user message (knowledgeCheckAnswer.ts). */
+  knowledgeCheck: {
+    description:
+      "Pose a short multiple-choice question to check the student's understanding, any subject. The student " +
+      "answers in the chat and their choice arrives as their next message; then tell them whether it was right " +
+      "and why. Never include or hint at the answer in this call. Use sparingly -- after explaining an idea, not " +
+      "instead of a conversation. Args: question; options (2-6 distinct, concise choices).",
+    inputSchema: jsonSchema<{ question: string; options: string[] }>({
+      type: "object",
+      properties: {
+        question: { type: "string" },
+        options: { type: "array", minItems: 2, maxItems: 6, items: { type: "string" } },
+      },
+      required: ["question", "options"],
+      additionalProperties: false,
+    }),
+    execute: async ({ question }: { question: string }) => ({ status: "awaiting_response" as const, question }),
+  },
   searchKnowledge: {
     description:
       "Search the course knowledge base the instructor uploaded (lectures, slides, transcripts, syllabus). " +
@@ -581,9 +1822,16 @@ const KNOWLEDGE_TOOL_NAMES = new Set<keyof typeof TOOLS>(["searchKnowledge", "sh
 
 export function toolsForConversation(
   sectionId: string | null,
-  options?: { withholdRequestHint?: boolean; withholdKnowledge?: boolean },
+  options?: { withholdRequestHint?: boolean; withholdKnowledge?: boolean; genuiToolkits?: readonly string[] },
 ): ToolSet {
   const withheldNames = new Set<keyof typeof TOOLS>();
+  // Subject figure packs are opt-in per LLM config (toolkits.ts): a tool in
+  // a pack the instructor did not enable is never OFFERED, so the model
+  // cannot call it and the student is never shown it.
+  const enabledToolkits = options?.genuiToolkits ?? [];
+  for (const name of Object.keys(TOOLS) as Array<keyof typeof TOOLS>) {
+    if (!isToolEnabled(name, enabledToolkits)) withheldNames.add(name);
+  }
   if (!sectionId) {
     for (const name of SECTION_ONLY_TOOL_NAMES) withheldNames.add(name);
   }
@@ -754,7 +2002,9 @@ const inboundUserMessageSchema = z.object({
 // tool-dispatch loop above understand. A "file" part in particular is
 // rejected here rather than reaching convertToModelMessages, which would map
 // it to an outbound fetch URL (downloadAssets) the model can request.
-const ALLOWED_HISTORY_PART_TYPE_RE = /^(text|step-start|tool-[A-Za-z0-9_]+)$/;
+// #36: plus exactly one data part, a knowledge-check answer -- validated and
+// rebuilt from the persisted check by knowledgeCheckAnswer.ts before storage.
+const ALLOWED_HISTORY_PART_TYPE_RE = /^(text|step-start|tool-[A-Za-z0-9_]+|data-knowledge-check-response)$/;
 const historyPartSchema = withTextLengthCap(
   z.object({ type: z.string().regex(ALLOWED_HISTORY_PART_TYPE_RE) }).passthrough(),
 );
@@ -2243,6 +3493,7 @@ export const chatHandler = effectHandler((c) => Effect.gen(function* () {
     const turnTools = toolsForConversation(conv.sectionId, {
       withholdRequestHint: isHintGranted,
       withholdKnowledge: knowledgeListing === "",
+      genuiToolkits: resolvedLLMConfig.genuiToolkits,
     });
     const systemPrompt = assembleSystemPrompt(
       resolvedSystemPromptContent,
@@ -2275,6 +3526,12 @@ export const chatHandler = effectHandler((c) => Effect.gen(function* () {
       // that was REFUSED was "already on its way" -- the same conflation
       // section_closed was carved out of in_progress to fix. The lock is
       // released by this block's Effect.onError.
+      // #36: a knowledge-check answer is validated against, and rebuilt
+      // from, the check the server itself produced in this conversation.
+      // A refusal fails this locked block, whose onError releases the lock.
+      const kcAnswer = normalizeKnowledgeCheckAnswer(inboundMessage.parts, recentMessages);
+      if (kcAnswer.kind === "invalid") return yield* new BadRequest({ message: kcAnswer.message });
+      const partsToStore = kcAnswer.kind === "answer" ? kcAnswer.parts : inboundMessage.parts;
       {
         const { row: insertedRow, created } = yield* query(
           "appendMessage",
@@ -2283,7 +3540,7 @@ export const chatHandler = effectHandler((c) => Effect.gen(function* () {
               db,
               scope,
               conv.id,
-              { role: "user", parts: inboundMessage.parts, clientMessageId: parsedInbound.data.id },
+              { role: "user", parts: partsToStore, clientMessageId: parsedInbound.data.id },
               { skipOwnershipCheck: true },
             ),
           [IdempotencyKeyConflictError],
@@ -2377,7 +3634,7 @@ export const chatHandler = effectHandler((c) => Effect.gen(function* () {
           // re-derived from appendMessage's returned row) -- only `id` is
           // server-generated and genuinely needs the DB round-trip's result.
           persistedHistory = [
-            { id: insertedRow.id, role: "user", parts: inboundMessage.parts },
+            { id: insertedRow.id, role: "user", parts: partsToStore },
             ...recentMessages.slice(0, MAX_HISTORY_MESSAGES - 1),
           ];
         }

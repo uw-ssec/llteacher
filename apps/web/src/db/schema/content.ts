@@ -127,6 +127,12 @@ export const llmConfigs = pgTable(
      *  tools from the turn -- a closed-book assignment's lever. Default on
      *  so existing configs keep today's behaviour. */
     knowledgeEnabled: boolean("knowledge_enabled").notNull().default(true),
+    /** Subject figure packs ("toolkits") a tutor on this config may draw:
+     *  ids from @llteacher/ui/generative/toolkits (e.g. "economics",
+     *  "clinical-informatics", "statistics"). Empty by default -- the packs
+     *  are opt-in, so a config nobody touched offers only the always-on
+     *  tools. Unknown ids are ignored on read, never trusted. */
+    genuiToolkits: text("genui_toolkits").array().notNull().default(sql`'{}'::text[]`),
     temperature: doublePrecision("temperature").notNull().default(0.7),
     maxCompletionTokens: integer("max_completion_tokens")
       .notNull()

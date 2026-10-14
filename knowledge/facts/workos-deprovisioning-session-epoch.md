@@ -3,10 +3,10 @@ type: Fact
 title: Revoking stateless WorkOS sessions with a per-user session epoch
 description: "Sealed-cookie sessions are revoked by comparing the cookie's sessionEpoch with users.session_epoch in roles middleware on every request; WorkOS user.deleted webhooks bump the epoch, and reactivation restores only what deactivation dropped."
 tags: [auth, workos, webhooks, sessions, security]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T22:25:31Z" }
+generated: { by: "codex:gpt-6", at: "2026-10-13T20:36:13Z" }
 status: stable
 governance: constraint
-code_refs: ["apps/web/src/server/routes/webhooksWorkos.ts", "apps/web/src/server/middleware/roles.ts", "apps/web/src/lib/services/UserIdentityService.ts"]
+code_refs: [apps/web/src/server/routes/webhooksWorkos.ts, apps/web/src/server/middleware/roles.ts, apps/web/src/lib/services/UserIdentityService.ts]
 sources:
   - resource: "PR #110"
   - resource: "PR #127"
@@ -19,6 +19,10 @@ sources:
 ## Problem
 
 PR #110 used WorkOS AuthKit with **stateless sealed-cookie sessions**. A stateless cookie cannot be revoked by itself, so deprovisioning a user in WorkOS would not end their live sessions (#95's open design question).
+
+The symptom was that deleting a user in the authentication provider did not immediately sign them out of LLTeacher: their already-issued app cookie could remain valid for its seven-day lifetime. WorkOS could not directly invalidate this app-issued cookie; the fix belongs in LLTeacher's request checks. The session epoch makes revocation effective on the next authenticated request after the verified webhook is processed, without waiting for cookie expiry.
+
+Sources: [issue #95](https://github.com/uw-ssec/llteacher/issues/95) and [PR #127](https://github.com/uw-ssec/llteacher/pull/127).
 
 ## Design (PR #127)
 

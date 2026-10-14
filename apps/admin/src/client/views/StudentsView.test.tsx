@@ -63,6 +63,15 @@ const renderView = (onGoToCanvas: () => void = vi.fn()) =>
   render(<StudentsView courseId="c1" courseTitle="STATS 311" onGoToCanvas={onGoToCanvas} />);
 
 describe("StudentsView (#32)", () => {
+  it("keeps the CSV template download available before opening the import panel", async () => {
+    stub(() => rosterResponse([ACTIVE]));
+    renderView();
+    await waitFor(() => screen.getByText("Ada Lovelace"));
+
+    expect(screen.getByRole("button", { name: "Download CSV template" })).toBeTruthy();
+    expect(screen.queryByText("Import a roster")).toBeNull();
+  });
+
   it("distinguishes an invited person from an active one", async () => {
     stub(() => rosterResponse([ACTIVE, PENDING]));
     renderView();

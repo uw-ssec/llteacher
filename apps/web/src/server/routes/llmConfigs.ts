@@ -73,6 +73,7 @@ import type {
 import { BadRequest, Conflict, DatabaseError, Forbidden, NotFound } from "../effect/errors";
 import { effectHandler } from "../effect/http";
 import { external, query, type Database } from "../effect/services";
+import { isToolkitId, normalizeToolkitIds } from "@llteacher/ui/generative/toolkits";
 
 /** #31: the temperature and token bounds the form offers, restated as the
  *  server's own rule. `llm_configs_temperature_range_chk` covers temperature
@@ -95,6 +96,11 @@ const PROVIDERS = [
   "claude_for_education",
   "openrouter",
   "local",
+  // The platform LLMoxie gateway (#178, #332 tier 1): every org's default
+  // since migration 0035. Its endpoint comes from LLMOXIE_BASE_URL and its
+  // key from the platform, never from the instructor, so admitting it here
+  // only lets the console save the configs that already use it.
+  "llmoxie",
 ] as const;
 
 type Provider = (typeof PROVIDERS)[number];
@@ -278,6 +284,19 @@ function parseConfigBody(raw: unknown): { input: LlmConfigInput } | { error: str
     return { error: "knowledgeEnabled must be a boolean" };
   }
 
+  // Optional so older clients keep working (an update without it keeps the
+  // stored packs). Unknown ids are refused, not silently dropped: the
+  // instructor should hear that a pack they picked doesn't exist.
+  let genuiToolkits: string[] | undefined;
+  if (b.genuiToolkits !== undefined) {
+    if (!Array.isArray(b.genuiToolkits) || !b.genuiToolkits.every((t) => typeof t === "string")) {
+      return { error: "genuiToolkits must be a list of subject figure pack ids" };
+    }
+    const unknown = b.genuiToolkits.filter((t) => !isToolkitId(t));
+    if (unknown.length > 0) return { error: `Unknown subject figure pack: ${unknown.join(", ")}` };
+    genuiToolkits = normalizeToolkitIds(b.genuiToolkits);
+  }
+
   return {
     input: {
       name,
@@ -290,6 +309,7 @@ function parseConfigBody(raw: unknown): { input: LlmConfigInput } | { error: str
       isActive: b.isActive,
       isDefault: b.isDefault,
       knowledgeEnabled: b.knowledgeEnabled ?? true,
+      genuiToolkits,
     },
   };
 }

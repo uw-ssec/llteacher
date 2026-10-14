@@ -3,11 +3,10 @@ name: test
 on:
   pull_request:
   push:
-    branches: [llteacher01]
+    branches: [staging]
 
-# Duplicate jobs otherwise run per PR-synchronize push and the branch push
-# it corresponds to (#148) -- cancel the stale one instead of burning runner
-# minutes on both.
+# A newer commit on the same PR or branch makes the prior run stale; cancel it
+# instead of burning runner minutes on both (#148).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -25,8 +24,8 @@ jobs:
   # either PR, but a collision that otherwise only surfaces at merge time
   # (see apps/web/README.md's "Migrations" section for the #317/#363 and
   # #363/#366 precedents and the PR-open-order convention this enforces).
-  # Only meaningful for pull_request events -- a push to llteacher01 has no
-  # "base" to diff against.
+  # Only meaningful for pull_request events -- a push event has no PR "base"
+  # to diff against.
   migration-index-collision:
     name: check migration index collisions
     runs-on: ubuntu-latest

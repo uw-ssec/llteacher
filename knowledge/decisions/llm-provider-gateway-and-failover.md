@@ -3,7 +3,7 @@ type: Decision
 title: "LLM calls go through the Vercel AI SDK to OpenAI-compatible providers, with LLMoxie as the platform default"
 description: "Each LLM config names a provider (llmoxie or openrouter) built via @ai-sdk/openai; migration 0035 made SSEC's LiteLLM gateway LLMoxie every org's default, with documented degradation to OpenRouter and pre-first-token failover."
 tags: [llm, providers, reliability, configuration]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-08T20:52:12Z" }
+generated: { by: "codex:gpt-6", at: "2026-10-13T20:36:13Z" }
 status: stable
 governance: constraint
 code_refs: [apps/web/src/lib/ai.ts, apps/web/src/lib/llm-config.ts, apps/web/src/server/llm/streamWithFallback.ts, apps/web/src/server/routes/chat.ts, apps/web/src/db/migrations/0035_llmoxie_default_config.sql, apps/web/src/server/routes/llmConfigs.ts]
@@ -79,6 +79,18 @@ LLM configs are an **org-level pool** edited through a **course-level** guard (s
 ## Gap on AWS: LLM_DEGRADED_MODEL cannot be turned on in production (as of 2026-10-08)
 
 The degraded-fallback opt-in (#343, landed with the M4 closeout in 9743dd7; PR #412 was closed as superseded) is read by `apps/web/src/runtime/config.ts`, but nothing in `infra/` or `release.yml` sets it on the ECS task, because the feature predates the AWS re-platform. Wiring it means adding a production deployment input: validate it in `infra/src/deployment-inputs.ts` (and require `OPENROUTER_API_KEY` when it is set), add it to the container environment in `infra/src/app.ts`, pass `vars.LLM_DEGRADED_MODEL` in `release.yml`, and update the infra README runbook and `infra/scripts/release-workflow.test.mjs`. That changes the reviewed production input set (ADR 0001), so it needs the owner's sign-off as its own PR; it was deliberately not folded into #412.
+
+## LLMoxie configuration save bug (PR #490)
+
+**Symptom:** editing the platform gateway's default LLM configuration returned HTTP 400 with "Choose a provider.", even though chat and connection testing already supported LLMoxie.
+
+**Root cause:** the write route's provider validation list predated LLMoxie. Separately, the console mapped its "Platform gateway" choice to OpenRouter, so merely admitting LLMoxie on the API would still leave new configurations routed to the wrong provider.
+
+**Fix:** [PR #490](https://github.com/uw-ssec/llteacher/pull/490) added `llmoxie` to the route's accepted providers and mapped the console's sole platform choice to `provider: "llmoxie"` for both creates and edits. Saving a legacy OpenRouter-labelled platform configuration repairs its provider while retaining its configuration ID. The route change is commit `771d87c`; the final console mapping is commit `b58bef7`.
+
+**Regression coverage:** `apps/web/src/server/routes/llmConfigs.test.ts` covers saving a LLMoxie configuration; `apps/admin/src/client/views/LLMConfigsDataLoader.test.tsx` asserts that both POST and PATCH send `llmoxie`, including editing a legacy mislabelled row.
+
+**Operational lesson:** the model's provider, server credential binding, and console selection must agree. Platform configurations use `LLMOXIE_API_KEY` and `LLMOXIE_BASE_URL`; instructors do not supply a key. This fix did not implement instructor-owned providers (tracked in #332 and #107).
 
 # Related Concepts
 - [LLM tutor chat pipeline](../architecture/llm-tutor-pipeline.md): Provider calls in the tutor pipeline

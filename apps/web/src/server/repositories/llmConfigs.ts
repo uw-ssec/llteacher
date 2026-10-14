@@ -38,6 +38,7 @@ export interface LlmConfigRecord {
   isDefault: boolean;
   isActive: boolean;
   knowledgeEnabled: boolean;
+  genuiToolkits: string[];
   /** #367: null for the organization's shared pool (Org Admin-owned), or
    *  the one course that owns this configuration. */
   scopeCourseId: string | null;
@@ -102,6 +103,7 @@ const CONFIG_COLUMNS = {
   isDefault: llmConfigs.isDefault,
   isActive: llmConfigs.isActive,
   knowledgeEnabled: llmConfigs.knowledgeEnabled,
+  genuiToolkits: llmConfigs.genuiToolkits,
   scopeCourseId: llmConfigs.scopeCourseId,
   createdAt: llmConfigs.createdAt,
   updatedAt: llmConfigs.updatedAt,
@@ -202,6 +204,8 @@ export interface LlmConfigInput {
   isActive: boolean;
   isDefault: boolean;
   knowledgeEnabled: boolean;
+  /** Undefined on an update means "leave the stored packs alone". */
+  genuiToolkits?: string[];
 }
 
 /** Promotes one config to the org default, clearing whichever held it.
@@ -266,6 +270,7 @@ export async function createLlmConfig(
       isActive: input.isActive,
       isDefault: false,
       knowledgeEnabled: input.knowledgeEnabled,
+      genuiToolkits: input.genuiToolkits ?? [],
     })
     .returning({ id: llmConfigs.id });
 
@@ -299,6 +304,7 @@ export async function updateLlmConfig(
       maxCompletionTokens: input.maxCompletionTokens,
       fallbackLlmConfigId: input.fallbackLlmConfigId,
       knowledgeEnabled: input.knowledgeEnabled,
+      ...(input.genuiToolkits !== undefined ? { genuiToolkits: input.genuiToolkits } : {}),
       isActive: input.isActive,
       updatedAt: new Date(),
     })
@@ -409,6 +415,7 @@ export async function cloneLlmConfig(
       isActive: source.isActive,
       isDefault: false,
       knowledgeEnabled: source.knowledgeEnabled,
+      genuiToolkits: source.genuiToolkits,
     })
     .returning({ id: llmConfigs.id });
   return getLlmConfig(db, scope, created!.id);
