@@ -60,7 +60,7 @@ describe("adding instructors to an existing course", () => {
     fireEvent.submit(form);
     expect((await within(row).findByRole("status")).textContent).toMatch(/already.*instructor/i);
     expect(within(row).getAllByText("ada@uw.edu")).toHaveLength(1);
-    expect(listCalls).toBe(2);
+    await waitFor(() => expect(listCalls).toBe(2));
   });
 
   it.each([400, 500])("keeps the email and existing instructors after a %s failure", async (status) => {
