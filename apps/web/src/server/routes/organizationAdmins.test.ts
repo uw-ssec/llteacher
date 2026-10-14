@@ -11,6 +11,8 @@ import { grantOrgAdminHandler, listOrgAdminsHandler, revokeOrgAdminHandler } fro
 import type { AppEnv } from "../context";
 import type { AuthContext } from "../middleware/roles";
 import { fakeAuthContext, fakeMembership } from "../testing/authContext";
+import { IdentityCipher } from "../../lib/crypto/identity-cipher";
+import { loadIdentityCipherKeys } from "../../lib/secrets-loader";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const ENC = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64");
@@ -146,11 +148,15 @@ describe.skipIf(!DATABASE_URL)("Org Admin provisioning (#367, real DB)", () => {
 
   it("returns not found for a missing organization instead of creating a pending user", async () => {
     const missingOrganizationId = crypto.randomUUID();
-    const before = await db.select({ id: users.id }).from(users);
-    const response = await grant(superAdmin(), missingOrganizationId, `orphan-${crypto.randomUUID()}@uw.edu`);
+    const email = `orphan-${crypto.randomUUID()}@uw.edu`;
+    const response = await grant(superAdmin(), missingOrganizationId, email);
     expect(response.status).toBe(404);
-    const after = await db.select({ id: users.id }).from(users);
-    expect(after).toHaveLength(before.length);
+    // Looks for THIS address rather than counting the users table, which
+    // other suites write to in parallel against the same database.
+    const cipher = new IdentityCipher(await loadIdentityCipherKeys(ENV()));
+    const emailBlindIndex = await cipher.computeBlindIndex(IdentityCipher.normalizeEmail(email));
+    const created = await db.select({ id: users.id }).from(users).where(eq(users.emailBlindIndex, emailBlindIndex));
+    expect(created).toHaveLength(0);
   });
 
   it("refuses a course instructor, who has no organization-level authority", async () => {
