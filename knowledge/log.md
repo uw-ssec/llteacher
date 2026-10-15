@@ -1,3 +1,8 @@
+## 2026-10-14
+* **Creation**: Documented concept `facts/node26-localstorage-breaks-client-tests.md` (Node 26's built-in localStorage breaks App.test.tsx under jsdom).
+* **Update**: Updated concept `decisions/effect-typed-request-pipeline.md` (bug classes the Effect migration surfaced, open questions, testing note).
+* **Update**: Updated concept `bugs/partial-stream-persisted-as-complete.md` (#433 fixed by 0c9a9f9; PR #436 closed as superseded).
+
 ## 2026-10-13
 * **Update**: Updated concept `decisions/llm-provider-gateway-and-failover.md`.
 * **Update**: Updated concept `facts/workos-deprovisioning-session-epoch.md`.
