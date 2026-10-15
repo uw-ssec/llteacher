@@ -7,7 +7,12 @@ import type { ConversationListItemResponse } from "../../shared/types";
 /* --------------------------------------------------------------------------
    TutorConversationsList — the tutor-conversations rail (#4).
 
-   A second, visually distinct collapsible sidebar zone sitting between the
+   The student workspace uses overview/detail presentations inside its single
+   purple navigation column. Overview has a disclosure header with an inline
+   create action; detail shows only the selected conversation and a back action.
+   The original rail presentation remains available to existing callers.
+
+   Originally a second, visually distinct collapsible sidebar zone sitting between the
    homework Sidebar and the chat column -- not a new top-level route. #301:
    inlined here (a prior version of this comment pointed at a task-4-report.md
    that was never actually committed on any branch). Kept as a sidebar zone
@@ -29,6 +34,10 @@ import type { ConversationListItemResponse } from "../../shared/types";
    -------------------------------------------------------------------------- */
 
 export interface TutorConversationsListProps {
+  presentation?: "rail" | "overview" | "detail";
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
+  onBack?: () => void;
   /** Undefined while the homework list (the client's only source of course
    *  context) hasn't loaded yet. */
   courseId: string | undefined;
@@ -97,6 +106,10 @@ export interface TutorConversationsListProps {
 }
 
 export function TutorConversationsList({
+  presentation = "rail",
+  expanded = true,
+  onToggleExpanded,
+  onBack,
   courseId,
   courseContextLoading,
   conversations,
@@ -332,10 +345,13 @@ export function TutorConversationsList({
   const disabledReason = courseContextLoading
     ? "Loading course information…"
     : "No course selected yet — new conversations aren't available.";
+  const visibleConversations = presentation === "detail"
+    ? conversations.filter((conversation) => conversation.id === (pendingConversationId ?? selectedConversationId))
+    : conversations;
 
   return (
     <nav
-      className={isCollapsed ? "tutor-sidebar sidebar--collapsed" : "tutor-sidebar"}
+      className={presentation === "overview" ? "student-navigation__tutors" : presentation === "detail" ? "sidebar student-navigation" : isCollapsed ? "tutor-sidebar sidebar--collapsed" : "tutor-sidebar"}
       aria-label="Tutor conversations"
     >
       {/* #235: announces create/rename outcomes and loading transitions --
@@ -345,23 +361,29 @@ export function TutorConversationsList({
         {loading ? "Loading conversations…" : liveMessage}
       </div>
 
-      <div className="tutor-sidebar__top">
+      {presentation !== "overview" && <div className="tutor-sidebar__top">
         <button
           className="tutor-sidebar__collapse-toggle"
           type="button"
-          aria-label={isCollapsed ? "Expand tutor conversations" : "Collapse tutor conversations"}
-          aria-expanded={!isCollapsed}
-          onClick={onToggleCollapse}
+          aria-label={presentation === "detail" ? "Back to course navigation" : isCollapsed ? "Expand tutor conversations" : "Collapse tutor conversations"}
+          aria-expanded={presentation === "detail" ? undefined : !isCollapsed}
+          onClick={presentation === "detail" ? onBack : onToggleCollapse}
         >
           {isCollapsed ? <CaretDoubleRight size={14} weight="regular" /> : <CaretDoubleLeft size={14} weight="regular" />}
         </button>
-      </div>
+      </div>}
 
-      <p className="tutor-sidebar__label">Tutor Chats</p>
+      <div className={presentation === "overview" ? "student-navigation__heading" : undefined}>
+      {presentation === "overview" ? (
+        <button type="button" className="student-navigation__disclosure" aria-expanded={expanded}
+          aria-controls="student-tutor-chats" onClick={onToggleExpanded}>
+          <span>Tutor Chats</span><span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
+        </button>
+      ) : <p className="tutor-sidebar__label">Tutor Chats</p>}
 
-      <button
+      {presentation !== "detail" && <button
         type="button"
-        className="tutor-sidebar__new-btn"
+        className={presentation === "overview" ? "student-navigation__add" : "tutor-sidebar__new-btn"}
         onClick={handleCreate}
         disabled={!courseId}
         aria-label="New conversation"
@@ -369,8 +391,9 @@ export function TutorConversationsList({
         title={!courseId ? disabledReason : undefined}
       >
         <Plus size={14} weight="regular" aria-hidden="true" />
-        <span className="tutor-sidebar__new-btn-label">New conversation</span>
-      </button>
+        {presentation !== "overview" && <span className="tutor-sidebar__new-btn-label">New conversation</span>}
+      </button>}
+      </div>
       {/* #232: explains WHY the button is disabled instead of leaving it a
           silent dead end -- distinct message for "still loading" vs
           "nothing to scope to."
@@ -394,6 +417,8 @@ export function TutorConversationsList({
           {createError}
         </p>
       )}
+
+      <div id="student-tutor-chats" hidden={presentation === "overview" && !expanded}>
 
       {/* #310: a failed load no longer empties the rail, so this sits above
           whatever was last loaded. The copy says "couldn't refresh" rather
@@ -440,9 +465,9 @@ export function TutorConversationsList({
           without an explicit role="list" -- restoring it here since this
           surface took the "title becomes a real button" alternative, not
           the role="listbox" route (which would supersede this). */}
-      {conversations.length > 0 && (
+      {visibleConversations.length > 0 && (
         <ul className="tutor-sidebar__list" role="list" aria-label="Tutor conversation list">
-          {conversations.map((conv) => (
+          {visibleConversations.map((conv) => (
             <ConversationListItem
               key={conv.id}
               conversation={conv}
@@ -522,7 +547,7 @@ export function TutorConversationsList({
           older" next to "couldn't refresh" would invite a second request
           against a cursor whose list may already be stale -- Try again
           (which reloads from page 1) is the right control there. */}
-      {!loadError && hasMore && (
+      {presentation !== "detail" && !loadError && hasMore && (
         <div className="tutor-sidebar__more">
           <button
             type="button"
@@ -540,6 +565,7 @@ export function TutorConversationsList({
           )}
         </div>
       )}
+      </div>
     </nav>
   );
 }

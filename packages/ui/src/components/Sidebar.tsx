@@ -55,6 +55,8 @@ export interface SidebarProps {
   isCollapsed?: boolean;
   /** Called when the collapse toggle is clicked. */
   onToggleCollapse?: () => void;
+  /** Unified student navigation: return to the course overview. */
+  onBack?: () => void;
   /** Called when a section row is clicked */
   onSectionSelect?: (sectionNumber: number) => void;
   /** Called when "Submit Section N" is clicked */
@@ -74,6 +76,7 @@ export function Sidebar({
   justSubmittedSection = null,
   isCollapsed = false,
   onToggleCollapse,
+  onBack,
   onSectionSelect,
   onSubmit,
   workerStatus,
@@ -103,9 +106,9 @@ export function Sidebar({
         <button
           className="sidebar__collapse-toggle"
           type="button"
-          aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-expanded={!isCollapsed}
-          onClick={onToggleCollapse}
+          aria-label={onBack ? "Back to course navigation" : isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-expanded={onBack ? undefined : !isCollapsed}
+          onClick={onBack ?? onToggleCollapse}
         >
           {isCollapsed
             ? <CaretDoubleRight size={14} weight="regular" />

@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, cleanup } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
+import userEvent from "@testing-library/user-event";
 import App from "./App";
 import { AuthProvider } from "./components/AuthProvider";
 
@@ -35,8 +36,11 @@ function stubBaseFetch() {
       if (url === "/api/hello") {
         return new Response(JSON.stringify({ message: "ok", ping_id: "1".repeat(8) }), { status: 200 });
       }
-      if (url === "/api/student/homeworks") return new Response(JSON.stringify({ homeworks: [] }), { status: 200 });
-      if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url === "/api/student/homeworks") return new Response(JSON.stringify({ homeworks: [{
+        id: "hw-1", courseId: "course-a", courseName: "Test course", title: "Homework 1",
+        dueDate: "2099-01-01", sections: [], widgets: [],
+      }] }), { status: 200 });
+      if (url.startsWith("/api/conversations?")) return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
       throw new Error(`unexpected fetch to ${url}`);
     }),
   );
@@ -59,6 +63,8 @@ describe("App error boundary (#144)", () => {
     // chat column's ErrorBoundary did not propagate up and take out the
     // rest of the app shell.
     expect(await screen.findByRole("banner")).toBeTruthy();
+    await userEvent.click(screen.getByRole("button", { name: "Homeworks" }));
+    await userEvent.click(screen.getByRole("button", { name: "Homework 1" }));
     // The chat column shows the boundary's recoverable fallback instead of
     // the component that threw.
     expect(await screen.findByRole("alert")).toBeTruthy();

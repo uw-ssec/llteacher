@@ -12,7 +12,6 @@ import { TutorConversationsList } from "./views/TutorConversationsList";
 import { useTutorConversations } from "./hooks/useTutorConversations";
 import { useStudentHomework } from "./hooks/useStudentHomework";
 import { SelfAssessmentCheck, type SelfAssessmentPhase } from "./components/SelfAssessmentCheck";
-import { useLocalStoragePreference } from "./hooks/useLocalStoragePreference";
 import { useConversationSurface, toChatResponseError } from "./hooks/useConversationSurface";
 import { trackTutorTurnCompletion } from "./hooks/trackTutorTurnCompletion";
 import type { ConversationMessageResponse, HintCountResponse } from "../shared/types";
@@ -147,15 +146,6 @@ function formatRExecutionMessage(code: string, result: RCodeResult): string {
    one conversation -- by 409ing the second tab's overlapping send; each tab
    otherwise just shows its own stale view until it reloads. */
 
-/** localStorage key for the sidebar collapsed preference. Namespaced so it
-    doesn't collide with future preference keys (`llteacher:*`). */
-const SIDEBAR_COLLAPSED_KEY = "llteacher:sidebar-collapsed";
-
-/** #4: separate key for the tutor-conversations rail's own collapse state --
-    a distinct zone from the homework Sidebar, so it gets its own preference
-    rather than sharing (and fighting over) SIDEBAR_COLLAPSED_KEY. */
-const TUTOR_SIDEBAR_COLLAPSED_KEY = "llteacher:tutor-sidebar-collapsed";
-
 /* ==========================================================================
    App — the root component
    ========================================================================== */
@@ -164,10 +154,47 @@ export default function App() {
   const { loading, isAuthenticated, staffOnly } = useAuth();
   if (loading) return null;
   if (isAuthenticated && staffOnly) return <AccountShell title="Teaching"><StaffHome /></AccountShell>;
-  return <StudentApp />;
+  return <StudentWorkspace />;
 }
 
-function StudentApp() {
+type NavigationView = "overview" | "homework" | "tutor";
+
+function StudentWorkspace() {
+  const homework = useStudentHomework();
+  const [navigationView, setNavigationView] = useState<NavigationView>("overview");
+  const [tutorsExpanded, setTutorsExpanded] = useState(false);
+  const [homeworksExpanded, setHomeworksExpanded] = useState(false);
+  if (homework.loading) return <p role="status">Loading course…</p>;
+  return <StudentApp key={homework.homeworkId ?? "loading"} homework={homework}
+    navigationView={navigationView} onNavigate={setNavigationView}
+    tutorsExpanded={tutorsExpanded} onToggleTutors={() => setTutorsExpanded((expanded) => !expanded)}
+    homeworksExpanded={homeworksExpanded} onToggleHomeworks={() => setHomeworksExpanded((expanded) => !expanded)} />;
+}
+
+function StudentApp({ homework, navigationView, onNavigate, tutorsExpanded, onToggleTutors,
+  homeworksExpanded, onToggleHomeworks }: {
+  homework: ReturnType<typeof useStudentHomework>;
+  navigationView: NavigationView;
+  onNavigate: (view: NavigationView) => void;
+  tutorsExpanded: boolean;
+  onToggleTutors: () => void;
+  homeworksExpanded: boolean;
+  onToggleHomeworks: () => void;
+}) {
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  const previousNavigationView = useRef(navigationView);
+  useEffect(() => {
+    const previous = previousNavigationView.current;
+    previousNavigationView.current = navigationView;
+    if (navigationView === "overview" && previous !== "overview") {
+      const listId = previous === "homework" ? "student-homeworks" : "student-tutor-chats";
+      document.querySelector<HTMLButtonElement>(`button[aria-controls="${listId}"]`)?.focus();
+    }
+  }, [navigationView]);
   const { status: workerStatus, loading: workerLoading } = useWorkerStatus();
   const { isAuthenticated, loading: authLoading, error: authError, login, logout, email, displayName } = useAuth();
   const userInitials = getUserInitials({ email, displayName });
@@ -191,7 +218,10 @@ function StudentApp() {
     courseName,
     loading: homeworkLoading,
     loadError,
-  } = useStudentHomework();
+    homeworks,
+    homeworkId,
+    selectHomework,
+  } = homework;
 
   /* #165: the before/after self-assessment. "Before" is asked only while the
      homework is untouched -- once any section has a conversation or a
@@ -601,6 +631,7 @@ function StudentApp() {
      selection made while THIS fetch is still in flight discards this
      (now-stale) response once it resolves. */
   const handleSelectExistingTutorConversation = async (id: string) => {
+    onNavigate("tutor");
     if (id === tutorConversationId) return;
     if (id === pendingTutorSelectionId) return;
     latestTutorSelectionRef.current = id;
@@ -689,6 +720,7 @@ function StudentApp() {
      student off it. Falls back to the section chat, this surface's own
      default when no tutor conversation is active. */
   const handleDeleteTutorConversation = async (id: string): Promise<boolean> => {
+    const wasPending = latestTutorSelectionRef.current === id && pendingTutorSelectionId === id;
     /* #401: invalidate BEFORE awaiting -- removes the race (rather than
        detecting it) where the history request resolves DURING the await
        and would otherwise make the deleted conversation current again. */
@@ -698,12 +730,16 @@ function StudentApp() {
     }
 
     const ok = await deleteTutorConversationRow(id);
+    if (wasPending && !latestTutorSelectionRef.current && !displayedTutorConversationRef.current) {
+      onNavigate("overview");
+    }
     if (!ok) return false;
 
     /* Only the DISPLAYED conversation needs the surface torn down, read
        from a ref (correct in both directions -- see #401) rather than the
        closed-over `tutorConversationId`. */
     if (displayedTutorConversationRef.current === id) {
+      onNavigate("overview");
       setTutorConversationId(undefined);
       setTutorInitialMessages([]);
       setJustCreatedTutorConversationId(undefined);
@@ -716,12 +752,13 @@ function StudentApp() {
   /* #4: TutorConversationsList's "New conversation" button. */
   const handleCreateTutorConversation = async (): Promise<boolean> => {
     const created = await createTutorConversationRow();
-    if (!created) return false;
+    if (!created || !mountedRef.current) return false;
     setTutorHistoryHasMore(false);
     setTutorOldestSeq(undefined);
     setTutorOlderMessagesError(false);
     setTutorHydrationError(null);
     selectTutorConversation(created.id);
+    onNavigate("tutor");
     setJustCreatedTutorConversationId(created.id);
     return true;
   };
@@ -864,7 +901,7 @@ function StudentApp() {
   useEffect(() => {
     // #165: hold the first section until the "before" check is answered or
     // skipped -- opening it is what starts the homework.
-    if (selfAssessmentPhase === "pre") return;
+    if (navigationView !== "homework" || selfAssessmentPhase === "pre") return;
     if (!hasAutoSelectedSection.current && sections.length > 0) {
       const first = sections[0]!.number;
       // #214/#252: resume the section's own conversation if it already has
@@ -876,7 +913,7 @@ function StudentApp() {
       );
       hasAutoSelectedSection.current = true;
     }
-  }, [sections, sectionMetaByOrder, selfAssessmentPhase]);
+  }, [sections, sectionMetaByOrder, selfAssessmentPhase, navigationView]);
 
   /* #80: real hint usage. Fetched from GET .../hints for the active section
      whenever it changes, and again once an in-flight hint request settles.
@@ -924,15 +961,6 @@ function StudentApp() {
   const [restartDialogOpen, setRestartDialogOpen] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [restartError, setRestartError] = useState<string | null>(null);
-
-  /* Sidebar collapse and the tutor rail's own collapse preference each
-     persist across reloads via localStorage (#302: useLocalStoragePreference).
-     Key constants are module-level (below the component) -- they're plain
-     string literals with no dependency on anything in this render. */
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useLocalStoragePreference(SIDEBAR_COLLAPSED_KEY);
-  const [isTutorSidebarCollapsed, setIsTutorSidebarCollapsed] = useLocalStoragePreference(
-    TUTOR_SIDEBAR_COLLAPSED_KEY,
-  );
 
   const handleSendMessage = (text: string, options?: { isHintRequest?: boolean }) => {
     /* #144: guarded independently of the composer's own `disabled` --
@@ -1027,6 +1055,7 @@ function StudentApp() {
   /* Selecting a homework section always means "I want the section chat" --
      switches back out of the tutor surface if one was showing. */
   const handleSectionSelect = (sectionNumber: number) => {
+    onNavigate("homework");
     // #165: choosing a section from the sidebar during the "before" check
     // is a skip -- the student has decided to start.
     if (selfAssessmentPhase === "pre") setSkippedSelfAssessment((prev) => ({ ...prev, pre: true }));
@@ -1046,10 +1075,8 @@ function StudentApp() {
   const handleSubmit = async (sectionNumber: number) => {
     const meta = sectionMetaByOrder.get(sectionNumber);
     if (!meta?.conversationId) return; // no active conversation yet -- nothing to submit
-    // #318: the Submit button always targets `currentSection`, so the live
-    // transcript for whichever section is currently shown is the right
-    // thing to check for content, not a second fetch.
-    if (!sectionSurface.aiMessages.some((m) => m.role === "user")) return;
+    // Submission is the student's explicit completion signal; chat
+    // participation is optional and does not determine readiness to submit.
     try {
       const res = await fetch(`/api/conversations/${meta.conversationId}/submit`, { method: "POST" });
       if (!res.ok) throw new Error("submit failed");
@@ -1159,7 +1186,7 @@ function StudentApp() {
       </a>
       <TopNav
         course={courseName}
-        homework={hwTitle}
+        homework={navigationView === "homework" ? hwTitle : navigationView === "tutor" ? "Tutor Chat" : ""}
         userInitials={userInitials}
         isAuthenticated={isAuthenticated}
         onProfileClick={() => navigate("/profile")}
@@ -1167,22 +1194,26 @@ function StudentApp() {
       />
 
       <div className="app-shell">
-        <Sidebar
-          hwNumber={1}
+        {navigationView === "homework" && <Sidebar
+          hwNumber={Math.max(1, homeworks.findIndex((hw) => hw.id === homeworkId) + 1)}
           hwTitle={hwTitle}
           sections={sections}
           currentSection={currentSection}
           hintCount={hintCount}
           justSubmittedSection={justSubmittedSection}
-          isCollapsed={isSidebarCollapsed}
-          onToggleCollapse={() => setIsSidebarCollapsed((c) => !c)}
+          onBack={() => onNavigate("overview")}
           onSectionSelect={handleSectionSelect}
           onSubmit={handleSubmit}
           workerStatus={workerStatus}
           workerLoading={workerLoading}
-        />
+        />}
 
+        {navigationView !== "homework" && <div className={navigationView === "overview" ? "sidebar student-navigation" : "student-navigation__detail"}>
         <TutorConversationsList
+          presentation={navigationView === "overview" ? "overview" : "detail"}
+          expanded={tutorsExpanded}
+          onToggleExpanded={onToggleTutors}
+          onBack={() => onNavigate("overview")}
           courseId={courseId}
           courseContextLoading={homeworkLoading}
           conversations={tutorConversations}
@@ -1201,12 +1232,48 @@ function StudentApp() {
           onCreateConversation={handleCreateTutorConversation}
           onRenameConversation={renameTutorConversationRow}
           onDeleteConversation={handleDeleteTutorConversation}
-          isCollapsed={isTutorSidebarCollapsed}
-          onToggleCollapse={() => setIsTutorSidebarCollapsed((c) => !c)}
+          isCollapsed={false}
+          onToggleCollapse={() => onNavigate("overview")}
         />
+        {navigationView === "overview" && <div className="student-navigation__homeworks">
+          <button type="button" className="student-navigation__disclosure" aria-expanded={homeworksExpanded}
+            aria-controls="student-homeworks" onClick={onToggleHomeworks}>
+            <span>Homeworks</span><span aria-hidden="true">{homeworksExpanded ? "▾" : "▸"}</span>
+          </button>
+          <div id="student-homeworks" hidden={!homeworksExpanded}>
+            {homeworkLoading ? <p className="student-navigation__empty" role="status">Loading homeworks…</p>
+              : homeworks.length === 0 ? <p className="student-navigation__empty">No active homeworks.</p>
+              : <ul className="student-navigation__list" aria-label="Active homeworks" role="list">
+                {homeworks.map((hw) => <li key={hw.id}>
+                  <button type="button" className="student-navigation__homework" aria-label={hw.title}
+                    aria-describedby={`homework-due-${hw.id}`} onClick={() => {
+                    if (sectionSurface.isSending || tutorSurface.isSending) return;
+                    latestTutorSelectionRef.current = undefined;
+                    setPendingTutorSelectionId(undefined);
+                    setTutorConversationId(undefined);
+                    selectHomework(hw.id);
+                    onNavigate("homework");
+                  }} disabled={sectionSurface.isSending || tutorSurface.isSending}>
+                    <span>{hw.title}</span>
+                    <span id={`homework-due-${hw.id}`} className="student-navigation__meta">Due {new Date(hw.dueDate).toLocaleDateString()}</span>
+                  </button>
+                </li>)}
+              </ul>}
+          </div>
+        </div>}
+        </div>}
 
         <main id="conversation-main" tabIndex={-1} className="conversation-main">
-        {tutorConversationId ? (
+        {navigationView === "overview" && (
+          <div className="student-navigation__welcome">
+            <h1>{courseName || "Your learning workspace"}</h1>
+            <p>Choose a tutor chat or homework from the sidebar to get started.</p>
+          </div>
+        )}
+        <div className="student-navigation__surface" hidden={navigationView === "overview"}>
+        {navigationView === "tutor" && pendingTutorSelectionId && !tutorConversationId ? (
+          <p className="student-navigation__welcome" role="status">Loading conversation…</p>
+        ) : tutorConversationId ? (
           <ErrorBoundary key={`tutor-${tutorConversationId}`}>
             <ConversationView
               key={tutorConversationId}
@@ -1295,6 +1362,7 @@ function StudentApp() {
             />
           </ErrorBoundary>
         )}
+        </div>
         </main>
       </div>
 

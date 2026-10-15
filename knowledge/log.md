@@ -1,3 +1,9 @@
+## 2026-10-15
+* **Update**: Linked `decisions/student-explicit-section-completion.md` to `decisions/student-unified-navigation.md` (The unified homework detail uses the explicit Submit completion action.).
+* **Creation**: Documented concept `decisions/student-explicit-section-completion.md` (Submit explicitly completes a section without requiring chat).
+* **Update**: Linked `decisions/student-unified-navigation.md` to `requirements/stakeholder-homework-modes-and-assistance-levels.md` (The unified navigation keeps open tutor sessions and section-based homework as distinct detail modes within the same course.).
+* **Creation**: Documented concept `decisions/student-unified-navigation.md` (One course-scoped student navigation column).
+
 ## 2026-10-14
 * **Creation**: Documented concept `facts/node26-localstorage-breaks-client-tests.md` (Node 26's built-in localStorage breaks App.test.tsx under jsdom).
 * **Update**: Updated concept `decisions/effect-typed-request-pipeline.md` (bug classes the Effect migration surfaced, open questions, testing note).

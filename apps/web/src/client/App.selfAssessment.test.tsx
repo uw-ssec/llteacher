@@ -83,7 +83,7 @@ const startCalls = (calls: Call[]) =>
   calls.filter((c) => c.method === "POST" && c.url.endsWith(`/sections/${SECTION_ID}/conversations`));
 const widgetCalls = (calls: Call[]) => calls.filter((c) => c.url.startsWith("/api/widgets/"));
 
-function renderApp() {
+async function renderApp() {
   render(
     <MemoryRouter>
       <AuthProvider>
@@ -91,12 +91,14 @@ function renderApp() {
       </AuthProvider>
     </MemoryRouter>,
   );
+  await userEvent.click(await screen.findByRole("button", { name: "Homeworks" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Confidence intervals" }));
 }
 
 describe("App self-assessment (#165)", () => {
   it("asks the before rating ahead of the first section, and opens it only after saving", async () => {
     const calls = stubFetch(homework("not_started", [widget()]));
-    renderApp();
+    await renderApp();
 
     expect(await screen.findByRole("heading", { name: "How confident are you right now?" })).toBeTruthy();
     const slider = screen.getByRole("slider", { name: "How confident are you with confidence intervals?" });
@@ -115,7 +117,7 @@ describe("App self-assessment (#165)", () => {
 
   it("lets the student skip: nothing is recorded and the section opens", async () => {
     const calls = stubFetch(homework("not_started", [widget()]));
-    renderApp();
+    await renderApp();
 
     await userEvent.click(await screen.findByRole("button", { name: "Skip for now" }));
 
@@ -125,7 +127,7 @@ describe("App self-assessment (#165)", () => {
 
   it("keeps the check up with an error when the save fails, and does not start the homework", async () => {
     const calls = stubFetch(homework("not_started", [widget()]), 503);
-    renderApp();
+    await renderApp();
 
     await userEvent.click(await screen.findByRole("button", { name: "Save and start" }));
 
@@ -136,7 +138,7 @@ describe("App self-assessment (#165)", () => {
 
   it("asks the after rating once every section is submitted, and sends it as post", async () => {
     const calls = stubFetch(homework("submitted", [widget({ preValue: 3 })]));
-    renderApp();
+    await renderApp();
 
     expect(await screen.findByRole("heading", { name: "How confident are you now?" })).toBeTruthy();
     const slider = screen.getByRole("slider", { name: "How confident are you now?" });
@@ -150,7 +152,7 @@ describe("App self-assessment (#165)", () => {
 
   it("does not ask before once the homework has started, nor after while sections remain", async () => {
     stubFetch(homework("in_progress", [widget()]));
-    renderApp();
+    await renderApp();
 
     // The section chat resumes as usual.
     expect(await screen.findByText(/Section 1: Intervals/)).toBeTruthy();
@@ -159,7 +161,7 @@ describe("App self-assessment (#165)", () => {
 
   it("asks nothing when the homework has no self-assessment", async () => {
     const calls = stubFetch(homework("not_started", []));
-    renderApp();
+    await renderApp();
 
     await waitFor(() => expect(startCalls(calls)).toHaveLength(1));
     expect(screen.queryByRole("slider")).toBeNull();

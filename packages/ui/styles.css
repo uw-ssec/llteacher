@@ -794,6 +794,157 @@ body {
      for its collapse mechanic (the same technique .admin-sidebar below
      uses) rather than duplicating that transition.
      ------------------------------------------------------------------------- */
+  .student-navigation {
+    color: var(--color-sidebar-text);
+  }
+
+  .student-navigation__detail {
+    display: contents;
+  }
+
+  .student-navigation__tutors {
+    min-width: 0;
+  }
+
+  .student-navigation__surface {
+    display: contents;
+  }
+
+  .student-navigation__surface[hidden] {
+    display: none;
+  }
+
+  .student-navigation__heading {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+
+  .student-navigation__disclosure,
+  .student-navigation__add,
+  .student-navigation__homework {
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--color-sidebar-text);
+    cursor: pointer;
+    font: inherit;
+  }
+
+  .student-navigation__disclosure {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: var(--space-3) var(--space-2);
+    font-weight: var(--weight-semibold);
+    text-align: start;
+  }
+
+  .student-navigation__add {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
+  }
+
+  .student-navigation__homeworks {
+    margin-block-start: var(--space-4);
+    padding-block-start: var(--space-3);
+    border-block-start: 1px solid var(--color-sidebar-divider);
+  }
+
+  .student-navigation__list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .student-navigation__homework {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    width: 100%;
+    padding: var(--space-3) var(--space-2);
+    text-align: start;
+    overflow-wrap: anywhere;
+  }
+
+  .student-navigation__meta,
+  .student-navigation__empty {
+    font-size: var(--font-size-xs);
+    color: var(--color-sidebar-text);
+  }
+
+  .student-navigation__empty {
+    padding-inline: var(--space-2);
+  }
+
+  .student-navigation__welcome {
+    flex: 1;
+    min-width: 0;
+    padding: var(--space-6);
+  }
+
+  .student-navigation__disclosure:hover,
+  .student-navigation__add:hover:not(:disabled),
+  .student-navigation__homework:hover:not(:disabled),
+  .student-navigation .tutor-conversation-item:hover,
+  .student-navigation .tutor-conversation-item--selected {
+    background: var(--color-sidebar-hover-bg);
+  }
+
+  .student-navigation button:focus-visible {
+    outline: 2px solid var(--color-focus-chrome);
+    outline-offset: 2px;
+  }
+
+  .student-navigation button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .student-navigation .tutor-conversation-item,
+  .student-navigation .tutor-conversation-item__meta,
+  .student-navigation .editable-title__pencil-btn,
+  .student-navigation .tutor-conversation-item__delete,
+  .student-navigation .editable-title__hint,
+  .student-navigation .editable-title__counter,
+  .student-navigation .tutor-sidebar__collapse-toggle,
+  .student-navigation .tutor-sidebar__label,
+  .student-navigation .tutor-sidebar__disabled-reason,
+  .student-navigation .tutor-sidebar__empty,
+  .student-navigation .tutor-sidebar__retry,
+  .student-navigation .tutor-sidebar__load-more {
+    color: var(--color-sidebar-text);
+  }
+
+  .student-navigation .tutor-conversation-item__title:not(.editable-title--editing) {
+    flex-wrap: nowrap;
+  }
+
+  .student-navigation .editable-title__value {
+    flex: 1;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .student-navigation .editable-title__input {
+    background: var(--color-sidebar-bg);
+    border-color: var(--color-sidebar-text);
+  }
+
+  .student-navigation .tutor-sidebar__error {
+    color: var(--color-sidebar-text);
+  }
+
+  .student-navigation .tutor-sidebar__retry,
+  .student-navigation .tutor-sidebar__load-more {
+    border-color: currentColor;
+  }
+
   .tutor-sidebar {
     width: 220px;
     flex-shrink: 0;
@@ -8801,7 +8952,8 @@ tr:focus-within .admin-knowledge__row-tools {
   .app-shell { flex-direction: column; min-height: 0; }
 
   .app-shell > .sidebar,
-  .app-shell > .tutor-sidebar {
+  .app-shell > .tutor-sidebar,
+  .app-shell .student-navigation__detail > .sidebar {
     width: 100%;
     max-height: 20dvh;
     padding: var(--space-2) var(--space-3);

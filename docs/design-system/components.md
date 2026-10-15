@@ -42,6 +42,27 @@ Surface: `#32006e`. Bottom rule: `#26005A` 1px.
 
 ### Sidebar
 
+The student workspace uses one purple navigation column with two overview
+disclosures: **Tutor Chats**, with an inline **+** create action, and
+**Homeworks**, listing the available assignments for the current course.
+Selecting an entry replaces the overview with its detail navigation. The
+**<<** action returns to the overview; it does not collapse the column into
+an icon rail. The expanded lists are preserved when returning, and focus
+returns to the relevant disclosure header.
+
+Homework detail reuses the section progress and submit controls described
+below. Tutor detail shows the selected chat, including rename and delete
+controls. Returning to the overview preserves the mounted conversation and
+its unsent draft. Each homework has independent progress, section IDs, and
+conversation state, even when multiple assignments have a Section 1.
+The Submit action records the student's decision that a section is complete;
+it does not require a student chat message. Restarting still voids that
+section's submission until the student submits it again.
+
+Course selection remains implicit until issue #70 adds the student course
+switcher. Both lists use the same current course; assignments from other
+courses are excluded from this overview.
+
 The section progress rail. The structurally distinctive element of LLTeacher.
 
 ```tsx
