@@ -1,112 +1,96 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type SetStateAction } from "react";
 import type { SidebarSection } from "@llteacher/ui";
-import type { StudentHomeworkListResponse, StudentProgressWidget } from "../../shared/types";
+import type { StudentHomeworkListResponse, StudentHomeworkSummary, StudentProgressWidget } from "../../shared/types";
 
-/** #214: a section's real database id + its pre-existing conversation id
- *  (if the student has already started it) -- SidebarSection drops both,
- *  since @llteacher/ui's Sidebar only ever needed `number`/`title`/
- *  `status`. Keyed by `order` (== SidebarSection.number), the same key the
- *  Sidebar/handleSectionSelect already navigate by. */
 export interface SectionMeta {
   id: string;
   conversationId: string | null;
 }
 
-/** Fetches the current student's homework list and adapts it into the
-    Sidebar's section shape. SidebarSection's status union ("submitted" |
-    "current" | "pending") has no direct equivalent for "not_started" /
-    "overdue" / "in_progress_overdue" -- those all map onto "pending" for
-    now; a richer Sidebar status vocabulary is a @llteacher/ui change out of
-    scope for this issue. */
+interface HomeworkState {
+  summary: StudentHomeworkSummary;
+  sections: SidebarSection[];
+  sectionMetaByOrder: Map<number, SectionMeta>;
+  widgets: StudentProgressWidget[];
+}
+
+const emptySections: SidebarSection[] = [];
+const emptyMeta = new Map<number, SectionMeta>();
+const emptyWidgets: StudentProgressWidget[] = [];
+
+/** Course-scoped homework navigation with independent live progress per
+ * assignment. Setters capture the assignment ID, so a late request from a
+ * previously opened homework cannot overwrite the newly selected one. */
 export function useStudentHomework() {
-  const [sections, setSections] = useState<SidebarSection[]>([]);
-  const [sectionMetaByOrder, setSectionMetaByOrder] = useState<Map<number, SectionMeta>>(new Map());
-  const [hwTitle, setHwTitle] = useState("");
-  // #4: the tutor-conversations rail (TutorConversationsList) needs a
-  // courseId to scope GET/POST /api/conversations -- this hook's homework
-  // fetch is the client's only source of course context today (see
-  // StudentHomeworkSummary.courseId's doc comment), so it's threaded
-  // through here rather than added as a second fetch.
-  const [courseId, setCourseId] = useState<string | undefined>(undefined);
-  // #304 (requirement 4): threaded from the same homework summary as
-  // courseId above (StudentHomeworkSummary.courseName, the course's real
-  // code) -- previously the TopNav/breadcrumb had "STATS 311" hardcoded as
-  // a literal stand-in instead of deriving it from any server data at all.
-  const [courseName, setCourseName] = useState<string>("");
-  // #165: the homework's self-assessment widgets with the student's own
-  // recorded values -- App.tsx decides from these when to ask.
-  const [widgets, setWidgets] = useState<StudentProgressWidget[]>([]);
+  const [states, setStates] = useState<HomeworkState[]>([]);
+  const [homeworkId, setHomeworkId] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
-  // #160: distinct from "loaded, zero homeworks" -- a 401/403/503 must not
-  // render as an indistinguishable empty sidebar. r.ok was never checked
-  // before, so a non-2xx error-body response (`{ error: "..." }`) was cast
-  // straight to StudentHomeworkListResponse; data.homeworks[0] then threw a
-  // TypeError inside the .then chain that the trailing .catch swallowed.
   const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     fetch("/api/student/homeworks")
-      .then((r) => {
-        if (!r.ok) throw new Error(`failed to load student homeworks: ${r.status}`);
-        return r.json() as Promise<StudentHomeworkListResponse>;
+      .then((response) => {
+        if (!response.ok) throw new Error(`failed to load student homeworks: ${response.status}`);
+        return response.json() as Promise<StudentHomeworkListResponse>;
       })
       .then((data) => {
-        const hw = data.homeworks[0]; // single-homework sidebar UI, matches current design
-        if (!hw) {
-          setLoading(false);
-          return;
-        }
-        setHwTitle(hw.title);
-        setCourseId(hw.courseId);
-        setCourseName(hw.courseName);
-        setSections(
-          hw.sections.map((s) => ({
-            number: s.order,
-            title: s.title,
-            status:
-              s.status === "submitted"
-                ? ("submitted" as const)
-                : s.status === "in_progress"
-                  ? ("current" as const)
-                  : ("pending" as const),
-            // #167: a section the overdue sweep submitted still maps to
-            // "submitted" above -- the work really was submitted -- but the
-            // row says so differently (SectionItem), because a student who
-            // never pressed submit should not be left to conclude they did.
-            autoSubmitted: s.submissionSource === "auto",
+        if (cancelled) return;
+        // Preserve the existing course choice until the course switcher in
+        // #70 lands. Never mix assignments from different courses.
+        const first = data.homeworks[0];
+        setStates(data.homeworks.filter((hw) => hw.courseId === first?.courseId).map((summary) => ({
+          summary,
+          sections: summary.sections.map((section) => ({
+            number: section.order,
+            title: section.title,
+            status: section.status === "submitted" ? "submitted" as const
+              : section.status === "in_progress" || section.status === "in_progress_overdue" ? "current" as const
+                : "pending" as const,
+            autoSubmitted: section.submissionSource === "auto",
           })),
-        );
-        setSectionMetaByOrder(
-          new Map(hw.sections.map((s) => [s.order, { id: s.id, conversationId: s.conversationId }])),
-        );
-        // Absent from a response built before #165 (a client briefly ahead of
-        // its server during a deploy): no widgets means nothing to ask.
-        setWidgets(hw.widgets ?? []);
+          sectionMetaByOrder: new Map(summary.sections.map((section) => [section.order, {
+            id: section.id, conversationId: section.conversationId,
+          }])),
+          widgets: summary.widgets ?? [],
+        })));
+        setHomeworkId(first?.id);
         setLoading(false);
       })
       .catch(() => {
+        if (cancelled) return;
         setLoadError(true);
         setLoading(false);
       });
+    return () => { cancelled = true; };
   }, []);
 
-  // #271: setSectionMetaByOrder returned so the caller can update a
-  // section's conversationId the moment the server mints one (chatFetch in
-  // App.tsx) -- sectionMetaByOrder is the single source of truth for a
-  // section's conversationId now that the redundant copy on SidebarSection
-  // above is gone; previously this setter existed only inside this hook,
-  // which made it structurally impossible for anything outside the hook to
-  // keep the map current after the initial fetch.
+  const selected = states.find((state) => state.summary.id === homeworkId);
+  const update = <K extends "sections" | "sectionMetaByOrder" | "widgets">(
+    key: K, action: SetStateAction<HomeworkState[K]>,
+  ) => {
+    setStates((previous) => previous.map((state) => state.summary.id !== homeworkId ? state : {
+      ...state,
+      [key]: typeof action === "function"
+        ? (action as (value: HomeworkState[K]) => HomeworkState[K])(state[key]) : action,
+    }));
+  };
+
   return {
-    sections,
-    setSections,
-    sectionMetaByOrder,
-    setSectionMetaByOrder,
-    widgets,
-    setWidgets,
-    hwTitle,
-    courseId,
-    courseName,
+    homeworks: states.map((state) => state.summary),
+    homeworkId,
+    selectHomework: (id: string) => {
+      if (states.some((state) => state.summary.id === id)) setHomeworkId(id);
+    },
+    sections: selected?.sections ?? emptySections,
+    setSections: (action: SetStateAction<SidebarSection[]>) => update("sections", action),
+    sectionMetaByOrder: selected?.sectionMetaByOrder ?? emptyMeta,
+    setSectionMetaByOrder: (action: SetStateAction<Map<number, SectionMeta>>) => update("sectionMetaByOrder", action),
+    widgets: selected?.widgets ?? emptyWidgets,
+    setWidgets: (action: SetStateAction<StudentProgressWidget[]>) => update("widgets", action),
+    hwTitle: selected?.summary.title ?? "",
+    courseId: selected?.summary.courseId,
+    courseName: selected?.summary.courseName ?? "",
     loading,
     loadError,
   };

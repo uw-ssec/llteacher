@@ -238,9 +238,26 @@ function homeworkFixture(
  *  MemoryRouter+AuthProvider tree every test used to hand-write. Returns
  *  whatever `render` returns, for the handful of tests that need e.g.
  *  `unmount` or `container`. */
-function renderApp(
+async function openTutorList(user = userEvent.setup()) {
+  const back = screen.queryByRole("button", { name: "Back to course navigation" });
+  if (back) await user.click(back);
+  const header = await screen.findByRole("button", { name: "Tutor Chats" });
+  if (header.getAttribute("aria-expanded") !== "true") await user.click(header);
+}
+
+async function openHomework(user = userEvent.setup()) {
+  const back = screen.queryByRole("button", { name: "Back to course navigation" });
+  if (back) await user.click(back);
+  const header = await screen.findByRole("button", { name: "Homeworks" });
+  if (header.getAttribute("aria-expanded") !== "true") await user.click(header);
+  const list = await screen.findByRole("list", { name: "Active homeworks" });
+  await user.click(within(list).getAllByRole("button")[0]!);
+}
+
+async function renderApp(
   options: {
     homeworks?: unknown;
+    navigation?: "homework" | "tutors" | "overview";
     routes?: (url: string, init?: RequestInit) => Response | Promise<Response> | undefined;
   } = {},
 ) {
@@ -275,13 +292,22 @@ function renderApp(
     }),
   );
 
-  return render(
+  const rendered = render(
     <MemoryRouter>
       <AuthProvider>
         <App />
       </AuthProvider>
     </MemoryRouter>,
   );
+  const user = userEvent.setup();
+  if (options.navigation === "tutors") {
+    await user.click(await screen.findByRole("button", { name: "Tutor Chats" }));
+  } else if (options.navigation !== "overview") {
+    await user.click(await screen.findByRole("button", { name: "Homeworks" }));
+    const list = await screen.findByRole("list", { name: "Active homeworks" });
+    await user.click(within(list).getAllByRole("button")[0]!);
+  }
+  return rendered;
 }
 
 // #3 follow-up fix: conversationId must flow into every /api/chat request
@@ -298,7 +324,8 @@ describe("App chat conversationId propagation (#3 follow-up)", () => {
   it("sends the conversationId from turn 1's response on turn 2's request, not just turn 1's", async () => {
     const chatCalls: Array<{ conversationId?: string; messages: unknown[] }> = [];
 
-    renderApp({
+    await renderApp({
+      navigation: "homework",
       homeworks: homeworkFixture({ sections: [] }),
       routes: (url, init) => {
         if (url === "/api/chat") {
@@ -344,7 +371,8 @@ describe("App chat conversationId propagation (#3 follow-up)", () => {
 describe("App section chat surface is not recreated every render while it has no key yet (#302 review fix)", () => {
   it("does not lose earlier turns to a per-render Chat-instance reset when the homework has zero sections", async () => {
     let chatCallCount = 0;
-    renderApp({
+    await renderApp({
+      navigation: "homework",
       homeworks: homeworkFixture({ sections: [] }),
       routes: (url) => {
         if (url === "/api/chat") {
@@ -389,7 +417,7 @@ describe("App tutor-conversations rail (#4)", () => {
    *  layers the tutor-rail-specific conversations endpoints (list/create/
    *  rename, plus an optional /api/chat handler) on top of it, so each
    *  test below only states what it actually cares about. */
-  function renderTutorRailApp(
+  async function renderTutorRailApp(
     extra: {
       onConversationsGet?: (url: string) => Response;
       onConversationsPost?: (body: unknown) => Response;
@@ -405,6 +433,7 @@ describe("App tutor-conversations rail (#4)", () => {
     } = {},
   ) {
     return renderApp({
+      navigation: "tutors",
       routes: (url, init) => {
         if (url === "/api/chat" && extra.onChat) {
           const body = init?.body ? JSON.parse(String(init.body)) : undefined;
@@ -455,7 +484,7 @@ describe("App tutor-conversations rail (#4)", () => {
 
   it("renders the tutor rail scoped to the homework's courseId, alongside the homework sidebar", async () => {
     const conversationsGetUrls: string[] = [];
-    renderTutorRailApp({
+    await renderTutorRailApp({
       onConversationsGet: (url) => {
         conversationsGetUrls.push(url);
         return new Response(JSON.stringify({ items: [], nextCursor: null }), { status: 200 });
@@ -472,12 +501,13 @@ describe("App tutor-conversations rail (#4)", () => {
     );
     // The homework sidebar (a different surface, see TutorConversationsList's
     // doc comment) still renders alongside it.
+    await openHomework();
     expect(screen.getByRole("button", { name: /Sec 1/ })).toBeTruthy();
   });
 
   it("creating a tutor conversation switches the chat column to it, and sends chat turns with its conversationId and courseId (#304)", async () => {
     const chatCalls: Array<{ conversationId?: string; courseId?: string }> = [];
-    renderTutorRailApp({
+    await renderTutorRailApp({
       onConversationsPost: () =>
         new Response(
           JSON.stringify({
@@ -503,6 +533,7 @@ describe("App tutor-conversations rail (#4)", () => {
 
     await screen.findByText(/Start one to ask about anything outside a section\./);
     const user = userEvent.setup();
+    await openTutorList(user);
     await user.click(screen.getByRole("button", { name: "New conversation" }));
 
     // The chat column switched to the tutor surface (breadcrumb changed).
@@ -529,7 +560,7 @@ describe("App tutor-conversations rail (#4)", () => {
   // first message.
   it("sending the first message in a brand-new tutor conversation auto-titles it from that message (#287)", async () => {
     const patchCalls: Array<{ id: string; body: unknown }> = [];
-    renderTutorRailApp({
+    await renderTutorRailApp({
       onConversationsPost: () =>
         new Response(
           JSON.stringify({
@@ -573,6 +604,7 @@ describe("App tutor-conversations rail (#4)", () => {
 
     await screen.findByText(/Start one to ask about anything outside a section\./);
     const user = userEvent.setup();
+    await openTutorList(user);
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await screen.findByText("TUTOR CHAT");
 
@@ -598,7 +630,7 @@ describe("App tutor-conversations rail (#4)", () => {
   // title-still-default gate's absence of a positive counter-test.
   it("does not auto-title a conversation whose title was already changed before the first message (#287)", async () => {
     const patchCalls: Array<{ id: string; body: unknown }> = [];
-    renderTutorRailApp({
+    await renderTutorRailApp({
       onConversationsPost: () =>
         new Response(
           JSON.stringify({
@@ -642,6 +674,7 @@ describe("App tutor-conversations rail (#4)", () => {
 
     await screen.findByText(/Start one to ask about anything outside a section\./);
     const user = userEvent.setup();
+    await openTutorList(user);
     await user.click(screen.getByRole("button", { name: "New conversation" }));
     await screen.findByText("TUTOR CHAT");
 
@@ -674,7 +707,7 @@ describe("App tutor-conversations rail (#4)", () => {
   // stuck forever because its messageCount can never again be 0.
   it("self-heals an existing multi-message conversation still stuck at the default title (#287 review)", async () => {
     const patchCalls: Array<{ id: string; body: unknown }> = [];
-    renderTutorRailApp({
+    await renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
           JSON.stringify({
@@ -735,6 +768,7 @@ describe("App tutor-conversations rail (#4)", () => {
     });
 
     const user = userEvent.setup();
+    await openTutorList(user);
     await user.click(await screen.findByRole("button", { name: "Select conversation: New Conversation" }));
     await screen.findByText("prior question");
 
@@ -755,7 +789,7 @@ describe("App tutor-conversations rail (#4)", () => {
   // transcript but not the outbound request looks correct on screen.
   it("selecting an existing tutor conversation hydrates its history into the chat column AND into the next /api/chat request", async () => {
     const chatCalls: Array<{ conversationId?: string; messages: Array<{ role: string }> }> = [];
-    renderTutorRailApp({
+    await renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
           JSON.stringify({
@@ -799,6 +833,7 @@ describe("App tutor-conversations rail (#4)", () => {
     // #6: the row (which the title is part of, per #4's original contract)
     // is the select control -- a small pencil icon is the rename trigger
     // instead (see ConversationListItem's doc comment for the split).
+    await openTutorList(user);
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
 
     // The chat column shows the persisted history, not an empty thread.
@@ -834,7 +869,7 @@ describe("App tutor-conversations rail (#4)", () => {
   // flag-response affordance ... in the tutor chat (#90)" test this
   // replaces.
   it("#448: does not render a Flag control on the tutor surface -- the server rejects feedback for non-section conversations", async () => {
-    renderTutorRailApp({
+    await renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
           JSON.stringify({
@@ -885,6 +920,7 @@ describe("App tutor-conversations rail (#4)", () => {
     });
 
     const user = userEvent.setup();
+    await openTutorList(user);
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
     await screen.findByText("prior answer");
 
@@ -923,7 +959,7 @@ describe("App tutor-conversations rail (#4)", () => {
       messageCount: 1,
     });
 
-    renderTutorRailApp({
+    await renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
           JSON.stringify({
@@ -937,7 +973,9 @@ describe("App tutor-conversations rail (#4)", () => {
 
     const user = userEvent.setup();
     // Click order: A, then B, both before either /messages response lands.
+    await openTutorList(user);
     await user.click(await screen.findByRole("button", { name: "Select conversation: Conversation A" }));
+    await openTutorList(user);
     await user.click(screen.getByRole("button", { name: "Select conversation: Conversation B" }));
 
     // Resolve OUT of click order: B (clicked second) resolves first, A
@@ -968,7 +1006,7 @@ describe("App tutor-conversations rail (#4)", () => {
   });
 
   it("selecting a homework section switches the chat column back out of the tutor surface", async () => {
-    renderTutorRailApp({
+    await renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
           JSON.stringify({
@@ -994,9 +1032,11 @@ describe("App tutor-conversations rail (#4)", () => {
     });
 
     const user = userEvent.setup();
+    await openTutorList(user);
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
     await screen.findByText("TUTOR CHAT");
 
+    await openHomework(user);
     await user.click(screen.getByRole("button", { name: /Sec 1/ }));
     await screen.findByText("Section 1: Sec 1");
     expect(screen.queryByText("TUTOR CHAT")).toBeNull();
@@ -1017,7 +1057,7 @@ describe("App tutor-conversations rail (#4)", () => {
   // afterward.
   it("credits the conversation that was actually streaming, not whichever one is selected when its turn later completes", async () => {
     let controllerA: ReadableStreamDefaultController<Uint8Array> | undefined;
-    renderTutorRailApp({
+    await renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
           JSON.stringify({
@@ -1059,6 +1099,7 @@ describe("App tutor-conversations rail (#4)", () => {
     });
 
     const user = userEvent.setup();
+    await openTutorList(user);
     await user.click(await screen.findByRole("button", { name: "Select conversation: Chat A" }));
     const composer = await screen.findByLabelText("Message input");
     await user.type(composer, "question for A{Enter}");
@@ -1067,6 +1108,7 @@ describe("App tutor-conversations rail (#4)", () => {
     // Switch away from A WHILE its turn is still streaming server-side --
     // recreates the tutor useChat instance for B, which reports "ready"
     // on this very next render despite never having sent anything.
+    await openTutorList(user);
     await user.click(screen.getByRole("button", { name: "Select conversation: Chat B" }));
     expect(
       screen.getByRole("button", { name: "Select conversation: Chat B" }).getAttribute("aria-current"),
@@ -1079,6 +1121,7 @@ describe("App tutor-conversations rail (#4)", () => {
     // version of this fix that watched `tutorChatStatus` (rather than the
     // turn's own response stream) would have credited A here, immediately
     // on the switch -- before its turn had actually finished at all.
+    await openTutorList(user);
     const rowABeforeCompletion = screen
       .getByRole("button", { name: "Select conversation: Chat A" })
       .closest(".tutor-conversation-item");
@@ -1131,7 +1174,7 @@ describe("App tutor-conversations rail (#4)", () => {
   it("reconciles to +2 for a completed turn and +1 for a response-half failure (server row counts, not turns)", async () => {
     let chatCallCount = 0;
     let getCallCount = 0;
-    renderTutorRailApp({
+    await renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
           JSON.stringify({
@@ -1159,6 +1202,7 @@ describe("App tutor-conversations rail (#4)", () => {
     });
 
     const user = userEvent.setup();
+    await openTutorList(user);
     await user.click(await screen.findByRole("button", { name: "Select conversation: Chat A" }));
     const composer = await screen.findByLabelText("Message input");
 
@@ -1191,7 +1235,7 @@ describe("App tutor-conversations rail (#4)", () => {
   // -- this proves the rail ends up agreeing with the server's real
   // count(*) regardless, because it now asks rather than guesses.
   it("agrees with the server's real count(*) when a turn's stream looks complete but the server persisted no assistant row", async () => {
-    renderTutorRailApp({
+    await renderTutorRailApp({
       onConversationsGet: () =>
         new Response(
           JSON.stringify({
@@ -1217,6 +1261,7 @@ describe("App tutor-conversations rail (#4)", () => {
     });
 
     const user = userEvent.setup();
+    await openTutorList(user);
     await user.click(await screen.findByRole("button", { name: "Select conversation: Chat A" }));
     const composer = await screen.findByLabelText("Message input");
     await user.type(composer, "a question{Enter}");
@@ -1249,7 +1294,7 @@ describe("App feedback flag targets the persisted row id for a live-streamed tur
       sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
     });
     const feedbackPosts: Array<{ url: string }> = [];
-    renderApp({
+    await renderApp({
       homeworks: hydrated,
       routes: (url, init) => {
         if (url.endsWith("/hints")) return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
@@ -1303,12 +1348,13 @@ describe("App feedback flag targets the persisted row id for a live-streamed tur
 // exposes via onRenameHandlerReady, so a header rename shows up in the list
 // row too and vice versa -- one hook instance, one `conversations` array.
 describe("App tutor conversation header rename (#6)", () => {
-  function renderHeaderRenameApp(
+  async function renderHeaderRenameApp(
     extra: {
       onPatch?: (id: string, body: unknown) => Response;
     } = {},
   ) {
     return renderApp({
+      navigation: "tutors",
       routes: (url, init) => {
         if (url.startsWith("/api/conversations?")) {
           return new Response(
@@ -1347,9 +1393,10 @@ describe("App tutor conversation header rename (#6)", () => {
   }
 
   it("shows the selected tutor conversation's title as an editable heading in the chat column", async () => {
-    renderHeaderRenameApp();
+    await renderHeaderRenameApp();
 
     const user = userEvent.setup();
+    await openTutorList(user);
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
     await screen.findByText("TUTOR CHAT");
 
@@ -1372,7 +1419,7 @@ describe("App tutor conversation header rename (#6)", () => {
 
   it("renaming from the header PATCHes the conversation and updates both the header and the list row", async () => {
     const patchCalls: Array<{ id: string; body: unknown }> = [];
-    renderHeaderRenameApp({
+    await renderHeaderRenameApp({
       onPatch: (id, body) => {
         patchCalls.push({ id, body });
         return new Response(
@@ -1394,6 +1441,7 @@ describe("App tutor conversation header rename (#6)", () => {
     });
 
     const user = userEvent.setup();
+    await openTutorList(user);
     await user.click(await screen.findByRole("button", { name: "Select conversation: Existing tutor chat" }));
     await screen.findByRole("button", { name: "Rename conversation: Existing tutor chat" });
 
@@ -1411,7 +1459,8 @@ describe("App tutor conversation header rename (#6)", () => {
   });
 
   it("does not show a header title for the homework-section chat (no per-conversation title there)", async () => {
-    renderHeaderRenameApp();
+    await renderHeaderRenameApp();
+    await openHomework();
 
     await screen.findByText("Section 1: Sec 1");
     expect(screen.queryByRole("button", { name: /Rename conversation/ })).toBeNull();
@@ -1429,8 +1478,9 @@ describe("App tutor conversation header rename (#6)", () => {
 describe("App section chat streaming guard + error surfacing (#144)", () => {
   /** Zero-section (tutor-only) homework, and /api/chat delegated wholesale
    *  to `chatFetch` -- what every test in this block needs. */
-  function renderHomeworkChatApp(chatFetch: typeof fetch) {
+  async function renderHomeworkChatApp(chatFetch: typeof fetch) {
     return renderApp({
+      navigation: "homework",
       homeworks: homeworkFixture({ sections: [] }),
       routes: (url, init) => (url === "/api/chat" ? chatFetch(url, init) : undefined),
     });
@@ -1442,7 +1492,7 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
     const pendingChat = new Promise<Response>((resolve) => {
       resolveChat = resolve;
     });
-    renderHomeworkChatApp(async () => {
+    await renderHomeworkChatApp(async () => {
       chatCallCount += 1;
       return pendingChat;
     });
@@ -1501,7 +1551,7 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
 
   it("surfaces a failed turn as an inline retryable error instead of silently disappearing, and regenerate() recovers it", async () => {
     let chatCallCount = 0;
-    renderHomeworkChatApp(async () => {
+    await renderHomeworkChatApp(async () => {
       chatCallCount += 1;
       if (chatCallCount === 1) {
         // #96: a RESPONSE-half failure specifically -- the send was accepted
@@ -1564,7 +1614,7 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
 
   it("recovers from an error by sending a fresh message directly, without using Retry", async () => {
     let chatCallCount = 0;
-    renderHomeworkChatApp(async () => {
+    await renderHomeworkChatApp(async () => {
       chatCallCount += 1;
       // Response-half again, so the composer starts empty for the "type a
       // genuinely different message" step below (#96 pre-fills it on a
@@ -1608,7 +1658,7 @@ describe("App section chat streaming guard + error surfacing (#144)", () => {
 describe("App tutor chat streaming guard + error surfacing (#144)", () => {
   it("surfaces a failed tutor turn as an inline retryable error, and disables the tutor composer while errored", async () => {
     let chatCallCount = 0;
-    renderApp({
+    await renderApp({
       routes: (url, init) => {
         if (url === "/api/conversations" && init?.method === "POST") {
           return new Response(
@@ -1652,6 +1702,7 @@ describe("App tutor chat streaming guard + error surfacing (#144)", () => {
     });
 
     const user = userEvent.setup();
+    await openTutorList(user);
     await user.click(await screen.findByRole("button", { name: "New conversation" }));
     await screen.findByText("TUTOR CHAT");
 
@@ -1712,7 +1763,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
    *  every test here needs answered even though none of them are the
    *  point of any individual test), plus the /api/chat handler each test
    *  actually varies. */
-  function renderResilienceApp(
+  async function renderResilienceApp(
     chatFetch: typeof fetch,
     homeworks?: unknown,
     // `Promise<Response>` too (not just `Response`) -- the #418/#420
@@ -1740,7 +1791,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
 
   it("hands the student's words back to the composer, and drops the un-persisted bubble, when the request never reaches the server", async () => {
     let chatCallCount = 0;
-    renderResilienceApp(async () => {
+    await renderResilienceApp(async () => {
       chatCallCount += 1;
       // A dropped connection: `fetch` itself rejects, so the Worker never
       // saw this request and nothing was persisted for it.
@@ -1778,7 +1829,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
 
   it("restores the text for a server-REFUSED send too (a non-2xx never persists anything either)", async () => {
     let chatCallCount = 0;
-    renderResilienceApp(async () => {
+    await renderResilienceApp(async () => {
       chatCallCount += 1;
       if (chatCallCount === 1) {
         // #266's duplicate_message 409: the server refused this send
@@ -1812,7 +1863,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
        composer may already hold the student's own half-written question. If
        that hint send is refused, restoring it would overwrite words the
        student never sent and never wants replaced. */
-    renderResilienceApp(async () => new Response("gateway timeout", { status: 504 }));
+    await renderResilienceApp(async () => new Response("gateway timeout", { status: 504 }));
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -1847,7 +1898,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
         { id: "s2", title: "Sec 2", order: 2, status: "not_started", conversationId: "sec-conv-2" },
       ],
     });
-    renderResilienceApp(
+    await renderResilienceApp(
       // Every send fails before reaching the server.
       async () => new Response("gateway timeout", { status: 504 }),
       twoSections,
@@ -1905,7 +1956,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
      something other than what it claims to. Routing by conversationId
      keeps section 1 loading normally (synchronously) while section 2's
      fetch is the only one under the test's control. */
-  function renderSwitchBeatsFailureApp(
+  async function renderSwitchBeatsFailureApp(
     chatFetch: typeof fetch,
     sectionTwoMessages: () => Response | Promise<Response>,
   ) {
@@ -1926,7 +1977,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
   it("#418: a send that fails after a section switch does not touch the section now on screen", async () => {
     let releaseHungSend: (() => void) | null = null;
     let releaseSectionTwoHistory: (() => void) | null = null;
-    renderSwitchBeatsFailureApp(
+    await renderSwitchBeatsFailureApp(
       async () =>
         new Promise((_resolve, reject) => {
           // Hangs, exactly like a dead connection, until the test releases it.
@@ -2018,7 +2069,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
   });
 
   it("#419: returning to the section hands back the words the failed send was carrying", async () => {
-    renderResilienceApp(
+    await renderResilienceApp(
       async () => new Response("gateway timeout", { status: 504 }),
       twoSectionFixture(),
       () => new Response(JSON.stringify([]), { status: 200 }),
@@ -2046,7 +2097,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
   it("#420: a send-half error row does not follow the student into the next section", async () => {
     let releaseHungSend: (() => void) | null = null;
     let releaseSectionTwoHistory: (() => void) | null = null;
-    renderSwitchBeatsFailureApp(
+    await renderSwitchBeatsFailureApp(
       async () =>
         new Promise((_resolve, reject) => {
           // Hangs, exactly like a dead connection, until the test releases
@@ -2130,7 +2181,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
        Critical #420 fixed. */
     let releaseSectionTwoHistory: (() => void) | null = null;
     let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
-    renderSwitchBeatsFailureApp(
+    await renderSwitchBeatsFailureApp(
       async () => {
         // The send half succeeds -- a real 200 with a real stream -- but
         // the stream is held open (never closed, no finish chunk) until the
@@ -2217,7 +2268,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
        collapse button here stands in for "any re-render" -- it touches
        localStorage-backed state that has nothing to do with the chat
        surface at all. */
-    renderResilienceApp(async () => new Response("gateway timeout", { status: 504 }));
+    await renderResilienceApp(async () => new Response("gateway timeout", { status: 504 }));
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -2232,14 +2283,14 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
 
     // An unrelated re-render -- collapsing the homework sidebar touches
     // App-level state with no relationship to the chat surface at all.
-    await user.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+    await user.click(screen.getByRole("button", { name: "Back to course navigation" }));
 
     // The cleared draft must stay cleared.
     expect(composer.value).toBe("");
   });
 
   it("keeps the question on screen for a RESPONSE-half failure, and does not pre-fill the composer", async () => {
-    renderResilienceApp(async () => interruptedChatStreamResponse("conv-1", "A p-value is the probability of"));
+    await renderResilienceApp(async () => interruptedChatStreamResponse("conv-1", "A p-value is the probability of"));
 
     const composer = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     const user = userEvent.setup();
@@ -2268,7 +2319,7 @@ describe("App streaming resilience: send-half vs response-half failures (#96)", 
       sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
     });
     let chatCallCount = 0;
-    renderResilienceApp(
+    await renderResilienceApp(
       async () => {
         chatCallCount += 1;
         return chatStreamResponse("sec-conv-1", "the answer, this time in full");
@@ -2317,7 +2368,7 @@ describe("App section chat gains a reset path on switch/restart (#302 review fix
       "sec-conv-2": [{ id: "m2", role: "user", parts: [{ type: "text", text: "sec 2 question" }] }],
     };
     let chatCallCount = 0;
-    renderApp({
+    await renderApp({
       homeworks: twoSections,
       routes: (url) => {
         if (url.endsWith("/hints")) return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
@@ -2356,35 +2407,13 @@ describe("App section chat gains a reset path on switch/restart (#302 review fix
   });
 });
 
-// Testing Strategy #5 ("Sidebar collapse state persists"): the tutor rail's
-// own localStorage key (TUTOR_SIDEBAR_COLLAPSED_KEY) must be independent of
-// the homework sidebar's -- toggling one must not move the other, and the
-// preference must survive a remount (the localStorage-backed lazy
-// initializer, same mechanism the homework sidebar already had covered
-// only implicitly before #4).
-describe("App tutor sidebar collapse persistence (#4)", () => {
-  afterEach(() => {
-    window.localStorage.clear();
-  });
-
-  it("persists the tutor rail's collapsed state across a remount, independently of the homework sidebar's", async () => {
-    const { unmount } = renderApp({ homeworks: homeworkFixture({ sections: [] }) });
-
-    const toggle = await screen.findByRole("button", { name: "Collapse tutor conversations" });
-    const user = userEvent.setup();
-    await user.click(toggle);
-
-    await waitFor(() =>
-      expect(window.localStorage.getItem("llteacher:tutor-sidebar-collapsed")).toBe("true"),
-    );
-    // The homework sidebar's own key is untouched by toggling the tutor rail.
-    expect(window.localStorage.getItem("llteacher:sidebar-collapsed")).not.toBe("true");
-
-    unmount();
-
-    renderApp({ homeworks: homeworkFixture({ sections: [] }) });
-
-    expect(await screen.findByRole("button", { name: "Expand tutor conversations" })).toBeTruthy();
+// The unified overview replaces the two persisted collapse preferences.
+describe("App unified sidebar return navigation", () => {
+  it("renders the overview without a collapsed rail", async () => {
+    await renderApp({ navigation: "tutors", homeworks: homeworkFixture({ sections: [] }) });
+    expect(screen.getByRole("button", { name: "Tutor Chats" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Collapse tutor conversations" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Homeworks" })).toBeTruthy();
   });
 });
 
@@ -2394,7 +2423,7 @@ describe("App tutor sidebar collapse persistence (#4)", () => {
 // is the standard 2.4.1 Bypass Blocks fix.
 describe("App main landmark + skip link (#299)", () => {
   it("wraps the conversation column in a focusable <main id=\"conversation-main\">, reachable from a first-child skip link", async () => {
-    const { container } = renderApp({ homeworks: homeworkFixture({ sections: [] }) });
+    const { container } = await renderApp({ navigation: "tutors", homeworks: homeworkFixture({ sections: [] }) });
 
     await screen.findByRole("button", { name: "New conversation" });
 
@@ -2423,7 +2452,7 @@ describe("App section chat resumes with hydrated history (#252)", () => {
   it("hydrates the section chat's transcript on mount AND includes the prior turns in the next /api/chat request", async () => {
     const chatCalls: Array<{ conversationId?: string; messages: Array<{ role: string }> }> = [];
 
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
       routes: (url, init) => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
@@ -2467,7 +2496,7 @@ describe("App section chat resumes with hydrated history (#252)", () => {
   });
 
   it("switching from a hydrated section back to it after visiting another surface re-hydrates rather than staying empty", async () => {
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({
         sections: [
           { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
@@ -2512,7 +2541,7 @@ describe("App section chat resumes with hydrated history (#252)", () => {
        was silently dropped and the stale first-fetch transcript stayed on
        screen forever. */
     let messagesCallCount = 0;
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
       routes: (url) => {
         if (url.endsWith("/hints")) return new Response(JSON.stringify({ used: 0, limit: null }), { status: 200 });
@@ -2541,7 +2570,7 @@ describe("App section chat resumes with hydrated history (#252)", () => {
 describe("App eager section greeting (#318)", () => {
   it("shows the section's greeting on open, before the student sends anything", async () => {
     let startCalls = 0;
-    renderApp({
+    await renderApp({
       routes: (url, init) => {
         if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
           startCalls += 1;
@@ -2609,7 +2638,7 @@ describe("App eager section greeting (#318)", () => {
        of which order" claim stays covered as highly-likely-but-not-
        guaranteed rather than pinned. */
     let startCalls = 0;
-    renderApp({
+    await renderApp({
       routes: (url, init) => {
         if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
           startCalls += 1;
@@ -2638,7 +2667,7 @@ describe("App eager section greeting (#318)", () => {
   });
 
   it("leaves the composer empty (no crash) when the eager-start call 409s", async () => {
-    renderApp({
+    await renderApp({
       routes: (url, init) => {
         if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
           return new Response(JSON.stringify({ error: "Section is not interactive" }), { status: 409 });
@@ -2652,9 +2681,9 @@ describe("App eager section greeting (#318)", () => {
     expect(screen.queryByText(/Where would you like to start\?/)).toBeNull();
   });
 
-  it("Submit does nothing for a section whose only content is the eager greeting -- no student turn yet", async () => {
+  it("Submit completes a section even when the student has not sent a chat message", async () => {
     let submitCalls = 0;
-    renderApp({
+    await renderApp({
       routes: (url, init) => {
         if (url === "/api/courses/course-a/sections/s1/conversations" && init?.method === "POST") {
           return new Response(
@@ -2691,10 +2720,8 @@ describe("App eager section greeting (#318)", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /Submit section 1/i }));
 
-    // Give any (wrongly-fired) submit request a tick to land, then assert
-    // it never did -- the greeting alone must not be submittable work.
-    await new Promise((r) => setTimeout(r, 0));
-    expect(submitCalls).toBe(0);
+    await waitFor(() => expect(submitCalls).toBe(1));
+    expect(await screen.findByRole("button", { name: /^Sec 1\s*\(submitted\)$/ })).toBeTruthy();
   });
 });
 
@@ -2715,7 +2742,7 @@ describe("App section conversationId stays live after mid-session creation (#271
   it("keeps a section's transcript and Submit working after its first-ever turn mints a conversationId", async () => {
     const submitCalls: string[] = [];
 
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({ sections: TWO_SECTIONS_NO_CONVO }),
       routes: (url, init) => {
         if (url === "/api/chat") {
@@ -2783,7 +2810,7 @@ describe("App section conversationId stays live after mid-session creation (#271
   // path: one turn, no section switch, and asserts the greeting is visible
   // afterward.
   it("shows the section's greeting in the transcript right after its first-ever turn, with no section switch (#272)", async () => {
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({ sections: TWO_SECTIONS_NO_CONVO }),
       routes: (url, init) => {
         if (url === "/api/chat") {
@@ -2828,7 +2855,7 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
   it("section chat: a failed history fetch does not clear the transcript, surfaces a retryable error, and disables the composer", async () => {
     let messagesCallCount = 0;
 
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
       routes: (url) => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
@@ -2855,7 +2882,8 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
   });
 
   it("tutor chat: a failed history fetch surfaces a retryable error and disables the composer instead of a silent empty thread", async () => {
-    renderApp({
+    await renderApp({
+      navigation: "tutors",
       homeworks: homeworkFixture({ sections: [] }),
       routes: (url) => {
         if (url.startsWith("/api/conversations?courseId=")) {
@@ -2898,7 +2926,8 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
        had failed left the brand-new conversation rendered with t1's stale
        error: composer disabled (isSending checks tutorHydrationError) and a
        Retry that closes over t1's id, not t2's. */
-    renderApp({
+    await renderApp({
+      navigation: "tutors",
       homeworks: homeworkFixture({ sections: [] }),
       routes: (url, init) => {
         if (url === "/api/conversations" && init?.method === "POST") {
@@ -2940,6 +2969,7 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
     const composerBefore = (await screen.findByLabelText("Message input")) as HTMLTextAreaElement;
     expect(isComposerDisabled(composerBefore)).toBe(true);
 
+    await openTutorList(user);
     await user.click(screen.getByRole("button", { name: /new conversation/i }));
 
     // t2 has nothing wrong with it -- t1's error must not have survived.
@@ -2955,7 +2985,7 @@ describe("App history hydration fails closed on fetch failure (#276)", () => {
 describe("App section restart affordance (#248)", () => {
   const SEC1_IN_PROGRESS = [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }];
 
-  function renderRestartApp(extra: (url: string, init?: RequestInit) => Response | undefined) {
+  async function renderRestartApp(extra: (url: string, init?: RequestInit) => Response | undefined) {
     return renderApp({
       homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
       routes: (url, init) => {
@@ -2971,7 +3001,7 @@ describe("App section restart affordance (#248)", () => {
   }
 
   it("does not render the restart button for a section with no active conversation", async () => {
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({
         sections: [{ id: "s1", title: "Sec 1", order: 1, status: "not_started", conversationId: null }],
       }),
@@ -2982,7 +3012,7 @@ describe("App section restart affordance (#248)", () => {
   });
 
   it("opens a confirm dialog stating the conversation won't be recoverable, and cancel leaves it untouched", async () => {
-    renderRestartApp(() => undefined);
+    await renderRestartApp(() => undefined);
 
     const restartButton = await screen.findByRole("button", { name: "Restart section" });
     const user = userEvent.setup();
@@ -3000,7 +3030,7 @@ describe("App section restart affordance (#248)", () => {
   });
 
   it("shows the submission-will-be-undone line when the section is already submitted", async () => {
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({
         sections: [{ id: "s1", title: "Sec 1", order: 1, status: "submitted", conversationId: "sec-conv-1" }],
       }),
@@ -3025,7 +3055,7 @@ describe("App section restart affordance (#248)", () => {
 
   it("confirming restart POSTs to the restart endpoint and hydrates the replacement conversation", async () => {
     let restartCalled = false;
-    renderRestartApp((url) => {
+    await renderRestartApp((url) => {
       if (url === "/api/courses/course-a/conversations/sec-conv-1/restart") {
         restartCalled = true;
         return new Response(
@@ -3069,7 +3099,7 @@ describe("App section restart affordance (#248)", () => {
        above). */
     let restartCalled = false;
     let chatCallCount = 0;
-    renderRestartApp((url) => {
+    await renderRestartApp((url) => {
       if (url === "/api/chat") {
         chatCallCount += 1;
         return interruptedChatStreamResponse("sec-conv-1", "half an answer");
@@ -3112,7 +3142,7 @@ describe("App section restart affordance (#248)", () => {
   });
 
   it("a 409 (graded submission) keeps the dialog open and shows the server's message inline", async () => {
-    renderRestartApp((url) => {
+    await renderRestartApp((url) => {
       if (url === "/api/courses/course-a/conversations/sec-conv-1/restart") {
         return new Response(
           JSON.stringify({ error: "Submission has already been graded and cannot be restarted" }),
@@ -3142,7 +3172,7 @@ describe("App section restart affordance (#248)", () => {
 describe("App Stop control (#274)", () => {
   it("section chat: shows Stop while a turn is in flight, and clicking it aborts the request", async () => {
     let capturedSignal: AbortSignal | undefined;
-    renderApp({
+    await renderApp({
       routes: (url, init) => {
         if (url === "/api/chat") {
           capturedSignal = init?.signal ?? undefined;
@@ -3198,7 +3228,7 @@ describe("App Stop control (#274)", () => {
   // as an ordinary, complete, remembered reply.
   it("section chat: marks the partial reply as stopped/not-saved once Stop is clicked mid-stream", async () => {
     let capturedSignal: AbortSignal | undefined;
-    renderApp({
+    await renderApp({
       routes: (url, init) => {
         if (url === "/api/chat") {
           capturedSignal = init?.signal ?? undefined;
@@ -3253,7 +3283,7 @@ describe("App Stop control (#274)", () => {
   // isStopActionable decouples the two: Stop stays aria-disabled while a
   // hydration error is the only thing "sending".
   it("section chat: Stop stays inactive when only a hydration error (not a genuine send) makes the composer disabled", async () => {
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({
         sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "conv-1" }],
       }),
@@ -3292,7 +3322,7 @@ describe("App hint state (#80)", () => {
     let hintsGetCount = 0;
     const chatCalls: Array<{ isHintRequest?: boolean }> = [];
 
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
       routes: (url, init) => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
@@ -3332,7 +3362,7 @@ describe("App hint state (#80)", () => {
   it("rapid double-clicks on 'Give me a hint' send only one chat request (client-side suppression)", async () => {
     const chatCalls: unknown[] = [];
 
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
       routes: (url, init) => {
         if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
@@ -3406,7 +3436,7 @@ describe("App delete during a pending selection (#392)", () => {
     const hangingHistory = new Promise<Response>((r) => (releaseHistory = r));
     const hangingDelete = new Promise<Response>((r) => (releaseDelete = r));
 
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
       routes: (url, init) => {
         if (url.startsWith("/api/conversations?")) {
@@ -3421,6 +3451,7 @@ describe("App delete during a pending selection (#392)", () => {
       },
     });
 
+    await openTutorList();
     await userEvent.click(await screen.findByRole("button", { name: `Select conversation: ${CONV_B.title}` }));
     await userEvent.click(screen.getByRole("button", { name: `Delete conversation: ${CONV_B.title}` }));
     await userEvent.click(screen.getByRole("button", { name: "Delete" }));
@@ -3439,7 +3470,7 @@ describe("App delete during a pending selection (#392)", () => {
     let releaseHistory!: (r: Response) => void;
     const historyPromise = new Promise<Response>((r) => (releaseHistory = r));
 
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
       routes: (url, init) => {
         if (url.startsWith("/api/conversations?")) {
@@ -3458,6 +3489,7 @@ describe("App delete during a pending selection (#392)", () => {
 
     // Select conversation B -- its history request hangs, so selection is
     // pending and tutorConversationId is still undefined.
+    await openTutorList();
     const row = await screen.findByRole("button", { name: `Select conversation: ${CONV_B.title}` });
     await userEvent.click(row);
 
@@ -3480,7 +3512,7 @@ describe("App delete during a pending selection (#392)", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(screen.queryByText(/TUTOR CHAT/)).toBeNull();
     // ...and the section chat is still the surface on screen.
-    expect(screen.getAllByText(/Section 1/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "Homeworks" })).toBeTruthy();
   });
 });
 
@@ -3506,7 +3538,7 @@ describe("App superseded tutor selection (#398)", () => {
     let releaseHistory!: (r: Response) => void;
     const hanging = new Promise<Response>((r) => (releaseHistory = r));
 
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({
         sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
       }),
@@ -3523,10 +3555,12 @@ describe("App superseded tutor selection (#398)", () => {
     });
 
     // Select B -- its history hangs, so the row goes pending.
+    await openTutorList();
     await userEvent.click(await screen.findByRole("button", { name: `Select conversation: ${CONV_B.title}` }));
     await waitFor(() => expect(document.querySelector('[aria-busy="true"]')).not.toBeNull());
 
     // Navigate to a homework section instead of picking another conversation.
+    await openHomework();
     await userEvent.click(screen.getByRole("button", { name: /Sec 1/ }));
 
     // The abandoned row must not stay busy: if it does, the repeat-click
@@ -3573,7 +3607,8 @@ describe("App tutor transcript load-older (#280)", () => {
   it("pages back with before=<oldest loaded seq> and PREPENDS the result", async () => {
     const messagesUrls: string[] = [];
 
-    renderApp({
+    await renderApp({
+      navigation: "tutors",
       homeworks: TUTOR_ONLY_FIXTURE,
       routes: (url) => {
         if (url.startsWith("/api/conversations?courseId=")) {
@@ -3637,7 +3672,8 @@ describe("App tutor transcript load-older (#280)", () => {
        endpoint. */
     const messagesUrls: string[] = [];
 
-    renderApp({
+    await renderApp({
+      navigation: "tutors",
       homeworks: TUTOR_ONLY_FIXTURE,
       routes: (url, init) => {
         if (url === "/api/conversations" && init?.method === "POST") {
@@ -3676,6 +3712,7 @@ describe("App tutor transcript load-older (#280)", () => {
     // t1 is at the page cap, so it legitimately offers older history.
     expect(await screen.findByRole("button", { name: /load older messages/i })).toBeTruthy();
 
+    await openTutorList(user);
     await user.click(screen.getByRole("button", { name: /new conversation/i }));
 
     // The brand-new, empty conversation must not inherit t1's claim that
@@ -3716,7 +3753,7 @@ describe("App section transcript load-older", () => {
       },
     ];
 
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({
         sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
       }),
@@ -3772,7 +3809,7 @@ describe("App section transcript load-older", () => {
        has always cleared its cursor; this was the asymmetry. */
     const messagesUrls: string[] = [];
 
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({
         sections: [
           { id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" },
@@ -3918,7 +3955,7 @@ describe("App markdown render cost does not scale with hydrated history per stre
     }));
     const CHUNK_COUNT = 6;
 
-    renderApp({
+    await renderApp({
       homeworks: homeworkFixture({
         sections: [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }],
       }),

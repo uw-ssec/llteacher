@@ -10,6 +10,11 @@ Documentation for the LLTeacher v2 port and platform-generalization work. Source
 | [`design-system/`](./design-system/README.md) | v2 design system: principles, tokens, components, aesthetic spec |
 | [`superpowers/plans/`](./superpowers/plans/) | Implementation plans — dated `YYYY-MM-DD-<topic>.md`, executed task-by-task |
 
+## Onboarding guides
+
+- [Superadmin Guide to Onboarding Instructors](./superadmin-instructor-onboarding.md)
+- [Instructor Course Setup and Launch Checklist](./instructor-course-setup-checklist.md)
+
 ## Where things live in code
 
 ```
