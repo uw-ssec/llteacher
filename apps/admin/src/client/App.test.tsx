@@ -2,6 +2,7 @@ import { describe, it, vi, afterEach, expect } from "vitest";
 import { render, screen, waitFor, cleanup, fireEvent, within } from "@testing-library/react";
 import App, { FeedbackDashboardDataLoader } from "./App";
 import { AuthProvider } from "./components/AuthProvider";
+import * as studentAppNavigation from "./lib/studentAppUrl";
 
 afterEach(() => {
   cleanup();
@@ -106,6 +107,19 @@ describe("App selected-course context", () => {
     window.localStorage.clear();
   });
 
+  it("opens Student view for the selected course", async () => {
+    stubMultiCourseProfile();
+    const openStudentApp = vi
+      .spyOn(studentAppNavigation, "openStudentApp")
+      .mockImplementation(() => undefined);
+    renderApp();
+
+    await screen.findByRole("heading", { name: "STAT 311 · Autumn 2026" });
+    fireEvent.click(screen.getByRole("button", { name: "Student view" }));
+
+    expect(openStudentApp).toHaveBeenCalledWith("course-a");
+  });
+
   async function saveNewHomework(failReload = false) {
     let listLoads = 0;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -165,6 +179,13 @@ describe("App auth gate (#316 courseless admission)", () => {
     stubProfile({ isSuperAdmin: true });
     renderApp();
     await waitFor(() => screen.getByText(/Instructor Console/i));
+  });
+
+  it("does not show Student view to a courseless super admin", async () => {
+    stubProfile({ isSuperAdmin: true });
+    renderApp();
+    await waitFor(() => screen.getByText(/Instructor Console/i));
+    expect(screen.queryByRole("button", { name: "Student view" })).toBeNull();
   });
 
   it("admits a platform instructor with zero courses to the console instead of 403", async () => {

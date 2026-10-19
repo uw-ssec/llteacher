@@ -1,5 +1,5 @@
 import { describe, it, vi, afterEach, expect } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, within } from "@testing-library/react";
 import { AdminSidebar } from "./AdminSidebar";
 
 afterEach(cleanup);
@@ -9,6 +9,7 @@ const props = {
   onNavigate: vi.fn(),
   onNewHomework: vi.fn(),
   onNewLLMConfig: vi.fn(),
+  onViewAsStudent: undefined,
   isSuperAdmin: false,
 };
 
@@ -118,5 +119,71 @@ describe("AdminSidebar super-admin-only entry (#316)", () => {
   it("shows Add Instructor to a super admin who is also an author", () => {
     render(<AdminSidebar {...props} canAuthor isSuperAdmin />);
     expect(screen.getByText("Add Instructor")).toBeTruthy();
+  });
+});
+
+describe("AdminSidebar console-only navigation markers", () => {
+  it("marks every rendered destination, including grader-visible entries", () => {
+    render(<AdminSidebar {...props} canAuthor />);
+
+    const nav = screen.getByRole("navigation");
+    const destinations = within(nav).getAllByRole("button");
+    expect(destinations.length).toBeGreaterThan(3);
+    for (const destination of destinations) {
+      expect(destination.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+      const descriptionId = destination.getAttribute("aria-describedby");
+      expect(descriptionId).toBeTruthy();
+      expect(document.getElementById(descriptionId!)?.textContent).toBe("Only instructor viewable");
+    }
+
+    expect(screen.getByText("Homeworks").closest("button")?.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+    expect(screen.getByText("LLM configs").closest("button")?.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+  });
+
+  it("keeps role filtering separate from the marker", () => {
+    render(<AdminSidebar {...props} canAuthor={false} />);
+
+    expect(screen.getByText("Homeworks").closest("button")?.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+    expect(screen.getByText("Submissions").closest("button")?.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+    expect(screen.getByText("Feedback").closest("button")?.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+    expect(screen.queryByText("LLM configs")).toBeNull();
+  });
+
+  it("associates the tooltip with hover and keyboard focus on the destination", () => {
+    render(<AdminSidebar {...props} canAuthor />);
+    const homeworks = screen.getByText("Homeworks").closest("button")!;
+    const tooltipId = homeworks.getAttribute("aria-describedby")!;
+
+    fireEvent.mouseEnter(homeworks);
+    expect(document.getElementById(tooltipId)?.getAttribute("role")).toBe("tooltip");
+    expect(document.getElementById(tooltipId)?.textContent).toBe("Only instructor viewable");
+
+    homeworks.focus();
+    expect(document.activeElement).toBe(homeworks);
+    expect(homeworks.querySelector(".admin-sidebar__visibility-marker")?.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("includes the explanation in collapsed names and native tooltips", () => {
+    render(<AdminSidebar {...props} canAuthor isCollapsed />);
+
+    const homeworks = screen.getByRole("button", {
+      name: "Homeworks — Only instructor viewable",
+    });
+    expect(homeworks.getAttribute("title")).toBe("Homeworks — Only instructor viewable");
+  });
+
+  it("shows an unmarked Student view action only to authors", () => {
+    const onViewAsStudent = vi.fn();
+    const author = render(
+      <AdminSidebar {...props} canAuthor onViewAsStudent={onViewAsStudent} />,
+    );
+    const studentView = screen.getByRole("button", { name: "Student view" });
+    expect(studentView.querySelector(".admin-sidebar__visibility-marker")).toBeNull();
+    fireEvent.click(studentView);
+    expect(onViewAsStudent).toHaveBeenCalledTimes(1);
+    author.unmount();
+
+    render(<AdminSidebar {...props} canAuthor={false} onViewAsStudent={onViewAsStudent} />);
+    expect(screen.queryByRole("button", { name: "Student view" })).toBeNull();
   });
 });

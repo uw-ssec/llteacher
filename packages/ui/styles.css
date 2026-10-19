@@ -3992,9 +3992,13 @@ body {
   gap: 2px;
 }
 
+.admin-sidebar__nav-list > li {
+  position: relative;
+}
+
 .admin-sidebar__nav-item {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.7em;
   width: 100%;
@@ -4007,6 +4011,41 @@ body {
   cursor: pointer;
   text-align: start;
   transition: background-color 140ms ease-out;
+}
+
+.admin-sidebar__visibility-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-nav-text-muted);
+}
+
+.admin-sidebar__visibility-tooltip {
+  position: absolute;
+  z-index: 2;
+  inset-inline-end: var(--space-2);
+  inset-block-start: 50%;
+  transform: translateY(-50%);
+  max-width: calc(100% - var(--space-4));
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid rgba(232, 227, 211, 0.25);
+  border-radius: 4px;
+  background: var(--color-sidebar-bg);
+  color: var(--color-nav-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 120ms ease-out;
+}
+
+.admin-sidebar__nav-item:hover + .admin-sidebar__visibility-tooltip,
+.admin-sidebar__nav-item:focus-visible + .admin-sidebar__visibility-tooltip {
+  opacity: 1;
+  visibility: visible;
 }
 
 .admin-sidebar__nav-item:hover,
@@ -4180,6 +4219,16 @@ body {
   justify-content: center;
   padding: 10px 0;
   gap: 0;
+}
+
+.sidebar--collapsed .admin-sidebar__visibility-marker {
+  position: absolute;
+  inset-block-start: 5px;
+  inset-inline-end: 5px;
+}
+
+.sidebar--collapsed .admin-sidebar__visibility-tooltip {
+  display: none;
 }
 
 .sidebar--collapsed .admin-sidebar__nav-icon {

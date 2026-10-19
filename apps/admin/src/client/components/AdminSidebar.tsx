@@ -16,9 +16,11 @@ import {
   CloudArrowDown,
   ClipboardText,
   DownloadSimple,
+  EyeSlash,
   Flag,
   ShieldCheck,
   Sparkle,
+  Student,
   Users,
   UserPlus,
   ChalkboardTeacher,
@@ -43,6 +45,9 @@ export type AdminSidebarProps = {
   onNavigate: (key: AdminNavKey) => void;
   onNewHomework: () => void;
   onNewLLMConfig: () => void;
+  /** Opens the selected course in the student-facing workspace. Undefined
+      when there is no author-owned selected course to preview. */
+  onViewAsStudent: (() => void) | undefined;
   /** #172: false for a TA, who may read this console but not author in it.
      The QUICK ACTIONS block and any authoring-only nav entry are omitted
      rather than shown disabled -- a disabled control still advertises an
@@ -124,6 +129,7 @@ export function AdminSidebar({
   onNavigate,
   onNewHomework,
   onNewLLMConfig,
+  onViewAsStudent,
   canAuthor,
   isSuperAdmin,
   isCollapsed = false,
@@ -160,6 +166,8 @@ export function AdminSidebar({
             (item) => (canAuthor || !item.authorOnly) && (isSuperAdmin || !item.superAdminOnly),
           ).map((item) => {
             const isActive = item.key === active;
+            const visibilityDescriptionId = `admin-nav-${item.key}-visibility`;
+            const collapsedLabel = `${item.label} — Only instructor viewable`;
             return (
               <li key={item.key}>
                 <button
@@ -171,8 +179,9 @@ export function AdminSidebar({
                   }
                   onClick={() => onNavigate(item.key)}
                   aria-current={isActive ? "page" : undefined}
-                  aria-label={isCollapsed ? item.label : undefined}
-                  title={isCollapsed ? item.label : undefined}
+                  aria-describedby={visibilityDescriptionId}
+                  aria-label={isCollapsed ? collapsedLabel : undefined}
+                  title={isCollapsed ? collapsedLabel : undefined}
                 >
                   <span className="admin-sidebar__nav-icon" aria-hidden="true">
                     {item.icon}
@@ -181,7 +190,17 @@ export function AdminSidebar({
                     <span className="admin-sidebar__nav-label">{item.label}</span>
                     <span className="admin-sidebar__nav-desc">{item.description}</span>
                   </span>
+                  <span className="admin-sidebar__visibility-marker" aria-hidden="true">
+                    <EyeSlash size={14} weight="regular" />
+                  </span>
                 </button>
+                <span
+                  id={visibilityDescriptionId}
+                  className="admin-sidebar__visibility-tooltip"
+                  role="tooltip"
+                >
+                  Only instructor viewable
+                </span>
               </li>
             );
           })}
@@ -194,6 +213,18 @@ export function AdminSidebar({
 
           <div className="admin-sidebar__quick">
             <div className="admin-sidebar__quick-label">QUICK ACTIONS</div>
+            {onViewAsStudent && (
+              <button
+                type="button"
+                className="admin-sidebar__quick-action"
+                onClick={onViewAsStudent}
+                aria-label={isCollapsed ? "Student view" : undefined}
+                title={isCollapsed ? "Student view" : undefined}
+              >
+                <Student size={13} weight="bold" aria-hidden="true" />
+                <span className="admin-sidebar__quick-action-label">Student view</span>
+              </button>
+            )}
             <button
               type="button"
               className="admin-sidebar__quick-action"
