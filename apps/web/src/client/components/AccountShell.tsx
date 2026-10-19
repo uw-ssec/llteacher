@@ -43,14 +43,16 @@ export function Eyebrow({ children, id }: { children: ReactNode; id?: string }) 
 
 const ROLE_LABEL: Record<CourseMembershipSummary["role"], string> = { instructor: "Instructor", ta: "TA", admin: "Admin", student: "Student", observer: "Observer" };
 
-export function instructorConsoleUrl(): string | undefined {
-  const configuredUrl = import.meta.env.VITE_ADMIN_URL as string | undefined;
-  // The two local development pairs; deployments set their console URL explicitly.
+export function instructorConsoleUrl(
+  configuredUrl = import.meta.env.VITE_ADMIN_URL as string | undefined,
+  origin = window.location.origin,
+): string {
+  // The two local development pairs; production serves the console at /admin/.
   const localPorts: Record<string, string> = { "2311": "2312", "2411": "2412" };
-  const url = new URL(window.location.origin);
+  const url = new URL(origin);
   const localPort = ["localhost", "127.0.0.1"].includes(url.hostname) ? localPorts[url.port] : undefined;
   if (localPort) url.port = localPort;
-  return configuredUrl || (localPort ? url.origin : undefined);
+  return configuredUrl || (localPort ? url.origin : new URL("/admin/", url).toString());
 }
 
 export function StaffHome({ previewUnavailable = false }: { previewUnavailable?: boolean }) {
