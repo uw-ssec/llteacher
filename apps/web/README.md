@@ -240,9 +240,21 @@ a retryable explanation. Generated text identifies the OCR model; equations,
 tables, and unclear text should be checked against the original scan.
 
 Set `VITE_ADMIN_URL` in the frontend build environment to the instructor console's
-public URL. Staff-only accounts see a teaching workspace link instead of fetching
-student homework. Local ports 2311/2312 and 2411/2412 are paired automatically.
-Accounts with both staff and student memberships retain access to student homework.
+public URL. Staff-only accounts normally land on the teaching workspace, while the
+console's **Student view** action opens `/?view=student&courseId=<uuid>` for the
+selected course. The web app accepts that preview only when the signed-in caller has
+an `instructor` or course `admin` membership for the exact course ID; it never falls
+back to another course and never impersonates a student. Local ports 2311/2312 and
+2411/2412 are paired automatically. Accounts with both staff and student memberships
+stay in their ordinary student workspace unless they deliberately request a valid
+author preview.
+
+Instructor preview reuses the student-visible homework projection but keeps the
+instructor's identity. Tutor chats and homework-section chats are therefore owned by
+the instructor; section conversations are recorded as teacher tests. Submit,
+self-assessment, and response-feedback controls are omitted so preview activity does
+not create student submissions or assessment records. Tutor chats remain available
+when the course has no currently visible homework.
 
 ### Instructor Markdown cleanup
 

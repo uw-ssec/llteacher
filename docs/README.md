@@ -10,6 +10,11 @@ Documentation for the LLTeacher v2 port and platform-generalization work. Source
 | [`design-system/`](./design-system/README.md) | v2 design system: principles, tokens, components, aesthetic spec |
 | [`superpowers/plans/`](./superpowers/plans/) | Implementation plans — dated `YYYY-MM-DD-<topic>.md`, executed task-by-task |
 
+## Current review artifacts
+
+- [Instructor Student View and Tutor Chat design](./superpowers/specs/2026-10-19-instructor-student-view-and-tutor-chat-design.md)
+- [Instructor Student View and Tutor Chat implementation plan](./superpowers/plans/2026-10-19-instructor-student-view-and-tutor-chat.md)
+
 ## Onboarding guides
 
 - [Superadmin Guide to Onboarding Instructors](./superadmin-instructor-onboarding.md)

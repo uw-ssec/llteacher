@@ -115,6 +115,33 @@ Two intentional differences from the student sidebar:
 
 Accessibility: `aria-label` and native `title` give the textual label as a tooltip fallback when the visible text is hidden. `aria-expanded` on the toggle button mirrors the state.
 
+### Console-only markers and Student view
+
+Every rendered console destination carries a right-aligned `EyeSlash` marker. In
+expanded navigation, hover or keyboard focus reveals the exact explanation **Only
+instructor viewable**, and each row references the same assistive description. In
+collapsed navigation, the phrase is included in both the accessible name and native
+title. The marker describes the destination; it does not grant access or change the
+existing `authorOnly` and `superAdminOnly` filters. A TA therefore sees the marker on
+the console pages the TA could already open, but does not gain author-only pages.
+
+Authors also receive a separate **Student view** quick action for the selected course.
+It is intentionally unmarked because it leaves the console and opens the student app
+at `/?view=student&courseId=<course-id>`. The student app validates that exact ID
+against the signed-in user's `instructor` or course `admin` memberships. A missing,
+malformed, unrelated, TA-only, observer, or student-only request fails closed; it
+never substitutes the first staff course.
+
+Student view is a preview as the instructor's own identity, never impersonation. It
+uses the same published/released homework projection students receive, while tutor
+chats remain owner-scoped to the instructor and section conversations retain the
+server-derived `isTeacherTest` flag. The persistent preview notice makes this boundary
+visible and links back to the console. Submit, self-assessment, section-answer, and
+response-feedback controls are not offered, so the preview cannot create student
+submission or assessment records. Tutor chats still work for a course with zero
+visible homework because course context comes from the validated membership rather
+than the first homework row.
+
 ## TopNav admin mode
 
 The shared `<TopNav>` in `packages/ui/src/components/TopNav.tsx` gained one prop:
