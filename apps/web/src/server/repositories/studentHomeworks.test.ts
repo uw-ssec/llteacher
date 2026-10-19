@@ -1,5 +1,10 @@
-import { describe, it, expect } from "vitest";
-import { deriveSectionStatus, getStudentHomeworksForUser } from "./studentHomeworks";
+import { describe, it, expect, vi } from "vitest";
+import type { Db } from "../../db/client";
+import {
+  deriveSectionStatus,
+  getInstructorStudentViewHomeworks,
+  getStudentHomeworksForUser,
+} from "./studentHomeworks";
 
 describe("deriveSectionStatus", () => {
   const future = new Date("2099-01-01");
@@ -40,6 +45,44 @@ describe("deriveSectionStatus", () => {
   });
 });
 
+describe("getInstructorStudentViewHomeworks", () => {
+  it("queries the exact trusted course scope without requiring a student membership", async () => {
+    const courseId = "11111111-2222-4333-8444-555555555555";
+    const findMemberships = vi.fn(() => {
+      throw new Error("the instructor preview must not load student memberships");
+    });
+    const findHomeworks = vi.fn(async (config: {
+      where: (
+        homework: { courseId: string },
+        operators: { inArray: (column: string, values: string[]) => unknown },
+      ) => unknown;
+    }) => {
+      const clause = config.where(
+        { courseId: "homeworks.course_id" },
+        { inArray: (column, values) => ({ column, values }) },
+      );
+      expect(clause).toEqual({ column: "homeworks.course_id", values: [courseId] });
+      return [];
+    });
+    const db = {
+      query: {
+        courseMemberships: { findMany: findMemberships },
+        homeworks: { findMany: findHomeworks },
+      },
+    } as unknown as Db;
+
+    const result = await getInstructorStudentViewHomeworks(
+      db,
+      unsafeCourseScope(courseId),
+      "instructor-user",
+    );
+
+    expect(result).toEqual([]);
+    expect(findMemberships).not.toHaveBeenCalled();
+    expect(findHomeworks).toHaveBeenCalledTimes(1);
+  });
+});
+
 // Real-DB integration test, gated like Phase 1's real-DB suite (skips if
 // DATABASE_URL isn't set locally; always runs in CI per turbo.json's
 // declared env).
@@ -53,6 +96,89 @@ import { unsafeOrgScope } from "./scope";
 import { submitWidgetResponse } from "./progressWidgets";
 
 describe.skipIf(!process.env.DATABASE_URL)("getStudentHomeworksForUser (real DB)", () => {
+  it("scopes instructor preview to visible homework and caller-owned teacher-test state", async () => {
+    const db = makeNodeDb(process.env.DATABASE_URL!);
+    const [org] = await db.insert(organizations).values({
+      slug: `preview-${crypto.randomUUID()}`,
+      name: "Instructor Preview Org",
+      workosOrganizationId: `wo-preview-${crypto.randomUUID()}`,
+    }).returning();
+    const [courseA] = await db.insert(courses).values({
+      organizationId: org!.id, code: "PREVIEW-A", term: "Test", title: "Preview A",
+    }).returning();
+    const [courseB] = await db.insert(courses).values({
+      organizationId: org!.id, code: "PREVIEW-B", term: "Test", title: "Preview B",
+    }).returning();
+    const newUser = async () => (await db.insert(users).values({
+      email: crypto.getRandomValues(new Uint8Array(32)) as never,
+      emailBlindIndex: crypto.getRandomValues(new Uint8Array(32)) as never,
+    }).returning())[0]!;
+    const instructor = await newUser();
+    const otherUser = await newUser();
+    const [membershipA] = await db.insert(courseMemberships).values({
+      userId: instructor.id, courseId: courseA!.id, role: "instructor",
+    }).returning();
+    const [membershipB] = await db.insert(courseMemberships).values({
+      userId: instructor.id, courseId: courseB!.id, role: "instructor",
+    }).returning();
+    const scopeA = unsafeCourseScope(courseA!.id);
+    const scopeB = unsafeCourseScope(courseB!.id);
+    const visibleA = await createHomework(db, scopeA, {
+      createdById: membershipA!.id,
+      title: "Visible A",
+      description: "student-visible",
+      dueDate: new Date("2099-01-01"),
+    });
+    const draftA = await createHomework(db, scopeA, {
+      createdById: membershipA!.id,
+      title: "Draft A",
+      description: "unreleased",
+      dueDate: new Date("2099-01-01"),
+    });
+    const visibleB = await createHomework(db, scopeB, {
+      createdById: membershipB!.id,
+      title: "Visible B",
+      description: "other course",
+      dueDate: new Date("2099-01-01"),
+    });
+    await updateHomeworkPublishState(db, scopeA, visibleA!.id, {
+      publish: true, releasedAt: new Date("2020-01-01"),
+    });
+    await updateHomeworkPublishState(db, scopeB, visibleB!.id, {
+      publish: true, releasedAt: new Date("2020-01-01"),
+    });
+    await updateHomework(db, scopeA, visibleA!.id, {
+      sections: [{ title: "Preview section", content: "c", order: 1 }],
+    });
+    const section = (await getHomeworkById(db, scopeA, visibleA!.id))!.sections[0]!;
+    const [ownConversation] = await db.insert(conversations).values({
+      ownerUserId: instructor.id,
+      courseId: courseA!.id,
+      sectionId: section.id,
+      kind: "section",
+      title: "Instructor test",
+      isTeacherTest: true,
+    }).returning();
+    await db.insert(conversations).values({
+      ownerUserId: otherUser.id,
+      courseId: courseA!.id,
+      sectionId: section.id,
+      kind: "section",
+      title: "Someone else's test",
+      isTeacherTest: true,
+    });
+
+    const result = await getInstructorStudentViewHomeworks(db, scopeA, instructor.id);
+
+    expect(result.map((homework) => homework.title)).toEqual(["Visible A"]);
+    expect(result[0]!.courseId).toBe(courseA!.id);
+    expect(result[0]!.sections[0]!.conversationId).toBe(ownConversation!.id);
+    expect(result.some((homework) => homework.id === draftA!.id)).toBe(false);
+    expect(result.some((homework) => homework.id === visibleB!.id)).toBe(false);
+
+    await db.delete(organizations).where(eq2(organizations.id, org!.id));
+  });
+
   it("only returns homeworks for courses the student is enrolled in, excludes drafts, ignores soft-deleted conversations", async () => {
     const db = makeNodeDb(process.env.DATABASE_URL!);
     const [org] = await db.insert(organizations).values({
