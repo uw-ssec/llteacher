@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { UIMessage } from "ai";
-import { useNavigate } from "react-router";
-import { Sidebar, TopNav, ConversationView, AlertDialog, Button, ErrorBoundary } from "@llteacher/ui";
+import { useNavigate, useSearchParams } from "react-router";
+import { Sidebar, TopNav, ConversationView, AlertDialog, Button, ErrorBoundary, AUTHOR_ROLES } from "@llteacher/ui";
 import type { RCodeResult } from "@llteacher/ui";
 import { useRExecution } from "./hooks/useRExecution";
 import { useAuth } from "./components/AuthProvider";
-import { AccountShell, StaffHome } from "./components/AccountShell";
+import { AccountShell, StaffHome, instructorConsoleUrl } from "./components/AccountShell";
 import { UnauthenticatedHome } from "./components/UnauthenticatedHome";
 import { ResponseFeedback } from "./components/ResponseFeedback";
 import { TutorConversationsList } from "./views/TutorConversationsList";
 import { useTutorConversations } from "./hooks/useTutorConversations";
-import { useStudentHomework } from "./hooks/useStudentHomework";
+import { useStudentHomework, type InstructorPreviewCourse } from "./hooks/useStudentHomework";
 import { SelfAssessmentCheck, type SelfAssessmentPhase } from "./components/SelfAssessmentCheck";
 import { useConversationSurface, toChatResponseError } from "./hooks/useConversationSurface";
 import { trackTutorTurnCompletion } from "./hooks/trackTutorTurnCompletion";
@@ -151,28 +151,45 @@ function formatRExecutionMessage(code: string, result: RCodeResult): string {
    ========================================================================== */
 
 export default function App() {
-  const { loading, isAuthenticated, staffOnly } = useAuth();
+  const { loading, isAuthenticated, staffOnly, staffCourses } = useAuth();
+  const [searchParams] = useSearchParams();
   if (loading) return null;
-  if (isAuthenticated && staffOnly) return <AccountShell title="Teaching"><StaffHome /></AccountShell>;
+  const previewRequested = searchParams.get("view") === "student";
+  const requestedCourseId = searchParams.get("courseId");
+  const previewCourse = previewRequested && requestedCourseId
+    ? staffCourses.find((course) => course.id === requestedCourseId
+      && (AUTHOR_ROLES as readonly string[]).includes(course.role))
+    : undefined;
+  if (isAuthenticated && previewCourse) {
+    return <StudentWorkspace key={previewCourse.id} previewCourse={previewCourse} />;
+  }
+  if (isAuthenticated && staffOnly) {
+    return (
+      <AccountShell title="Teaching">
+        <StaffHome previewUnavailable={previewRequested} />
+      </AccountShell>
+    );
+  }
   return <StudentWorkspace />;
 }
 
 type NavigationView = "overview" | "homework" | "tutor";
 
-function StudentWorkspace() {
-  const homework = useStudentHomework();
+function StudentWorkspace({ previewCourse }: { previewCourse?: InstructorPreviewCourse }) {
+  const homework = useStudentHomework({ previewCourse });
   const [navigationView, setNavigationView] = useState<NavigationView>("overview");
   const [tutorsExpanded, setTutorsExpanded] = useState(false);
   const [homeworksExpanded, setHomeworksExpanded] = useState(false);
   if (homework.loading) return <p role="status">Loading course…</p>;
   return <StudentApp key={homework.homeworkId ?? "loading"} homework={homework}
+    isInstructorPreview={Boolean(previewCourse)}
     navigationView={navigationView} onNavigate={setNavigationView}
     tutorsExpanded={tutorsExpanded} onToggleTutors={() => setTutorsExpanded((expanded) => !expanded)}
     homeworksExpanded={homeworksExpanded} onToggleHomeworks={() => setHomeworksExpanded((expanded) => !expanded)} />;
 }
 
 function StudentApp({ homework, navigationView, onNavigate, tutorsExpanded, onToggleTutors,
-  homeworksExpanded, onToggleHomeworks }: {
+  homeworksExpanded, onToggleHomeworks, isInstructorPreview }: {
   homework: ReturnType<typeof useStudentHomework>;
   navigationView: NavigationView;
   onNavigate: (view: NavigationView) => void;
@@ -180,6 +197,7 @@ function StudentApp({ homework, navigationView, onNavigate, tutorsExpanded, onTo
   onToggleTutors: () => void;
   homeworksExpanded: boolean;
   onToggleHomeworks: () => void;
+  isInstructorPreview: boolean;
 }) {
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -238,7 +256,8 @@ function StudentApp({ homework, navigationView, onNavigate, tutorsExpanded, onTo
     || [...sectionMetaByOrder.values()].some((m) => m.conversationId !== null);
   const allSectionsSubmitted = sections.length > 0 && sections.every((s) => s.status === "submitted");
   const selfAssessmentPhase: SelfAssessmentPhase | null =
-    !skippedSelfAssessment.pre && !homeworkStarted && widgets.some((w) => w.preValue === null)
+    isInstructorPreview ? null
+      : !skippedSelfAssessment.pre && !homeworkStarted && widgets.some((w) => w.preValue === null)
       ? "pre"
       : !skippedSelfAssessment.post && allSectionsSubmitted && widgets.some((w) => w.postValue === null)
         ? "post"
@@ -248,6 +267,7 @@ function StudentApp({ homework, navigationView, onNavigate, tutorsExpanded, onTo
     phase: SelfAssessmentPhase,
     values: Array<{ widgetId: string; value: number }>,
   ) => {
+    if (isInstructorPreview) return;
     // Sequential, one widget at a time: each call is its own upsert, and a
     // failure part-way leaves the ones already saved reflected below.
     for (const { widgetId, value } of values) {
@@ -1073,6 +1093,7 @@ function StudentApp({ homework, navigationView, onNavigate, tutorsExpanded, onTo
 
   /* Submits the section's active conversation via the real API. */
   const handleSubmit = async (sectionNumber: number) => {
+    if (isInstructorPreview) return;
     const meta = sectionMetaByOrder.get(sectionNumber);
     if (!meta?.conversationId) return; // no active conversation yet -- nothing to submit
     // Submission is the student's explicit completion signal; chat
@@ -1193,6 +1214,16 @@ function StudentApp({ homework, navigationView, onNavigate, tutorsExpanded, onTo
         onLogout={logout}
       />
 
+      {isInstructorPreview && (
+        <div className="instructor-preview-banner" role="status">
+          <div>
+            <strong>Student view</strong>
+            <span>You are viewing student-visible course content as yourself. Your chats remain instructor-owned.</span>
+          </div>
+          <a href={instructorConsoleUrl() ?? "/"}>Return to instructor console</a>
+        </div>
+      )}
+
       <div className="app-shell">
         {navigationView === "homework" && <Sidebar
           hwNumber={Math.max(1, homeworks.findIndex((hw) => hw.id === homeworkId) + 1)}
@@ -1203,7 +1234,7 @@ function StudentApp({ homework, navigationView, onNavigate, tutorsExpanded, onTo
           justSubmittedSection={justSubmittedSection}
           onBack={() => onNavigate("overview")}
           onSectionSelect={handleSectionSelect}
-          onSubmit={handleSubmit}
+          onSubmit={isInstructorPreview ? undefined : handleSubmit}
           workerStatus={workerStatus}
           workerLoading={workerLoading}
         />}
@@ -1342,7 +1373,7 @@ function StudentApp({ homework, navigationView, onNavigate, tutorsExpanded, onTo
               contextWindowSize={MAX_HISTORY_MESSAGES}
               onStop={sectionSurface.stop}
               renderAiFeedbackSlot={
-                conversationId
+                conversationId && !isInstructorPreview
                   ? (messageId) => <ResponseFeedback conversationId={conversationId} messageId={messageId} />
                   : undefined
               }

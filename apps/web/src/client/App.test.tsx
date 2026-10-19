@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { renderHook, render, screen, waitFor, cleanup, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useNavigate } from "react-router";
 import App, { useStudentHomework } from "./App";
 import { AuthProvider } from "./components/AuthProvider";
 
@@ -3911,6 +3911,263 @@ describe("staff landing", () => {
     render(<MemoryRouter><AuthProvider><App /></AuthProvider></MemoryRouter>);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/student/homeworks"));
     expect(screen.queryByText("Your teaching workspace")).toBeNull();
+  });
+
+  const authorCourse = {
+    id: "11111111-1111-4111-8111-111111111111",
+    title: "STAT 311 · Elements of Statistical Methods",
+    code: "STAT 311",
+    term: "Autumn 2026",
+    role: "instructor",
+    canViewSolutions: true,
+    canViewDrafts: true,
+  };
+
+  function PreviewNavigation({ courseId = authorCourse.id, label = "Open preview" }: { courseId?: string; label?: string }) {
+    const navigate = useNavigate();
+    return <button onClick={() => navigate(`/?view=student&courseId=${courseId}`)}>{label}</button>;
+  }
+
+  it("opens an exact author-owned course in Student view for a staff-only instructor", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/profile") return Response.json({ role: "instructor", courses: [authorCourse] });
+      if (url === `/api/courses/${authorCourse.id}/student-view/homeworks`) return Response.json({ homeworks: [] });
+      if (url === "/api/hello") return Response.json({ ping_id: "test-ping" });
+      if (url.startsWith(`/api/conversations?courseId=${authorCourse.id}`)) {
+        return Response.json({ items: [], nextCursor: null });
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={[`/?view=student&courseId=${authorCourse.id}`]}>
+        <AuthProvider><App /></AuthProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Student view")).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledWith(`/api/courses/${authorCourse.id}/student-view/homeworks`);
+    expect(screen.queryByText("Your teaching workspace")).toBeNull();
+  });
+
+  it.each([
+    ["missing course", "/?view=student"],
+    ["malformed course", "/?view=student&courseId=not-a-course"],
+    ["unrelated course", "/?view=student&courseId=22222222-2222-4222-8222-222222222222"],
+  ])("keeps %s requests on the teaching workspace without fetching preview data", async (_label, entry) => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => Response.json({ role: "instructor", courses: [authorCourse] }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryRouter initialEntries={[entry]}><AuthProvider><App /></AuthProvider></MemoryRouter>);
+    await screen.findByText("Your teaching workspace");
+    expect(screen.getByText(/Student view is unavailable/i)).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/student-view/homeworks"))).toBe(false);
+  });
+
+  it.each(["ta", "student"])("does not admit a %s membership to Student view", async (role) => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => Response.json({
+      role: role === "student" ? "instructor" : role,
+      courses: [{ ...authorCourse, role }],
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <MemoryRouter initialEntries={[`/?view=student&courseId=${authorCourse.id}`]}>
+        <AuthProvider><App /></AuthProvider>
+      </MemoryRouter>,
+    );
+    await screen.findByText("Your teaching workspace");
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/student-view/homeworks"))).toBe(false);
+  });
+
+  it("keeps a mixed-role user in the ordinary student workspace until an author preview is requested", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    const requested: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      requested.push(url);
+      if (url === "/api/profile") return Response.json({
+        role: "instructor",
+        courses: [authorCourse],
+        studentStats: { submissionsCount: 0, completedSections: 0 },
+      });
+      if (url === "/api/student/homeworks") return Response.json({ homeworks: [] });
+      if (url === `/api/courses/${authorCourse.id}/student-view/homeworks`) return Response.json({ homeworks: [] });
+      if (url === "/api/hello") return Response.json({ ping_id: "test-ping" });
+      if (url.startsWith("/api/conversations?")) return Response.json({ items: [], nextCursor: null });
+      throw new Error(`unexpected fetch to ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const user = userEvent.setup();
+    render(<MemoryRouter><PreviewNavigation /><AuthProvider><App /></AuthProvider></MemoryRouter>);
+    await waitFor(() => expect(requested).toContain("/api/student/homeworks"));
+    expect(requested).not.toContain(`/api/courses/${authorCourse.id}/student-view/homeworks`);
+
+    await user.click(screen.getByRole("button", { name: "Open preview" }));
+    expect(await screen.findByText("Student view")).toBeTruthy();
+    expect(requested).toContain(`/api/courses/${authorCourse.id}/student-view/homeworks`);
+  });
+
+  it("keeps tutor chats enabled for an empty preview course and scopes create/send to that course", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, init });
+      if (url === "/api/profile") return Response.json({ role: "instructor", courses: [authorCourse] });
+      if (url === `/api/courses/${authorCourse.id}/student-view/homeworks`) return Response.json({ homeworks: [] });
+      if (url === "/api/hello") return Response.json({ ping_id: "test-ping" });
+      if (url.startsWith(`/api/conversations?courseId=${authorCourse.id}&kind=tutor`)) {
+        return Response.json({ items: [], nextCursor: null });
+      }
+      if (url === "/api/conversations" && init?.method === "POST") {
+        return Response.json({ id: "preview-tutor", title: "New conversation", updatedAt: "2026-10-19T00:00:00Z" });
+      }
+      if (url === "/api/conversations/preview-tutor" && init?.method === "PATCH") {
+        return Response.json({ id: "preview-tutor", title: "How does variance work?", updatedAt: "2026-10-19T00:00:00Z", messageCount: 0 });
+      }
+      if (url === "/api/conversations/preview-tutor" && !init?.method) {
+        return Response.json({ id: "preview-tutor", title: "How does variance work?", updatedAt: "2026-10-19T00:00:00Z", messageCount: 2 });
+      }
+      if (url === "/api/chat") return chatStreamResponse("preview-tutor", "Here is an explanation.");
+      throw new Error(`unexpected fetch to ${url}`);
+    }));
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={[`/?view=student&courseId=${authorCourse.id}`]}>
+        <AuthProvider><App /></AuthProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Student view")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Return to instructor console" })).toBeTruthy();
+    const create = await screen.findByRole("button", { name: "New conversation" });
+    expect((create as HTMLButtonElement).disabled).toBe(false);
+    await user.click(create);
+    await user.type(await screen.findByLabelText("Message input"), "How does variance work?{Enter}");
+    expect(await screen.findByText("Here is an explanation.")).toBeTruthy();
+
+    const createRequest = requests.find(({ url, init }) => url === "/api/conversations" && init?.method === "POST");
+    expect(JSON.parse(String(createRequest?.init?.body))).toEqual({ courseId: authorCourse.id });
+    const chatRequest = requests.find(({ url }) => url === "/api/chat");
+    expect(JSON.parse(String(chatRequest?.init?.body))).toMatchObject({
+      conversationId: "preview-tutor",
+      courseId: authorCourse.id,
+    });
+  });
+
+  it("clears the first preview course while a second authorized course loads", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    const courseB = {
+      ...authorCourse,
+      id: "22222222-2222-4222-8222-222222222222",
+      code: "BIOL 180",
+      title: "Intro Biology",
+    };
+    let resolveCourseB!: (response: Response) => void;
+    const courseBResponse = new Promise<Response>((resolve) => { resolveCourseB = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/profile") return Response.json({ role: "instructor", courses: [authorCourse, courseB] });
+      if (url === `/api/courses/${authorCourse.id}/student-view/homeworks`) {
+        return Response.json(homeworkFixture({ courseId: authorCourse.id, title: "Course A homework" }));
+      }
+      if (url === `/api/courses/${courseB.id}/student-view/homeworks`) return courseBResponse;
+      if (url === "/api/hello") return Response.json({ ping_id: "test-ping" });
+      if (url.startsWith(`/api/conversations?courseId=${authorCourse.id}`)) {
+        return Response.json({ items: [{ id: "course-a-chat", title: "Course A chat", updatedAt: "2026-10-19T00:00:00Z", messageCount: 1 }], nextCursor: null });
+      }
+      if (url.startsWith(`/api/conversations?courseId=${courseB.id}`)) {
+        return Response.json({ items: [], nextCursor: null });
+      }
+      if (url.endsWith("/hints")) return Response.json({ used: 0, limit: null });
+      throw new Error(`unexpected fetch to ${url}`);
+    }));
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={[`/?view=student&courseId=${authorCourse.id}`]}>
+        <PreviewNavigation courseId={courseB.id} label="Open second preview" />
+        <AuthProvider><App /></AuthProvider>
+      </MemoryRouter>,
+    );
+    await user.click(await screen.findByRole("button", { name: "Tutor Chats" }));
+    expect(await screen.findByRole("button", { name: "Select conversation: Course A chat" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Open second preview" }));
+    expect(screen.queryByText("Course A homework")).toBeNull();
+    expect(screen.queryByText("Course A chat")).toBeNull();
+
+    resolveCourseB(Response.json({ homeworks: [] }));
+    expect(await screen.findByRole("heading", { name: "BIOL 180 · Intro Biology" })).toBeTruthy();
+  });
+
+  it("keeps section chat enabled in preview while suppressing student record controls", async () => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const neverFinishes = new Promise<Response>(() => {});
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, init });
+      if (url === "/api/profile") return Response.json({ role: "instructor", courses: [authorCourse] });
+      if (url === `/api/courses/${authorCourse.id}/student-view/homeworks`) {
+        const payload = homeworkFixture({ courseId: authorCourse.id, courseName: authorCourse.title });
+        return Response.json({
+          homeworks: payload.homeworks.map((homework) => ({
+            ...homework,
+            widgets: [{
+              id: "preview-widget",
+              prePrompt: "How confident are you before starting?",
+              postPrompt: "How confident are you now?",
+              order: 1,
+              preValue: null,
+              postValue: null,
+            }],
+          })),
+        });
+      }
+      if (url === "/api/hello") return Response.json({ ping_id: "test-ping" });
+      if (url.startsWith(`/api/conversations?courseId=${authorCourse.id}&kind=tutor`)) {
+        return Response.json({ items: [], nextCursor: null });
+      }
+      if (url === `/api/courses/${authorCourse.id}/sections/s1/conversations` && init?.method === "POST") {
+        return neverFinishes;
+      }
+      if (url.endsWith("/hints")) return Response.json({ used: 0, limit: null });
+      if (url === "/api/conversations/preview-section/messages?limit=200") return Response.json([]);
+      if (url === "/api/chat") return chatStreamResponse("preview-section", "Keep exploring.");
+      throw new Error(`unexpected fetch to ${url}`);
+    }));
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={[`/?view=student&courseId=${authorCourse.id}`]}>
+        <AuthProvider><App /></AuthProvider>
+      </MemoryRouter>,
+    );
+    await user.click(await screen.findByRole("button", { name: "Homeworks" }));
+    await user.click(await screen.findByRole("button", { name: "HW 3" }));
+    expect(screen.queryByRole("button", { name: /Submit section/i })).toBeNull();
+    expect(screen.queryByText(/How confident/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Flag this response/i })).toBeNull();
+
+    await user.type(await screen.findByLabelText("Message input"), "Let me test this{Enter}");
+    await waitFor(() => expect(requests.some(({ url }) => url === "/api/chat")).toBe(true));
+    const chatRequest = requests.find(({ url }) => url === "/api/chat");
+    expect(JSON.parse(String(chatRequest?.init?.body))).toMatchObject({
+      courseId: authorCourse.id,
+      kind: "section",
+      sectionId: "s1",
+    });
+    expect(requests.some(({ url }) => url.includes("/submit") || url.includes("/response"))).toBe(false);
   });
 });
 

@@ -168,17 +168,19 @@ export function Sidebar({
             told a sighted student nothing the button label did not already say
             -- decorative filler under a real label, which also forced the
             two-line body and the optical-alignment fudge on the icon. */}
-        <button
-          className="submit-action"
-          type="button"
-          onClick={() => onSubmit?.(currentSection)}
-          aria-label={`Submit section ${currentSection} for grading`}
-        >
-          <span className="submit-action__arrow" aria-hidden="true">
-            <PaperPlaneTilt size={14} weight="regular" />
-          </span>
-          <span className="submit-action__label">Submit Section {currentSection}</span>
-        </button>
+        {onSubmit ? (
+          <button
+            className="submit-action"
+            type="button"
+            onClick={() => onSubmit(currentSection)}
+            aria-label={`Submit section ${currentSection} for grading`}
+          >
+            <span className="submit-action__arrow" aria-hidden="true">
+              <PaperPlaneTilt size={14} weight="regular" />
+            </span>
+            <span className="submit-action__label">Submit Section {currentSection}</span>
+          </button>
+        ) : null}
       </div>
 
       {/* Push worker status to the bottom */}

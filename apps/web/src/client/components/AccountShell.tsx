@@ -53,7 +53,7 @@ export function instructorConsoleUrl(): string | undefined {
   return configuredUrl || (localPort ? url.origin : undefined);
 }
 
-export function StaffHome() {
+export function StaffHome({ previewUnavailable = false }: { previewUnavailable?: boolean }) {
   const { staffCourses } = useAuth();
   const consoleUrl = instructorConsoleUrl();
   const count = staffCourses.length;
@@ -65,6 +65,11 @@ export function StaffHome() {
         <p className="account-lede">
           Homework, course materials and the tutor’s knowledge base are managed in the instructor console.
         </p>
+        {previewUnavailable ? (
+          <p className="account-notice" role="alert">
+            Student view is unavailable for that course. Choose Student view from a course where you are an instructor or admin.
+          </p>
+        ) : null}
         {consoleUrl ? (
           <a className="account-cta" href={consoleUrl}>
             Open the instructor console

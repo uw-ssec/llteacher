@@ -640,6 +640,46 @@ body {
     background-color: var(--color-bg);
   }
 
+  .instructor-preview-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-6);
+    flex-shrink: 0;
+    padding: var(--space-3) var(--space-6);
+    border-bottom: 1px solid var(--raw-accent-warm);
+    background: var(--raw-accent-faint);
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-sm);
+  }
+
+  .instructor-preview-banner div {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  .instructor-preview-banner strong {
+    color: var(--color-text);
+    white-space: nowrap;
+  }
+
+  .instructor-preview-banner a {
+    color: var(--color-accent);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+  }
+
+  @media (max-width: 40rem) {
+    .instructor-preview-banner,
+    .instructor-preview-banner div {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: var(--space-2);
+    }
+  }
+
   /* #299: <main id="conversation-main"> wraps the conversation column so
      it's a reachable landmark (see the skip link above it in App.tsx) --
      display: contents makes the wrapper invisible to .app-shell's flex

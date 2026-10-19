@@ -72,6 +72,15 @@
   color: var(--color-text-muted);
 }
 
+.account-notice {
+  margin: 0 0 var(--space-6);
+  padding: var(--space-4);
+  border-left: 3px solid var(--raw-accent-warm);
+  background: var(--raw-accent-faint);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
 .account-content p a {
   color: var(--color-accent);
   text-decoration: underline;
