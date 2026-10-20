@@ -68,20 +68,16 @@ export function StaffHome({ previewUnavailable = false }: { previewUnavailable?:
           Homework, course materials and the tutor’s knowledge base are managed in the instructor console.
         </p>
         {previewUnavailable ? (
-          <p className="account-notice" role="alert">
+          <p className="account-notice">
             Student view is unavailable for that course. Choose Student view from a course where you are an instructor or admin.
           </p>
         ) : null}
-        {consoleUrl ? (
           <a className="account-cta" href={consoleUrl}>
             Open the instructor console
             <svg className="account-cta__arrow" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
               <path d="M3 10h13M11 5l5 5-5 5" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </a>
-        ) : (
-          <p className="account-note">Use your institution’s instructor console link to open your teaching workspace.</p>
-        )}
       </header>
 
       <section className="staff-home__ledger" aria-labelledby="staff-courses">

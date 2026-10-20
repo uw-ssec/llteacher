@@ -9,7 +9,7 @@ const props = {
   onNavigate: vi.fn(),
   onNewHomework: vi.fn(),
   onNewLLMConfig: vi.fn(),
-  onViewAsStudent: undefined,
+  studentViewUrl: undefined,
   isSuperAdmin: false,
 };
 
@@ -131,13 +131,13 @@ describe("AdminSidebar console-only navigation markers", () => {
     expect(destinations.length).toBeGreaterThan(3);
     for (const destination of destinations) {
       expect(destination.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
-      const descriptionId = destination.getAttribute("aria-describedby");
-      expect(descriptionId).toBeTruthy();
-      expect(document.getElementById(descriptionId!)?.textContent).toBe("Only instructor viewable");
+      expect(destination.getAttribute("aria-describedby")).toBeNull();
     }
 
     expect(screen.getByText("Homeworks").closest("button")?.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
     expect(screen.getByText("LLM configs").closest("button")?.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+    expect(nav.getAttribute("aria-describedby")).toBe("admin-navigation-visibility");
+    expect(screen.getByText("Console pages are not visible to students.")).toBeTruthy();
   });
 
   it("keeps role filtering separate from the marker", () => {
@@ -149,41 +149,48 @@ describe("AdminSidebar console-only navigation markers", () => {
     expect(screen.queryByText("LLM configs")).toBeNull();
   });
 
-  it("associates the tooltip with hover and keyboard focus on the destination", () => {
+  it("reveals the tooltip on hover and focus, dismisses it with Escape, and keeps it dismissed until focus leaves", () => {
     render(<AdminSidebar {...props} canAuthor />);
     const homeworks = screen.getByText("Homeworks").closest("button")!;
-    const tooltipId = homeworks.getAttribute("aria-describedby")!;
-
+    expect(screen.queryByText("Not visible to students")).toBeNull();
     fireEvent.mouseEnter(homeworks);
-    expect(document.getElementById(tooltipId)?.getAttribute("role")).toBe("tooltip");
-    expect(document.getElementById(tooltipId)?.textContent).toBe("Only instructor viewable");
-
-    homeworks.focus();
-    expect(document.activeElement).toBe(homeworks);
+    expect(screen.getByText("Not visible to students").getAttribute("aria-hidden")).toBe("true");
+    fireEvent.keyDown(homeworks, { key: "Escape" });
+    expect(screen.queryByText("Not visible to students")).toBeNull();
+    fireEvent.mouseLeave(homeworks.closest("li")!);
+    fireEvent.focus(homeworks);
+    expect(screen.getByText("Not visible to students")).toBeTruthy();
+    fireEvent.keyDown(homeworks, { key: "Escape" });
+    fireEvent.mouseEnter(homeworks);
+    expect(screen.queryByText("Not visible to students")).toBeNull();
+    fireEvent.blur(homeworks);
+    fireEvent.mouseLeave(homeworks.closest("li")!);
+    fireEvent.focus(homeworks);
+    expect(screen.getByText("Not visible to students")).toBeTruthy();
     expect(homeworks.querySelector(".admin-sidebar__visibility-marker")?.getAttribute("aria-hidden")).toBe("true");
   });
 
-  it("includes the explanation in collapsed names and native tooltips", () => {
+  it("keeps collapsed names concise and explains console visibility once at nav level", () => {
     render(<AdminSidebar {...props} canAuthor isCollapsed />);
 
     const homeworks = screen.getByRole("button", {
-      name: "Homeworks — Only instructor viewable",
+      name: "Homeworks",
     });
-    expect(homeworks.getAttribute("title")).toBe("Homeworks — Only instructor viewable");
+    expect(homeworks.getAttribute("title")).toBe("Homeworks");
+    expect(homeworks.getAttribute("aria-describedby")).toBeNull();
   });
 
   it("shows an unmarked Student view action only to authors", () => {
-    const onViewAsStudent = vi.fn();
+    const studentViewUrl = "http://localhost:2311/?view=student&courseId=course-a";
     const author = render(
-      <AdminSidebar {...props} canAuthor onViewAsStudent={onViewAsStudent} />,
+      <AdminSidebar {...props} canAuthor studentViewUrl={studentViewUrl} />,
     );
-    const studentView = screen.getByRole("button", { name: "Student view" });
+    const studentView = screen.getByRole("link", { name: "Student view" });
     expect(studentView.querySelector(".admin-sidebar__visibility-marker")).toBeNull();
-    fireEvent.click(studentView);
-    expect(onViewAsStudent).toHaveBeenCalledTimes(1);
+    expect(studentView.getAttribute("href")).toBe(studentViewUrl);
     author.unmount();
 
-    render(<AdminSidebar {...props} canAuthor={false} onViewAsStudent={onViewAsStudent} />);
-    expect(screen.queryByRole("button", { name: "Student view" })).toBeNull();
+    render(<AdminSidebar {...props} canAuthor={false} studentViewUrl={studentViewUrl} />);
+    expect(screen.queryByRole("link", { name: "Student view" })).toBeNull();
   });
 });

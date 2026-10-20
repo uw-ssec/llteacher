@@ -45,7 +45,7 @@ import { KnowledgeView } from "./views/KnowledgeView";
 import { KnowledgeDocumentView } from "./views/KnowledgeDocumentView";
 import { apiClient, setUnauthorizedHandler } from "./lib/api-client";
 import { useApiResource } from "./lib/useApiResource";
-import { openStudentApp } from "./lib/studentAppUrl";
+import { studentAppUrl } from "./lib/studentAppUrl";
 import { useAuth, type CourseRole } from "./components/AuthProvider";
 import { UnauthenticatedAdmin } from "./components/UnauthenticatedAdmin";
 import { Forbidden } from "./components/Forbidden";
@@ -414,9 +414,9 @@ export default function App() {
           onToggleCollapse={() => setIsSidebarCollapsed((c) => !c)}
           canAuthor={canAuthor}
           isSuperAdmin={isSuperAdmin}
-          onViewAsStudent={
+          studentViewUrl={
             canAuthor && CURRENT_COURSE_ID
-              ? () => openStudentApp(CURRENT_COURSE_ID)
+              ? studentAppUrl(CURRENT_COURSE_ID)
               : undefined
           }
           onNewHomework={() => setView({ kind: "create-homework" })}

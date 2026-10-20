@@ -199,7 +199,7 @@ export async function deleteHomework(db: Db, scope: CourseScope, id: string) {
 }
 
 /** Cheap existence check (#94) for the unpublish-with-activity warning:
- *  does any conversation exist for any of this homework's sections? An
+ *  does any non-teacher-test conversation exist for this homework's sections? An
  *  EXISTS-shaped `limit(1)` query, not a full fetch -- the route layer only
  *  needs a boolean, not the rows themselves. */
 export async function homeworkHasStudentActivity(db: Db, homeworkId: string): Promise<boolean> {
@@ -207,7 +207,7 @@ export async function homeworkHasStudentActivity(db: Db, homeworkId: string): Pr
     .select({ id: conversations.id })
     .from(conversations)
     .innerJoin(sections, eq(conversations.sectionId, sections.id))
-    .where(eq(sections.homeworkId, homeworkId))
+    .where(and(eq(sections.homeworkId, homeworkId), eq(conversations.isTeacherTest, false)))
     .limit(1);
   return !!row;
 }

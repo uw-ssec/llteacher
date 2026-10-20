@@ -647,8 +647,8 @@ body {
     gap: var(--space-6);
     flex-shrink: 0;
     padding: var(--space-3) var(--space-6);
-    border-bottom: 1px solid var(--raw-accent-warm);
-    background: var(--raw-accent-faint);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface);
     color: var(--color-text-secondary);
     font-size: var(--font-size-sm);
   }
@@ -666,6 +666,10 @@ body {
   }
 
   .instructor-preview-banner a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding-block: var(--space-1);
     color: var(--color-accent);
     font-weight: var(--weight-medium);
     white-space: nowrap;
@@ -4061,12 +4065,8 @@ body {
 }
 
 .admin-sidebar__visibility-tooltip {
-  position: absolute;
-  z-index: 2;
-  inset-inline-end: var(--space-2);
-  inset-block-start: 50%;
-  transform: translateY(-50%);
-  max-width: calc(100% - var(--space-4));
+  display: block;
+  margin: var(--space-1) var(--space-2);
   padding: var(--space-1) var(--space-2);
   border: 1px solid rgba(232, 227, 211, 0.25);
   border-radius: 4px;
@@ -4075,17 +4075,16 @@ body {
   font-family: var(--font-sans);
   font-size: var(--font-size-xs);
   line-height: 1.2;
-  white-space: nowrap;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition: opacity 120ms ease-out;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
-.admin-sidebar__nav-item:hover + .admin-sidebar__visibility-tooltip,
-.admin-sidebar__nav-item:focus-visible + .admin-sidebar__visibility-tooltip {
-  opacity: 1;
-  visibility: visible;
+.admin-sidebar__visibility-note {
+  padding-inline: var(--space-3);
+  margin-block-end: var(--space-2);
+  color: var(--color-nav-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
 }
 
 .admin-sidebar__nav-item:hover,

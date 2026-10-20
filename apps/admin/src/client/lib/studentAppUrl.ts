@@ -8,17 +8,10 @@ export function studentAppUrl(
   origin = window.location.origin,
 ): string {
   const url = new URL("/", origin);
-  const studentPort = STUDENT_PORT_BY_ADMIN_PORT[url.port];
+  const studentPort = ["localhost", "127.0.0.1"].includes(url.hostname)
+    ? STUDENT_PORT_BY_ADMIN_PORT[url.port] : undefined;
   if (studentPort) url.port = studentPort;
   url.searchParams.set("view", "student");
   url.searchParams.set("courseId", courseId);
   return url.toString();
-}
-
-export function openStudentApp(
-  courseId: string,
-  assign: (url: string) => void = (url) => window.location.assign(url),
-  origin = window.location.origin,
-): void {
-  assign(studentAppUrl(courseId, origin));
 }

@@ -3928,6 +3928,38 @@ describe("staff landing", () => {
     return <button onClick={() => navigate(`/?view=student&courseId=${courseId}`)}>{label}</button>;
   }
 
+  it.each([403, 503])("keeps preview identification and the console exit on a %s homework failure", async (status) => {
+    vi.stubGlobal("CSS", { supports: () => true });
+    Element.prototype.scrollIntoView = vi.fn();
+    let resolveHomework!: (response: Response) => void;
+    const pendingHomework = new Promise<Response>((resolve) => { resolveHomework = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/profile") return Response.json({ role: "instructor", courses: [authorCourse] });
+      if (url.includes("/student-view/homeworks")) return pendingHomework;
+      if (url === "/api/hello") return Response.json({ ping_id: "test-ping" });
+      return Response.json({ items: [], nextCursor: null });
+    }));
+    render(<MemoryRouter initialEntries={[`/?view=student&courseId=${authorCourse.id}`]}><AuthProvider><App /></AuthProvider></MemoryRouter>);
+    expect(await screen.findByRole("region", { name: "Student view" })).toBeTruthy();
+    expect(screen.getByText("Loading course…")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Return to instructor console" })).toBeTruthy();
+    resolveHomework(new Response(null, { status }));
+    await screen.findByRole("heading", { name: "Student view didn’t load" });
+    expect(screen.getByRole("region", { name: "Student view" })).toBeTruthy();
+    expect(screen.queryByText(/already submitted is saved/)).toBeNull();
+    expect(screen.getByText(status === 403
+      ? /access to this course may have changed/i : /course preview couldn’t be fetched/i)).toBeTruthy();
+  });
+
+  it("explains an invalid preview link to a mixed-role user instead of silently opening student work", async () => {
+    const fetchMock = vi.fn(async () => Response.json({ role: "instructor", courses: [authorCourse], studentStats: {} }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<MemoryRouter initialEntries={["/?view=student&courseId=unrelated"]}><AuthProvider><App /></AuthProvider></MemoryRouter>);
+    expect(await screen.findByText(/Student view is unavailable/)).toBeTruthy();
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/student/homeworks");
+  });
+
   it("opens an exact author-owned course in Student view for a staff-only instructor", async () => {
     vi.stubGlobal("CSS", { supports: () => true });
     Element.prototype.scrollIntoView = vi.fn();

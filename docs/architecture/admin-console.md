@@ -118,10 +118,11 @@ Accessibility: `aria-label` and native `title` give the textual label as a toolt
 ### Console-only markers and Student view
 
 Every rendered console destination carries a right-aligned `EyeSlash` marker. In
-expanded navigation, hover or keyboard focus reveals the exact explanation **Only
-instructor viewable**, and each row references the same assistive description. In
-collapsed navigation, the phrase is included in both the accessible name and native
-title. The marker describes the destination; it does not grant access or change the
+expanded navigation, hover or keyboard focus reveals **Not visible to students**
+below the row without covering content. Escape dismisses it until hover and focus
+leave. A visible nav-level note explains console visibility once to screen readers
+and touch users; collapsed rows keep concise accessible names and native titles.
+The marker describes the destination; it does not grant access or change the
 existing `authorOnly` and `superAdminOnly` filters. A TA therefore sees the marker on
 the console pages the TA could already open, but does not gain author-only pages.
 
@@ -134,9 +135,10 @@ never substitutes the first staff course.
 
 Student view is a preview as the instructor's own identity, never impersonation. It
 uses the same published/released homework projection students receive, while tutor
-chats remain owner-scoped to the instructor and section conversations retain the
+chats remain owner-scoped to the instructor and both tutor and section conversations retain the
 server-derived `isTeacherTest` flag. The persistent preview notice makes this boundary
-visible and links back to the console. Submit, self-assessment, section-answer, and
+visible during loading and errors too, and links back to the console. Teacher-test
+conversations do not trigger the unpublish student-activity warning. Submit, self-assessment, section-answer, and
 response-feedback controls are not offered, so the preview cannot create student
 submission or assessment records. Tutor chats still work for a course with zero
 visible homework because course context comes from the validated membership rather

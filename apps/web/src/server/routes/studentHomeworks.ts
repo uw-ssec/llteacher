@@ -36,6 +36,7 @@ export const instructorStudentViewHomeworksHandler = effectHandler((c) =>
     const courseId = c.req.param("courseId");
     const authContext = c.get("authContext");
 
+    // Defense in depth for direct handler calls; keep the route guard too.
     if (!authContext || !courseId || !authContext.isInstructorOf(courseId)) {
       return yield* new Forbidden({ message: "Course access denied" });
     }

@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { openStudentApp, studentAppUrl } from "./studentAppUrl";
+import { describe, expect, it } from "vitest";
+import { studentAppUrl } from "./studentAppUrl";
 
 describe("studentAppUrl", () => {
   it("opens Student view on the production origin", () => {
@@ -19,13 +19,9 @@ describe("studentAppUrl", () => {
     expect(url.searchParams.get("courseId")).toBe("course / a");
   });
 
-  it("navigates with window.location.assign semantics", () => {
-    const assign = vi.fn();
-
-    openStudentApp("course-a", assign, "https://teacher.example.edu");
-
-    expect(assign).toHaveBeenCalledWith(
-      "https://teacher.example.edu/?view=student&courseId=course-a",
+  it("does not rewrite ports on a non-loopback deployment", () => {
+    expect(studentAppUrl("course-a", "http://192.168.1.50:2312")).toBe(
+      "http://192.168.1.50:2312/?view=student&courseId=course-a",
     );
   });
 });

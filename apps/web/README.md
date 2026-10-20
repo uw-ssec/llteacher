@@ -239,22 +239,29 @@ model-access, or incomplete-output failures retain the uploaded file and show
 a retryable explanation. Generated text identifies the OCR model; equations,
 tables, and unclear text should be checked against the original scan.
 
-Set `VITE_ADMIN_URL` in the frontend build environment to the instructor console's
-public URL. Staff-only accounts normally land on the teaching workspace, while the
+The production and Floci bundles serve the student app and console on the same
+origin, with the console at `/admin/`. `VITE_ADMIN_URL` can override the return
+link at build time; the console's Student view launcher still assumes a shared
+origin. Staff-only accounts normally land on the teaching workspace, while the
 console's **Student view** action opens `/?view=student&courseId=<uuid>` for the
 selected course. The web app accepts that preview only when the signed-in caller has
 an `instructor` or course `admin` membership for the exact course ID; it never falls
 back to another course and never impersonates a student. Local ports 2311/2312 and
 2411/2412 are paired automatically. Accounts with both staff and student memberships
 stay in their ordinary student workspace unless they deliberately request a valid
-author preview.
+author preview. Invalid preview links show an explanation and a console exit even
+for mixed-role accounts. Automatic port pairing is limited to loopback hosts;
+LAN testing should use the shared-origin bundled server.
 
 Instructor preview reuses the student-visible homework projection but keeps the
 instructor's identity. Tutor chats and homework-section chats are therefore owned by
-the instructor; section conversations are recorded as teacher tests. Submit,
+the instructor; both tutor and section conversations are recorded as teacher tests. Submit,
 self-assessment, and response-feedback controls are omitted so preview activity does
 not create student submissions or assessment records. Tutor chats remain available
 when the course has no currently visible homework.
+The preview notice and console exit persist during loading and failures; denied
+requests show access-specific guidance. Teacher-test chats do not count as student
+activity in the confirmation shown before unpublishing homework.
 
 ### Instructor Markdown cleanup
 

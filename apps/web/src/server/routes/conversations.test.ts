@@ -248,6 +248,23 @@ describe("GET /api/conversations", () => {
   });
 });
 
+describe("tutor conversation role classification", () => {
+  it.each(["instructor", "admin", "student"] as const)("derives teacher-test status for a course %s", async (role) => {
+    const courseId = "11111111-1111-1111-1111-111111111111";
+    const auth = fakeAuthContext({ memberships: [
+      fakeMembership({ courseId, role }),
+      fakeMembership({ courseId: "other-course", role: "student" }),
+    ] });
+    createConversationMock.mockResolvedValue(fakeConversationRow({ courseId }));
+    const response = await request(buildApp(auth), "/api/conversations", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ courseId }),
+    });
+    expect(response.status).toBe(201);
+    expect(createConversationMock).toHaveBeenCalledWith(expect.anything(), courseId,
+      expect.objectContaining({ isTeacherTest: role !== "student" }));
+  });
+});
+
 describe("POST /api/conversations", () => {
   it("returns 401 when there is no authContext", async () => {
     const res = await request(buildApp(undefined), "/api/conversations", {
@@ -306,7 +323,7 @@ describe("POST /api/conversations", () => {
     expect(createConversationMock).toHaveBeenCalledWith(
       expect.anything(),
       "11111111-1111-1111-1111-111111111111",
-      { ownerUserId: "u1", sectionId: null, kind: "tutor", title: "New Conversation" },
+      { ownerUserId: "u1", sectionId: null, kind: "tutor", isTeacherTest: false, title: "New Conversation" },
     );
     // #218: no ownerUserId/courseId/etc. in the response.
     expect(await res.json()).toEqual({
@@ -335,7 +352,7 @@ describe("POST /api/conversations", () => {
     expect(createConversationMock).toHaveBeenCalledWith(
       expect.anything(),
       "11111111-1111-1111-1111-111111111111",
-      { ownerUserId: "u1", sectionId: null, kind: "tutor", title: "My chat" },
+      { ownerUserId: "u1", sectionId: null, kind: "tutor", isTeacherTest: false, title: "My chat" },
     );
   });
 

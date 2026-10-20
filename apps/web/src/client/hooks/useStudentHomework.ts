@@ -37,6 +37,7 @@ export function useStudentHomework({ previewCourse }: { previewCourse?: Instruct
   const [homeworkId, setHomeworkId] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [loadErrorStatus, setLoadErrorStatus] = useState<number | undefined>();
 
   useEffect(() => {
     let cancelled = false;
@@ -44,12 +45,16 @@ export function useStudentHomework({ previewCourse }: { previewCourse?: Instruct
     setHomeworkId(undefined);
     setLoading(true);
     setLoadError(false);
+    setLoadErrorStatus(undefined);
     const endpoint = previewCourse
       ? `/api/courses/${encodeURIComponent(previewCourse.id)}/student-view/homeworks`
       : "/api/student/homeworks";
     fetch(endpoint)
       .then((response) => {
-        if (!response.ok) throw new Error(`failed to load student homeworks: ${response.status}`);
+        if (!response.ok) {
+          if (!cancelled) setLoadErrorStatus(response.status);
+          throw new Error(`failed to load student homeworks: ${response.status}`);
+        }
         return response.json() as Promise<StudentHomeworkListResponse>;
       })
       .then((data) => {
@@ -121,5 +126,6 @@ export function useStudentHomework({ previewCourse }: { previewCourse?: Instruct
     courseName: previewCourse ? previewCourseName(previewCourse) : selected?.summary.courseName ?? "",
     loading,
     loadError,
+    loadErrorStatus,
   };
 }

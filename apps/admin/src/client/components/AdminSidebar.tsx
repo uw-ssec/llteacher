@@ -8,6 +8,7 @@
    they're in the console.
    -------------------------------------------------------------------------- */
 
+import { useState } from "react";
 import {
   BookOpen,
   Books,
@@ -47,7 +48,7 @@ export type AdminSidebarProps = {
   onNewLLMConfig: () => void;
   /** Opens the selected course in the student-facing workspace. Undefined
       when there is no author-owned selected course to preview. */
-  onViewAsStudent: (() => void) | undefined;
+  studentViewUrl: string | undefined;
   /** #172: false for a TA, who may read this console but not author in it.
      The QUICK ACTIONS block and any authoring-only nav entry are omitted
      rather than shown disabled -- a disabled control still advertises an
@@ -129,7 +130,7 @@ export function AdminSidebar({
   onNavigate,
   onNewHomework,
   onNewLLMConfig,
-  onViewAsStudent,
+  studentViewUrl,
   canAuthor,
   isSuperAdmin,
   isCollapsed = false,
@@ -160,16 +161,17 @@ export function AdminSidebar({
         <span className="admin-sidebar__label-text">CATALOG</span>
       </div>
 
-      <nav className="admin-sidebar__nav">
+      <p id="admin-navigation-visibility" className={isCollapsed ? "sr-only" : "admin-sidebar__visibility-note"}>
+        Console pages are not visible to students.
+      </p>
+      <nav className="admin-sidebar__nav" aria-label="Console pages" aria-describedby="admin-navigation-visibility">
         <ul className="admin-sidebar__nav-list">
           {NAV_ITEMS.filter(
             (item) => (canAuthor || !item.authorOnly) && (isSuperAdmin || !item.superAdminOnly),
           ).map((item) => {
             const isActive = item.key === active;
-            const visibilityDescriptionId = `admin-nav-${item.key}-visibility`;
-            const collapsedLabel = `${item.label} — Only instructor viewable`;
             return (
-              <li key={item.key}>
+              <VisibilityDestination key={item.key}>
                 <button
                   type="button"
                   className={
@@ -179,9 +181,8 @@ export function AdminSidebar({
                   }
                   onClick={() => onNavigate(item.key)}
                   aria-current={isActive ? "page" : undefined}
-                  aria-describedby={visibilityDescriptionId}
-                  aria-label={isCollapsed ? collapsedLabel : undefined}
-                  title={isCollapsed ? collapsedLabel : undefined}
+                  aria-label={isCollapsed ? item.label : undefined}
+                  title={isCollapsed ? item.label : undefined}
                 >
                   <span className="admin-sidebar__nav-icon" aria-hidden="true">
                     {item.icon}
@@ -194,14 +195,7 @@ export function AdminSidebar({
                     <EyeSlash size={14} weight="regular" />
                   </span>
                 </button>
-                <span
-                  id={visibilityDescriptionId}
-                  className="admin-sidebar__visibility-tooltip"
-                  role="tooltip"
-                >
-                  Only instructor viewable
-                </span>
-              </li>
+              </VisibilityDestination>
             );
           })}
         </ul>
@@ -213,17 +207,16 @@ export function AdminSidebar({
 
           <div className="admin-sidebar__quick">
             <div className="admin-sidebar__quick-label">QUICK ACTIONS</div>
-            {onViewAsStudent && (
-              <button
-                type="button"
+            {studentViewUrl && (
+              <a
                 className="admin-sidebar__quick-action"
-                onClick={onViewAsStudent}
+                href={studentViewUrl}
                 aria-label={isCollapsed ? "Student view" : undefined}
                 title={isCollapsed ? "Student view" : undefined}
               >
                 <Student size={13} weight="bold" aria-hidden="true" />
                 <span className="admin-sidebar__quick-action-label">Student view</span>
-              </button>
+              </a>
             )}
             <button
               type="button"
@@ -256,5 +249,27 @@ export function AdminSidebar({
         <span className="admin-sidebar__meta-text">admin</span>
       </div>
     </aside>
+  );
+}
+
+/** The visual explanation takes its own space below the row, so it cannot
+ * cover another label. Screen readers get the same information once on nav. */
+function VisibilityDestination({ children }: { children: React.ReactNode }) {
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  return (
+    <li
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => { setHovered(false); if (!focused) setDismissed(false); }}
+      onFocus={() => setFocused(true)}
+      onBlur={() => { setFocused(false); if (!hovered) setDismissed(false); }}
+      onKeyDown={(event) => { if (event.key === "Escape") setDismissed(true); }}
+    >
+      {children}
+      {!dismissed && (hovered || focused) && (
+        <span className="admin-sidebar__visibility-tooltip" aria-hidden="true">Not visible to students</span>
+      )}
+    </li>
   );
 }

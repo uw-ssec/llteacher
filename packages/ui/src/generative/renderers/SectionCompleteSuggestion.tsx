@@ -36,9 +36,10 @@ export interface SectionCompleteSuggestionProps {
    *  for a zero-argument tool, so this never lingers the way
    *  DefinitionCard's/CodeExecution's own isPartial can. */
   isPartial?: boolean;
+  canSubmit?: boolean;
 }
 
-export function SectionCompleteSuggestion({ isPartial = false }: SectionCompleteSuggestionProps) {
+export function SectionCompleteSuggestion({ isPartial = false, canSubmit = true }: SectionCompleteSuggestionProps) {
   return (
     <aside
       className={
@@ -51,7 +52,7 @@ export function SectionCompleteSuggestion({ isPartial = false }: SectionComplete
       <div className="section-complete-suggestion__title">Looks like you've got this</div>
       <div className="section-complete-suggestion__body">
         Your tutor thinks you've shown a good understanding of this section. Keep chatting if you have more
-        questions, or use the Submit button whenever you're ready to turn it in.
+        questions{canSubmit ? ", or use the Submit button whenever you’re ready to turn it in." : ". Submitting is turned off in Student view."}
       </div>
     </aside>
   );

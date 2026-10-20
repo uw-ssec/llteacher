@@ -1,9 +1,9 @@
 ---
 type: Architecture
 title: Instructor admin console (apps/admin)
-description: "apps/admin is the instructor console; every console destination is visibly marked instructor-only, and authors can open a course-scoped Student view that previews as themselves while keeping tutor and teacher-test chats instructor-owned."
+description: "The admin console marks destinations as unavailable to students, offers a validated course Student view with persistent preview chrome, and keeps instructor tutor and section tests separate from student activity."
 tags: [architecture, admin, frontend]
-generated: { by: "codex-app:gpt-5", at: "2026-10-19T21:20:04Z" }
+generated: { by: "codex-app:gpt-6", at: "2026-10-20T16:33:39Z" }
 status: stable
 governance: context
 code_refs: [apps/admin/src/client/App.tsx, apps/admin/src/client/components/AdminSidebar.tsx, apps/admin/src/client/views, apps/admin/src/client/lib/api-client.ts, apps/web/src/client/App.tsx, apps/web/src/client/hooks/useStudentHomework.ts, apps/admin/vite.config.ts, packages/ui/src, packages/ui/package.json]
@@ -17,16 +17,14 @@ sources:
   - resource: 5c704c7
 ---
 
-`llteacher-admin` is a client-only Vite app (`root: src/client`, `base: /admin/`, build output `apps/admin/dist/admin`). It has no server and no DB access: every action goes through `/api/*` on the web Node process, which also serves the admin build at `/admin` (see architecture/request-path). Server-side authorization is the only real gate; the console UI gates are UX.
+**Runtime:** apps/admin is a client-only Vite app served at /admin/ by the web Node process. All data access uses the shared /api. Server authorization remains authoritative; console visibility gates are UX.
 
-**Views** (apps/admin/src/client/views): HomeworksView/HomeworkCreateView/HomeworkEditView/HomeworkReadOnlyView, LLMConfigsView/LLMConfigFormView, StudentsView, TaCapabilitiesView, SubmissionsView + GradingPanel, TranscriptListView/TranscriptDetailView, FeedbackDashboard, KnowledgeView/KnowledgeDocumentView, CanvasIntegrationView, ExportView, and AddInstructorView.
+**Navigation:** every rendered console destination has a decorative EyeSlash marker. Hover or focus reveals Not visible to students below the row without covering content; Escape dismisses it until hover and focus leave. A nav-level note communicates this once to screen readers and touch users. Collapsed names remain concise. Existing authorOnly and superAdminOnly filters are unchanged. Student view is a separate navigation link.
 
-**Console-only navigation:** every rendered console destination carries an EyeSlash marker explained as **Only instructor viewable** on hover, keyboard focus, and through assistive text. Collapsed rows include the phrase in their accessible name and native title. The marker is descriptive only: existing author-only and super-admin-only filters remain the authority for which destinations render.
+**Student view:** the console launches view=student&courseId=<uuid> for an exact instructor/admin membership. The client deliberately requires that membership even for a platform super admin. Invalid links show a notice and console exit, including for mixed-role accounts. The preview notice remains during loading and errors and explains that unreleased content is hidden and student-record actions are disabled. Preview never impersonates a student. See apps/web/README.md for the canonical behavior and deployment contract.
 
-**Student view boundary:** an author can launch the selected course into the student app with `view=student&courseId=<uuid>`. The web app admits only an exact `instructor` or course `admin` membership and never falls back to another course. Preview runs as the instructor, never by impersonating a student. It uses the published/released student homework projection, keeps free-standing tutor chats owner-scoped to the instructor, and marks section conversations as teacher tests. Submit, self-assessment, section-answer, and response-feedback controls are absent. Course context comes from the validated membership, so tutor chats work even with zero visible homework.
+**Data classification:** tutor and section chats created by non-students in the requested course are server-classified as teacher tests. They remain owner-scoped and persisted for reopening. Submit, self-assessment, section-answer, and feedback writes are omitted in preview and independently refused server-side. Teacher-test conversations are excluded from the unpublish student-activity warning. Existing student-owned rows after historical role changes are not migrated by this feature.
 
-**Shared code:** `@llteacher/ui` is consumed as raw TypeScript source through its exports map. It hand-mirrors the course role enum and holds shared authorization vocabulary, so server rules and console UX share one definition. apps/admin cannot import the Drizzle schema.
+**Course context:** validated membership supplies context even with zero visible homework. Shared released-homework projection and stale-response guards preserve exact-course isolation. The outer course key remounts the workspace when the course changes; hook-level resets also protect standalone consumers.
 
-**Tests:** vitest + Testing Library in jsdom; no database is needed for the admin suite.
-
-**Dev:** port 2312 (`strictPort`). Its `/api` proxy target is `LLTEACHER_API_URL`, default `http://localhost:8080`; see facts/code-dev-ports-and-proxy. `VITE_ADMIN_URL` in the web build points staff users back to the console.
+**Deployment:** production and Floci share one origin, with the console at /admin/. VITE_ADMIN_URL overrides the return link. Loopback dev pairs are 2311/2312 and 2411/2412; LAN testing uses the bundled server. Admin API proxy defaults to localhost:8080. Tests use Vitest and Testing Library; real repository behavior requires DATABASE_URL.

@@ -140,7 +140,7 @@ export async function getConversationMessageCount(
 export async function createConversation(
   db: Db,
   scope: CourseScope,
-  input: { ownerUserId: string; sectionId: string | null; kind: ConversationKind; title: string },
+  input: { ownerUserId: string; sectionId: string | null; kind: ConversationKind; title: string; isTeacherTest?: boolean },
 ) {
   // Neither ownerUserId nor sectionId is guaranteed to belong to `scope`'s
   // course just because the caller says so -- both are caller-supplied

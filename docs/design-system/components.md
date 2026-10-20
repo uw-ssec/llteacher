@@ -64,18 +64,19 @@ switcher. Both lists use the same current course; assignments from other
 courses are excluded from this overview.
 
 **Instructor Student view:** the student shell may receive an already-validated
-author course from the console deep link. A persistent paper-and-gold notice above
-the shell says **Student view**, explains that chats remain instructor-owned, and
+author course from the console deep link. A named **Student view** region above
+the shell remains visible during loading and errors, explains the disabled student actions, and
 provides **Return to instructor console**. The navigation and chat composition stay
 the same, including Tutor Chats when no homework is visible. Student-record actions
 do not: the Sidebar omits Submit when `onSubmit` is absent, and the web shell omits
 self-assessment and response-feedback affordances in preview mode.
 
 **Admin navigation visibility marker:** each console destination ends with the
-Phosphor `EyeSlash` glyph and the explanation **Only instructor viewable**. The icon
-is decorative and never becomes its own tab stop. Expanded rows expose the phrase by
-hover, focus, and `aria-describedby`; collapsed rows include it in their accessible
-name and native title. The separate Student view bridge action has no marker.
+Phosphor `EyeSlash` glyph. The icon is decorative and never becomes its own tab
+stop. Hover or focus reveals **Not visible to students** in layout below the row;
+Escape dismisses it until hover and focus leave. A nav-level note explains this once
+to screen readers and touch users. Collapsed rows retain concise names and titles.
+The separate Student view bridge is a link and has no marker.
 
 The section progress rail. The structurally distinctive element of LLTeacher.
 

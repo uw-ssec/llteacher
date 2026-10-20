@@ -59,7 +59,7 @@ export interface SidebarProps {
   onBack?: () => void;
   /** Called when a section row is clicked */
   onSectionSelect?: (sectionNumber: number) => void;
-  /** Called when "Submit Section N" is clicked */
+  /** Called when "Submit Section N" is clicked. Omit to hide submission controls. */
   onSubmit?: (sectionNumber: number) => void;
   /** Worker status line — shown at the bottom */
   workerStatus?: string | null;
