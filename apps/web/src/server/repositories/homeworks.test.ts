@@ -10,6 +10,7 @@ import {
 } from "./homeworks";
 import { unsafeCourseScope } from "./scope";
 import type { Db } from "../../db/client";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 // listHomeworksForCourse's section-count query is `db.select({...}).from
 // (sections).where(...).groupBy(...)` -- a plain builder chain, not a
@@ -23,6 +24,14 @@ function mockSectionCountsChain(counts: { homeworkId: string; count: number }[])
 }
 
 describe("homeworks repository", () => {
+  it("excludes teacher-test conversations from the student-activity warning", async () => {
+    const where = vi.fn().mockReturnValue({ limit: vi.fn().mockResolvedValue([]) });
+    const db = { select: () => ({ from: () => ({ innerJoin: () => ({ where }) }) }) } as unknown as Db;
+    expect(await homeworkHasStudentActivity(db, "homework-a")).toBe(false);
+    const predicate = new PgDialect().sqlToQuery(where.mock.calls[0]![0]);
+    expect(predicate.sql).toContain('"conversations"."is_teacher_test" =');
+    expect(predicate.params).toEqual(["homework-a", false]);
+  });
   it("listHomeworksForCourse shapes rows via deriveHomeworkStatus and attaches section counts", async () => {
     const hwRow = {
       id: "hw1",
@@ -576,13 +585,17 @@ describe.skipIf(!process.env.DATABASE_URL)("homeworkHasStudentActivity (real DB)
 
     expect(await homeworkHasStudentActivity(db, created!.id)).toBe(false);
 
-    await db.insert(conversations).values({
+    const [teacherTest] = await db.insert(conversations).values({
       ownerUserId: membership.userId,
       courseId: membership.courseId,
       sectionId: section.id,
       kind: "section",
       title: "t",
-    });
+      isTeacherTest: true,
+    }).returning();
+
+    expect(await homeworkHasStudentActivity(db, created!.id)).toBe(false);
+    await db.update(conversations).set({ isTeacherTest: false }).where(eq2(conversations.id, teacherTest!.id));
 
     expect(await homeworkHasStudentActivity(db, created!.id)).toBe(true);
 

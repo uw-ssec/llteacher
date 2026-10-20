@@ -640,6 +640,50 @@ body {
     background-color: var(--color-bg);
   }
 
+  .instructor-preview-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-6);
+    flex-shrink: 0;
+    padding: var(--space-3) var(--space-6);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface);
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-sm);
+  }
+
+  .instructor-preview-banner div {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-3);
+    min-width: 0;
+  }
+
+  .instructor-preview-banner strong {
+    color: var(--color-text);
+    white-space: nowrap;
+  }
+
+  .instructor-preview-banner a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding-block: var(--space-1);
+    color: var(--color-accent);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+  }
+
+  @media (max-width: 40rem) {
+    .instructor-preview-banner,
+    .instructor-preview-banner div {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: var(--space-2);
+    }
+  }
+
   /* #299: <main id="conversation-main"> wraps the conversation column so
      it's a reachable landmark (see the skip link above it in App.tsx) --
      display: contents makes the wrapper invisible to .app-shell's flex
@@ -3992,9 +4036,13 @@ body {
   gap: 2px;
 }
 
+.admin-sidebar__nav-list > li {
+  position: relative;
+}
+
 .admin-sidebar__nav-item {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.7em;
   width: 100%;
@@ -4007,6 +4055,36 @@ body {
   cursor: pointer;
   text-align: start;
   transition: background-color 140ms ease-out;
+}
+
+.admin-sidebar__visibility-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-nav-text-muted);
+}
+
+.admin-sidebar__visibility-tooltip {
+  display: block;
+  margin: var(--space-1) var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid rgba(232, 227, 211, 0.25);
+  border-radius: 4px;
+  background: var(--color-sidebar-bg);
+  color: var(--color-nav-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  line-height: 1.2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.admin-sidebar__visibility-note {
+  padding-inline: var(--space-3);
+  margin-block-end: var(--space-2);
+  color: var(--color-nav-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
 }
 
 .admin-sidebar__nav-item:hover,
@@ -4180,6 +4258,16 @@ body {
   justify-content: center;
   padding: 10px 0;
   gap: 0;
+}
+
+.sidebar--collapsed .admin-sidebar__visibility-marker {
+  position: absolute;
+  inset-block-start: 5px;
+  inset-inline-end: 5px;
+}
+
+.sidebar--collapsed .admin-sidebar__visibility-tooltip {
+  display: none;
 }
 
 .sidebar--collapsed .admin-sidebar__nav-icon {

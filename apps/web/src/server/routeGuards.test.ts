@@ -62,6 +62,7 @@ const handlers = {
   deleteHomework: ok("deleteHomework"),
   publishHomework: ok("publishHomework"),
   updateHomeworkHide: ok("updateHomeworkHide"),
+  instructorStudentViewHomeworks: ok("instructorStudentViewHomeworks"),
   getHomeworkSubmissions: ok("getHomeworkSubmissions"),
   getSectionAnswer: ok("getSectionAnswer"),
   listCourseTas: ok("listCourseTas"),
@@ -100,6 +101,11 @@ vi.mock("./routes/homeworks", () => ({
   deleteHomeworkHandler: (c: Context) => handlers.deleteHomework(c),
   publishHomeworkHandler: (c: Context) => handlers.publishHomework(c),
   updateHomeworkHideHandler: (c: Context) => handlers.updateHomeworkHide(c),
+}));
+vi.mock("./routes/studentHomeworks", () => ({
+  studentHomeworksHandler: (c: Context) => c.json({}, 200),
+  instructorStudentViewHomeworksHandler: (c: Context) =>
+    handlers.instructorStudentViewHomeworks(c),
 }));
 vi.mock("./routes/submissions", () => ({
   getHomeworkSubmissionsHandler: (c: Context) => handlers.getHomeworkSubmissions(c),
@@ -232,6 +238,8 @@ const ROUTES: { method: string; path: string; handler: HandlerName; admits: Pers
   { method: "PATCH", path: `/api/courses/course-a/homeworks/${HW}/publish`, handler: "publishHomework",
     admits: ["instructor", "admin"] },
   { method: "PATCH", path: `/api/courses/course-a/homeworks/${HW}/hide`, handler: "updateHomeworkHide",
+    admits: ["instructor", "admin"] },
+  { method: "GET", path: "/api/courses/course-a/student-view/homeworks", handler: "instructorStudentViewHomeworks",
     admits: ["instructor", "admin"] },
 
   // Granting is authoring-tier authority: a TA must not read the roster of

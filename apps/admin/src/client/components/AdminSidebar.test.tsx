@@ -1,5 +1,5 @@
 import { describe, it, vi, afterEach, expect } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, within } from "@testing-library/react";
 import { AdminSidebar } from "./AdminSidebar";
 
 afterEach(cleanup);
@@ -9,6 +9,7 @@ const props = {
   onNavigate: vi.fn(),
   onNewHomework: vi.fn(),
   onNewLLMConfig: vi.fn(),
+  studentViewUrl: undefined,
   isSuperAdmin: false,
 };
 
@@ -118,5 +119,78 @@ describe("AdminSidebar super-admin-only entry (#316)", () => {
   it("shows Add Instructor to a super admin who is also an author", () => {
     render(<AdminSidebar {...props} canAuthor isSuperAdmin />);
     expect(screen.getByText("Add Instructor")).toBeTruthy();
+  });
+});
+
+describe("AdminSidebar console-only navigation markers", () => {
+  it("marks every rendered destination, including grader-visible entries", () => {
+    render(<AdminSidebar {...props} canAuthor />);
+
+    const nav = screen.getByRole("navigation");
+    const destinations = within(nav).getAllByRole("button");
+    expect(destinations.length).toBeGreaterThan(3);
+    for (const destination of destinations) {
+      expect(destination.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+      expect(destination.getAttribute("aria-describedby")).toBeNull();
+    }
+
+    expect(screen.getByText("Homeworks").closest("button")?.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+    expect(screen.getByText("LLM configs").closest("button")?.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+    expect(nav.getAttribute("aria-describedby")).toBe("admin-navigation-visibility");
+    expect(screen.getByText("Console pages are not visible to students.")).toBeTruthy();
+  });
+
+  it("keeps role filtering separate from the marker", () => {
+    render(<AdminSidebar {...props} canAuthor={false} />);
+
+    expect(screen.getByText("Homeworks").closest("button")?.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+    expect(screen.getByText("Submissions").closest("button")?.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+    expect(screen.getByText("Feedback").closest("button")?.querySelector(".admin-sidebar__visibility-marker")).toBeTruthy();
+    expect(screen.queryByText("LLM configs")).toBeNull();
+  });
+
+  it("reveals the tooltip on hover and focus, dismisses it with Escape, and keeps it dismissed until focus leaves", () => {
+    render(<AdminSidebar {...props} canAuthor />);
+    const homeworks = screen.getByText("Homeworks").closest("button")!;
+    expect(screen.queryByText("Not visible to students")).toBeNull();
+    fireEvent.mouseEnter(homeworks);
+    expect(screen.getByText("Not visible to students").getAttribute("aria-hidden")).toBe("true");
+    fireEvent.keyDown(homeworks, { key: "Escape" });
+    expect(screen.queryByText("Not visible to students")).toBeNull();
+    fireEvent.mouseLeave(homeworks.closest("li")!);
+    fireEvent.focus(homeworks);
+    expect(screen.getByText("Not visible to students")).toBeTruthy();
+    fireEvent.keyDown(homeworks, { key: "Escape" });
+    fireEvent.mouseEnter(homeworks);
+    expect(screen.queryByText("Not visible to students")).toBeNull();
+    fireEvent.blur(homeworks);
+    fireEvent.mouseLeave(homeworks.closest("li")!);
+    fireEvent.focus(homeworks);
+    expect(screen.getByText("Not visible to students")).toBeTruthy();
+    expect(homeworks.querySelector(".admin-sidebar__visibility-marker")?.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("keeps collapsed names concise and explains console visibility once at nav level", () => {
+    render(<AdminSidebar {...props} canAuthor isCollapsed />);
+
+    const homeworks = screen.getByRole("button", {
+      name: "Homeworks",
+    });
+    expect(homeworks.getAttribute("title")).toBe("Homeworks");
+    expect(homeworks.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("shows an unmarked Student view action only to authors", () => {
+    const studentViewUrl = "http://localhost:2311/?view=student&courseId=course-a";
+    const author = render(
+      <AdminSidebar {...props} canAuthor studentViewUrl={studentViewUrl} />,
+    );
+    const studentView = screen.getByRole("link", { name: "Student view" });
+    expect(studentView.querySelector(".admin-sidebar__visibility-marker")).toBeNull();
+    expect(studentView.getAttribute("href")).toBe(studentViewUrl);
+    author.unmount();
+
+    render(<AdminSidebar {...props} canAuthor={false} studentViewUrl={studentViewUrl} />);
+    expect(screen.queryByRole("link", { name: "Student view" })).toBeNull();
   });
 });

@@ -9,6 +9,7 @@ import {
   type SubmissionSource,
 } from "../../db/schema";
 import { deriveHomeworkStatus, isUnreleased } from "./homeworks";
+import type { CourseScope } from "./scope";
 
 export type SectionStatusType = "not_started" | "in_progress" | "in_progress_overdue" | "submitted" | "overdue";
 
@@ -98,6 +99,26 @@ export async function getStudentHomeworksForUser(db: Db, userId: string): Promis
     where: and(eq(courseMemberships.userId, userId), eq(courseMemberships.role, "student"), isNull(courseMemberships.droppedAt)),
   });
   const courseIds = memberships.map((m) => m.courseId);
+  return getStudentHomeworksForCourses(db, courseIds, userId);
+}
+
+/** Instructor preview is scoped by a CourseScope already minted from the
+ *  authenticated exact-course membership. It intentionally uses the same
+ *  student-visible projection as the enrolled-student path while retaining
+ *  the instructor's identity for owner-scoped conversation state. */
+export async function getInstructorStudentViewHomeworks(
+  db: Db,
+  scope: CourseScope,
+  userId: string,
+): Promise<StudentHomeworkSummary[]> {
+  return getStudentHomeworksForCourses(db, [scope], userId);
+}
+
+async function getStudentHomeworksForCourses(
+  db: Db,
+  courseIds: string[],
+  userId: string,
+): Promise<StudentHomeworkSummary[]> {
   if (courseIds.length === 0) return [];
 
   const allHomeworks = await db.query.homeworks.findMany({

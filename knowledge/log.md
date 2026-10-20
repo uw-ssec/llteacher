@@ -1,3 +1,10 @@
+## 2026-10-20
+* **Update**: Updated concept `architecture/admin-console.md`.
+* **Update**: Updated concept `architecture/admin-console.md`.
+
+## 2026-10-19
+* **Update**: Updated concept `architecture/admin-console.md`.
+
 ## 2026-10-15
 * **Update**: Linked `decisions/student-explicit-section-completion.md` to `decisions/student-unified-navigation.md` (The unified homework detail uses the explicit Submit completion action.).
 * **Creation**: Documented concept `decisions/student-explicit-section-completion.md` (Submit explicitly completes a section without requiring chat).

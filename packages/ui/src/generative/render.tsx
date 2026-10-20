@@ -145,6 +145,7 @@ export function parseExecuteRCodeInput(
  *  `renderToolPart(part, key)` with no third argument keeps working
  *  exactly as it did before `tool-executeRCode` existed. */
 export interface ToolPartHandlers {
+  canSubmitSections?: boolean;
   onRunRCode?: (code: string) => Promise<RCodeResult>;
   /** #36: answers already given in this conversation (toolCallId ->
    *  option index), and how to send a new one. Absent = read-only checks. */
@@ -248,7 +249,7 @@ function renderToolPartInner(part: ToolPart, handlers?: ToolPartHandlers): React
   // tool-input-available/tool-output-available writes) still renders the
   // same suggestion card it did live.
   if (part.type === "tool-markSectionComplete") {
-    return <SectionCompleteSuggestion isPartial={part.state === "input-streaming"} />;
+    return <SectionCompleteSuggestion isPartial={part.state === "input-streaming"} canSubmit={handlers?.canSubmitSections} />;
   }
   // #36: interactive, so it needs the call id (answers reference it) and the
   // app's send path; without either it renders read-only.

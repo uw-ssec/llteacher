@@ -67,6 +67,7 @@ import type {
 import { BadRequest, Conflict, Forbidden, NotFound } from "../effect/errors";
 import { effectHandler, requireAuthContext } from "../effect/http";
 import { query } from "../effect/services";
+import { isStudentInCourse } from "../repositories/sectionConversations";
 
 // #281: an opaque cursor -- the client only ever echoes this back as
 // `before`, never parses or reconstructs it. Encoding (updatedAt, id)
@@ -294,6 +295,7 @@ export const createConversationHandler = effectHandler((c) => Effect.gen(functio
       ownerUserId: authContext.session.userId,
       sectionId: null,
       kind: "tutor",
+      isTeacherTest: !isStudentInCourse(authContext.memberships, parsed.data.courseId),
       title: parsed.data.title || DEFAULT_TUTOR_CONVERSATION_TITLE,
     }),
     [TenancyMismatchError],

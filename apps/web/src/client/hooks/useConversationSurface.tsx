@@ -128,6 +128,7 @@ function buildMessageData(
   stoppedMessageId: string | null | undefined,
   onRunRCode?: (code: string) => Promise<RCodeResult>,
   onAnswerKnowledgeCheck?: NonNullable<ToolPartHandlers["knowledgeCheck"]>["onAnswer"],
+  canSubmitSections = true,
 ): MessageData[] {
   /* #36: every knowledge check already answered in this transcript, read
      from the answers' own data parts -- so a check stays locked across a
@@ -202,7 +203,7 @@ function buildMessageData(
                union can't statically prove a `tool-*` part carries
                `input`/`state`. */
             if (!isToolPart(part)) return null;
-            return renderToolPart(part, `tool-${m.id}-${i}`, { onRunRCode, knowledgeCheck });
+            return renderToolPart(part, `tool-${m.id}-${i}`, { onRunRCode, knowledgeCheck, canSubmitSections });
           })}
           {/* #41: every concept the tutor opened this turn, once the reply is complete. */}
           {!isStreaming && <SourcesList sources={sourcesFromParts(m.parts)} />}
@@ -274,6 +275,7 @@ export interface ConversationSurfaceErrorRow {
 }
 
 export interface UseConversationSurfaceOptions {
+  canSubmitSections?: boolean;
   /** #302 (the reconciliation this task's issue explicitly calls for): the
    *  useChat `id`. Both surfaces are now keyed, so both get a reset path --
    *  a genuinely different conversation showing under this key recreates
@@ -448,6 +450,7 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
     buildRetryBody,
     hydrationError,
     runRCode,
+    canSubmitSections = true,
   } = options;
 
   /* #449/#450 review fix (blocking + non-blocking, same root cause, one
@@ -962,8 +965,8 @@ export function useConversationSurface(options: UseConversationSurfaceOptions): 
      this only recomputes when this surface's own messages/status/stopped-id
      actually change. */
   const messages = useMemo(
-    () => buildMessageData(aiMessages, status, stoppedMessageId, runRCode, sendKnowledgeCheckAnswer),
-    [aiMessages, status, stoppedMessageId, runRCode, sendKnowledgeCheckAnswer],
+    () => buildMessageData(aiMessages, status, stoppedMessageId, runRCode, sendKnowledgeCheckAnswer, canSubmitSections),
+    [aiMessages, status, stoppedMessageId, runRCode, sendKnowledgeCheckAnswer, canSubmitSections],
   );
 
   return {

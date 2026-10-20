@@ -21,7 +21,10 @@ import {
   deleteConversationHandler,
   listConversationMessagesHandler,
 } from "./routes/conversations";
-import { studentHomeworksHandler } from "./routes/studentHomeworks";
+import {
+  instructorStudentViewHomeworksHandler,
+  studentHomeworksHandler,
+} from "./routes/studentHomeworks";
 import { submitSectionHandler, getHomeworkSubmissionsHandler } from "./routes/submissions";
 import {
   startSectionConversationHandler,
@@ -217,6 +220,10 @@ app.patch(
   requireInstructorOf()(updateHomeworkHideHandler),
 );
 app.get("/api/student/homeworks", requireRole(["student"])(studentHomeworksHandler));
+app.get(
+  "/api/courses/:courseId/student-view/homeworks",
+  requireInstructorOf()(instructorStudentViewHomeworksHandler),
+);
 app.get("/api/conversations", listConversationsHandler);
 app.post("/api/conversations", createConversationHandler);
 // #4: message-history hydration for the tutor-conversations rail

@@ -200,4 +200,11 @@ describe("renderToolPart", () => {
     const { queryByRole } = render(<>{renderToolPart(part, "k")}</>);
     expect(queryByRole("button")).toBeNull();
   });
+
+  it("does not direct instructors to a hidden Submit button", () => {
+    const part: ToolPart = { type: "tool-markSectionComplete", state: "output-available", input: {} };
+    const { getByText, queryByText } = render(<>{renderToolPart(part, "k", { canSubmitSections: false })}</>);
+    expect(getByText(/Submitting is turned off in Student view/)).toBeTruthy();
+    expect(queryByText(/use the Submit button/)).toBeNull();
+  });
 });

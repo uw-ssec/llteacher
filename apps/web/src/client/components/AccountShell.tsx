@@ -43,17 +43,19 @@ export function Eyebrow({ children, id }: { children: ReactNode; id?: string }) 
 
 const ROLE_LABEL: Record<CourseMembershipSummary["role"], string> = { instructor: "Instructor", ta: "TA", admin: "Admin", student: "Student", observer: "Observer" };
 
-export function instructorConsoleUrl(): string | undefined {
-  const configuredUrl = import.meta.env.VITE_ADMIN_URL as string | undefined;
-  // The two local development pairs; deployments set their console URL explicitly.
+export function instructorConsoleUrl(
+  configuredUrl = import.meta.env.VITE_ADMIN_URL as string | undefined,
+  origin = window.location.origin,
+): string {
+  // The two local development pairs; production serves the console at /admin/.
   const localPorts: Record<string, string> = { "2311": "2312", "2411": "2412" };
-  const url = new URL(window.location.origin);
+  const url = new URL(origin);
   const localPort = ["localhost", "127.0.0.1"].includes(url.hostname) ? localPorts[url.port] : undefined;
   if (localPort) url.port = localPort;
-  return configuredUrl || (localPort ? url.origin : undefined);
+  return configuredUrl || (localPort ? url.origin : new URL("/admin/", url).toString());
 }
 
-export function StaffHome() {
+export function StaffHome({ previewUnavailable = false }: { previewUnavailable?: boolean }) {
   const { staffCourses } = useAuth();
   const consoleUrl = instructorConsoleUrl();
   const count = staffCourses.length;
@@ -65,16 +67,17 @@ export function StaffHome() {
         <p className="account-lede">
           Homework, course materials and the tutor’s knowledge base are managed in the instructor console.
         </p>
-        {consoleUrl ? (
+        {previewUnavailable ? (
+          <p className="account-notice">
+            Student view is unavailable for that course. Choose Student view from a course where you are an instructor or admin.
+          </p>
+        ) : null}
           <a className="account-cta" href={consoleUrl}>
             Open the instructor console
             <svg className="account-cta__arrow" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
               <path d="M3 10h13M11 5l5 5-5 5" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </a>
-        ) : (
-          <p className="account-note">Use your institution’s instructor console link to open your teaching workspace.</p>
-        )}
       </header>
 
       <section className="staff-home__ledger" aria-labelledby="staff-courses">

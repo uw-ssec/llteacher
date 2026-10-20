@@ -1,27 +1,30 @@
 ---
 type: Architecture
 title: Instructor admin console (apps/admin)
-description: "apps/admin is a React 19 SPA built with base /admin/, served by the web Node process, calling the same /api; it owns homework authoring, LLM configs, roster, grading, transcripts, feedback, knowledge and Canvas views."
+description: "The admin console marks destinations as unavailable to students, offers a validated course Student view with persistent preview chrome, and keeps instructor tutor and section tests separate from student activity."
 tags: [architecture, admin, frontend]
-generated: { by: "claude-code:claude-opus-5-5", at: "2026-10-06T22:30:53Z" }
+generated: { by: "codex-app:gpt-6", at: "2026-10-20T16:33:39Z" }
 status: stable
 governance: context
-code_refs: ["apps/admin/src/client/App.tsx", "apps/admin/src/client/views", "apps/admin/src/client/lib/api-client.ts", "apps/admin/vite.config.ts", "packages/ui/src", "packages/ui/package.json"]
+code_refs: [apps/admin/src/client/App.tsx, apps/admin/src/client/components/AdminSidebar.tsx, apps/admin/src/client/views, apps/admin/src/client/lib/api-client.ts, apps/web/src/client/App.tsx, apps/web/src/client/hooks/useStudentHomework.ts, apps/admin/vite.config.ts, packages/ui/src, packages/ui/package.json]
 sources:
-  - resource: "apps/admin/vite.config.ts"
-  - resource: "apps/web/src/node/server.ts"
-  - resource: "ac34e17"
-  - resource: "5c704c7"
+  - resource: docs/architecture/admin-console.md
+  - resource: docs/design-system/components.md
+  - resource: apps/web/README.md
+  - resource: apps/admin/vite.config.ts
+  - resource: apps/web/src/node/server.ts
+  - resource: ac34e17
+  - resource: 5c704c7
 ---
 
-`llteacher-admin` is a client-only Vite app (`root: src/client`, `base: /admin/`, build output `apps/admin/dist/admin`). It has no server and no DB access: every action goes through `/api/*` on the web Node process, which also serves the admin build at `/admin` (see architecture/request-path). Server-side authorization is the only real gate; the console's own gating (`isPlatformInstructor`, role checks) is UX.
+**Runtime:** apps/admin is a client-only Vite app served at /admin/ by the web Node process. All data access uses the shared /api. Server authorization remains authoritative; console visibility gates are UX.
 
-**Views** (apps/admin/src/client/views): HomeworksView/HomeworkCreateView/HomeworkEditView/HomeworkReadOnlyView (authoring with section diffing via `lib/computeSectionDiff.ts`), LLMConfigsView/LLMConfigFormView, StudentsView (roster + CSV import), TaCapabilitiesView, SubmissionsView + GradingPanel (grading, AI draft grades), TranscriptListView/TranscriptDetailView, FeedbackDashboard (flagged tutor responses), KnowledgeView/KnowledgeDocumentView (OKF bundle browser with folder tree, Markdown cleanup), CanvasIntegrationView, ExportView, AddInstructorView (super-admin only).
+**Navigation:** every rendered console destination has a decorative EyeSlash marker. Hover or focus reveals Not visible to students below the row without covering content; Escape dismisses it until hover and focus leave. A nav-level note communicates this once to screen readers and touch users. Collapsed names remain concise. Existing authorOnly and superAdminOnly filters are unchanged. Student view is a separate navigation link.
 
-**Shared code:** `@llteacher/ui` (packages/ui) is consumed as raw TS source through its `exports` map (`.`, `./styles.css`, `./auth/courseRole`, `./generative/renderableTools`, `./api`). It hand-mirrors the course role enum and holds `resolveTaCapabilities` and `readErrorMessage`, so server rules and console UX share one definition. apps/admin cannot import the Drizzle schema.
+**Student view:** the console launches view=student&courseId=<uuid> for an exact instructor/admin membership. The client deliberately requires that membership even for a platform super admin. Invalid links show a notice and console exit, including for mixed-role accounts. The preview notice remains during loading and errors and explains that unreleased content is hidden and student-record actions are disabled. Preview never impersonates a student. See apps/web/README.md for the canonical behavior and deployment contract.
 
-**Tests:** vitest + Testing Library in jsdom; ~454 tests in 35 files, no DB needed (`vitest run --passWithNoTests`).
+**Data classification:** tutor and section chats created by non-students in the requested course are server-classified as teacher tests. They remain owner-scoped and persisted for reopening. Submit, self-assessment, section-answer, and feedback writes are omitted in preview and independently refused server-side. Teacher-test conversations are excluded from the unpublish student-activity warning. Existing student-owned rows after historical role changes are not migrated by this feature.
 
-**Stale doc warning:** apps/admin/README.md still says it is a "minimal scaffold" with "no Cloudflare Worker", and that styles are copied rather than shared. That predates M5 (#363) and packages/ui; the console is fully live.
+**Course context:** validated membership supplies context even with zero visible homework. Shared released-homework projection and stale-response guards preserve exact-course isolation. The outer course key remounts the workspace when the course changes; hook-level resets also protect standalone consumers.
 
-**Dev:** port 2312 (`strictPort`). Its `/api` proxy target is `LLTEACHER_API_URL`, default `http://localhost:8080`, not 2311 or 3000; see facts/code-dev-ports-and-proxy. `VITE_ADMIN_URL` in the web build points staff users at the console.
+**Deployment:** production and Floci share one origin, with the console at /admin/. VITE_ADMIN_URL overrides the return link. Loopback dev pairs are 2311/2312 and 2411/2412; LAN testing uses the bundled server. Admin API proxy defaults to localhost:8080. Tests use Vitest and Testing Library; real repository behavior requires DATABASE_URL.

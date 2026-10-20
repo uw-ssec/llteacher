@@ -10,9 +10,8 @@ import type { ConversationListItemResponse, ConversationListResponse, Conversati
    -- a 401/403 here must be distinguishable from "loaded, genuinely zero
    conversations."
 
-   `courseId` is expected to come from the already-fetched homework summary
-   (StudentHomeworkSummary.courseId) -- the client has no other source of
-   course context today. Passing `undefined` is a valid "not loaded yet"
+   `courseId` comes from the selected student homework course or from a
+   validated instructor-preview membership. Passing `undefined` is a valid "not loaded yet"
    state: the hook reports an empty list, loading: false, and skips the
    fetch/create network calls entirely rather than requesting with a
    malformed courseId.

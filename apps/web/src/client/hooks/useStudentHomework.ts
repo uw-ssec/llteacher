@@ -18,28 +18,58 @@ const emptySections: SidebarSection[] = [];
 const emptyMeta = new Map<number, SectionMeta>();
 const emptyWidgets: StudentProgressWidget[] = [];
 
+export interface InstructorPreviewCourse {
+  id: string;
+  code: string;
+  title: string;
+  term: string;
+}
+
+function previewCourseName(course: InstructorPreviewCourse): string {
+  return course.title.startsWith(course.code) ? course.title : `${course.code} · ${course.title}`;
+}
+
 /** Course-scoped homework navigation with independent live progress per
  * assignment. Setters capture the assignment ID, so a late request from a
  * previously opened homework cannot overwrite the newly selected one. */
-export function useStudentHomework() {
+export function useStudentHomework({ previewCourse }: { previewCourse?: InstructorPreviewCourse } = {}) {
   const [states, setStates] = useState<HomeworkState[]>([]);
   const [homeworkId, setHomeworkId] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [loadErrorStatus, setLoadErrorStatus] = useState<number | undefined>();
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/student/homeworks")
+    setStates([]);
+    setHomeworkId(undefined);
+    setLoading(true);
+    setLoadError(false);
+    setLoadErrorStatus(undefined);
+    const endpoint = previewCourse
+      ? `/api/courses/${encodeURIComponent(previewCourse.id)}/student-view/homeworks`
+      : "/api/student/homeworks";
+    fetch(endpoint)
       .then((response) => {
-        if (!response.ok) throw new Error(`failed to load student homeworks: ${response.status}`);
+        if (!response.ok) {
+          if (!cancelled) setLoadErrorStatus(response.status);
+          throw new Error(`failed to load student homeworks: ${response.status}`);
+        }
         return response.json() as Promise<StudentHomeworkListResponse>;
       })
       .then((data) => {
         if (cancelled) return;
         // Preserve the existing course choice until the course switcher in
-        // #70 lands. Never mix assignments from different courses.
-        const first = data.homeworks[0];
-        setStates(data.homeworks.filter((hw) => hw.courseId === first?.courseId).map((summary) => ({
+        // #70 lands. Preview is stricter: even an invalid cross-course row
+        // from the server is discarded against the already-validated course.
+        const visibleHomeworks = previewCourse
+          ? data.homeworks.filter((hw) => hw.courseId === previewCourse.id)
+          : data.homeworks;
+        const first = visibleHomeworks[0];
+        const courseHomeworks = previewCourse
+          ? visibleHomeworks
+          : visibleHomeworks.filter((hw) => hw.courseId === first?.courseId);
+        setStates(courseHomeworks.map((summary) => ({
           summary,
           sections: summary.sections.map((section) => ({
             number: section.order,
@@ -63,9 +93,12 @@ export function useStudentHomework() {
         setLoading(false);
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [previewCourse?.id]);
 
-  const selected = states.find((state) => state.summary.id === homeworkId);
+  const scopedStates = previewCourse
+    ? states.filter((state) => state.summary.courseId === previewCourse.id)
+    : states;
+  const selected = scopedStates.find((state) => state.summary.id === homeworkId);
   const update = <K extends "sections" | "sectionMetaByOrder" | "widgets">(
     key: K, action: SetStateAction<HomeworkState[K]>,
   ) => {
@@ -77,7 +110,7 @@ export function useStudentHomework() {
   };
 
   return {
-    homeworks: states.map((state) => state.summary),
+    homeworks: scopedStates.map((state) => state.summary),
     homeworkId,
     selectHomework: (id: string) => {
       if (states.some((state) => state.summary.id === id)) setHomeworkId(id);
@@ -89,9 +122,10 @@ export function useStudentHomework() {
     widgets: selected?.widgets ?? emptyWidgets,
     setWidgets: (action: SetStateAction<StudentProgressWidget[]>) => update("widgets", action),
     hwTitle: selected?.summary.title ?? "",
-    courseId: selected?.summary.courseId,
-    courseName: selected?.summary.courseName ?? "",
+    courseId: previewCourse?.id ?? selected?.summary.courseId,
+    courseName: previewCourse ? previewCourseName(previewCourse) : selected?.summary.courseName ?? "",
     loading,
     loadError,
+    loadErrorStatus,
   };
 }
