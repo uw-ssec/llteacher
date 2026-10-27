@@ -15,7 +15,7 @@ concurrency:
 jobs:
   test:
     name: test release artifact
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     services:
       postgres:
@@ -31,7 +31,7 @@ jobs:
     env:
       DATABASE_URL: postgres://llteacher:dev@localhost:5432/llteacher
     steps:
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
@@ -57,9 +57,10 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Build release image
-        uses: docker/build-push-action@v6
+        uses: useblacksmith/build-push-action@v2
         with:
           context: .
           file: Dockerfile.aws
@@ -94,7 +95,7 @@ jobs:
   production:
     name: Deploy production
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     environment: production
     permissions:
       contents: read
@@ -108,7 +109,7 @@ jobs:
       STACK: ${{ vars.PULUMI_STACK }}
       PULUMI_BACKEND_URL: ${{ vars.PULUMI_BACKEND_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
