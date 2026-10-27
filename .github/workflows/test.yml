@@ -28,7 +28,7 @@ jobs:
   # to diff against.
   migration-index-collision:
     name: check migration index collisions
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: github.event_name == 'pull_request'
     timeout-minutes: 5
 
@@ -36,7 +36,7 @@ jobs:
       # fetch-depth: 0 -- unlike the `web` job below, this one needs the
       # PR's base commit to diff against, not just the head tree. The
       # default shallow checkout (depth 1) only has HEAD.
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
@@ -70,7 +70,7 @@ jobs:
 
   web:
     name: apps/web — typecheck, migrate, test
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
 
     services:
@@ -92,7 +92,7 @@ jobs:
       DATABASE_URL: postgres://llteacher:dev@localhost:5432/llteacher
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: useblacksmith/checkout@v1
 
       - uses: actions/setup-node@v4
         with:
@@ -152,20 +152,19 @@ jobs:
       - name: Build
         run: npm run build
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
 
       # The production target is the Node/ECS image, not a Cloudflare Worker.
       # Build it and verify the two SPA entry points from a running container;
       # fake values are enough because neither page accesses external services.
       - name: Validate ECS application image
-        uses: docker/build-push-action@v6
+        uses: useblacksmith/build-push-action@v2
         with:
           context: .
           file: Dockerfile.aws
           load: true
           tags: llteacher-ci:latest
-          cache-from: type=gha,scope=llteacher-aws
-          cache-to: type=gha,mode=max,scope=llteacher-aws
       - name: Exercise ECS application image
         run: |
           docker run --detach --name llteacher-ci --publish 8080:8080 \
