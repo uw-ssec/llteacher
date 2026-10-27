@@ -1,220 +1,102 @@
-# LLTeacher v2
+# LLTeacher 0.4
 
-> **Turborepo monorepo.** TypeScript / React 19 / Vite / Tailwind 4, with a Node/Hono API on ECS Fargate.
-> Two workspaces today: `apps/web` (student-facing, port 2311) and `apps/admin` (instructor console, port 2312).
-> Django legacy (`apps/accounts`, `apps/conversations`, `apps/homeworks`, `apps/llm`, plus `src/`, `services/`)
-> remains the source of truth until cutover.
-> See `docs/superpowers/plans/2026-06-01-llteacher-fullstack-port.md`.
+LLTeacher is an AI tutoring platform for professors, researchers, and students
+at the University of Washington (UW). It brings course materials, homework, and
+AI tutor conversations into one learning environment. Professors configure tutors
+to support their teaching goals, give students guided help with course content,
+and review their work. Students can ask course questions and work through
+assignments with a tutor configured by their instructor.
 
-AI-assisted educational platform for teachers and students.
+**Open LLTeacher:** [Student app](https://llteacher.org/) ·
+[Instructor / admin app](https://llteacher.org/admin/)
 
-## Monorepo layout
+**New to LLTeacher?** Start with [Getting access](#getting-access), then follow
+the [Instructor Course Setup and Launch Checklist](./docs/instructor-course-setup-checklist.md).
 
-```
-llteacher/
-├── package.json              # root — npm workspaces + Turborepo task runner
-├── turbo.json                # task pipeline (build, dev, typecheck, test)
-├── pyproject.toml            # root — uv workspaces for Django apps
-│
-├── apps/
-│   ├── web/                  # TS workspace: student-facing app (port 2311)
-│   ├── admin/                # TS workspace: instructor console (port 2312)
-│   ├── accounts/             # Django legacy: user model + auth
-│   ├── conversations/        # Django legacy: AI conversation + submission
-│   ├── homeworks/            # Django legacy: homework + section CRUD
-│   └── llm/                  # Django legacy: LLM config + provider
-│
-├── src/llteacher/            # Django project root
-├── services/                 # Django service layer (uv workspace)
-└── docs/design-system/       # shared design system docs
-```
+## What you can do with LLTeacher
 
-The two manifest systems coexist in `apps/`: each TS workspace has a `package.json` (npm reads these), each Django workspace has a `pyproject.toml` (uv reads these). Neither tool sees the other's apps.
+- **Teach with your course materials.** Upload lecture notes, slides, readings,
+  and other resources for tutors to search when course knowledge is enabled.
+- **Configure AI tutors for your course.** Choose a model, write instructions,
+  adjust response settings, and decide whether a tutor can use course knowledge.
+- **Create homework and assignments.** Build assignments with conversation and
+  question sections, review drafts, and publish immediately or schedule a release.
+- **Bring your class together.** Import students from Canvas or CSV, add teaching
+  assistants, and manage their course permissions.
+- **Review and improve the learning experience.** Review student submissions and
+  conversations, test tutor configurations, and preview your course as students
+  see it.
 
-### Common commands (from repo root)
+## Getting access
 
-```bash
-npm install                # install all TS workspaces
-npx turbo dev              # boot all dev servers (web on 2311, admin on 2312)
-npx turbo build            # build all TS workspaces
-npx turbo typecheck        # tsc -b across all TS workspaces
-npx turbo test             # run all TS test suites
-```
+UW professors and researchers interested in using LLTeacher should email the
+**Scientific Software Engineering Center (SSEC)** at
+[ssec@uw.edu](mailto:ssec@uw.edu) to request access and be added to the platform.
+Include your UW email address and the course or teaching use case you would
+like to support. You can also visit SSEC’s
+[Get Involved and contact information page](https://escience.washington.edu/get-involved-with-ssec/).
 
-Or scope to one workspace: `npm run dev --workspace=llteacher-web`.
+SSEC coordinates instructor access and course assignment. A platform
+administrator creates your course or adds you to an existing one. Once access
+is ready, sign in with the same institutional email used during onboarding and
+confirm that your course appears in the instructor console.
 
-### Developer tooling, project memory, and agents
+If your course does not appear, contact SSEC to check your course assignment.
 
-The repository follows [uw-ssec/project-template](https://github.com/uw-ssec/project-template):
+## Set up your first course
 
-```bash
-pixi install                      # pre-commit, gh, okf (developer tooling only)
-pixi run verify                   # the quality gate: hooks, knowledge bundle, skill evals, typecheck
-pixi run okf search "<topic>"     # project memory: decisions, history, known traps (knowledge/)
-```
+1. **Get access and a course assignment through SSEC.** Course creation is
+   handled by a platform administrator.
+2. **Add your students.** Connect your Canvas course and import its roster, or
+   import students with a CSV file. Add TAs and choose their permissions.
+3. **Add your course materials.** Upload resources and verify that the extracted
+   content is searchable.
+4. **Configure and test your AI tutor.** Choose the model, instructions, response
+   settings, and access to course knowledge.
+5. **Create your first assignment.** Add homework sections, review the draft,
+   and publish or schedule it when ready.
+6. **Check the student experience.** Use Student view and test the tutor before
+   launching the course.
 
-- [`AGENTS.md`](./AGENTS.md) is the entry point for AI assistants; rules live in
-  `.agents/rules/` and repeatable workflows in `.agents/skills/`.
-- [`knowledge/`](./knowledge/index.md) is the OKF project-memory bundle: spec
-  decisions, the plan as implemented, and lessons from issues and PRs.
-- [`skill-evals/`](./skill-evals/README.md) evaluates every agent skill with
-  Inspect (model level) and Harbor (sandboxed agent level).
-- Contribution rules: [`CONTRIBUTING.md`](./CONTRIBUTING.md),
-  [`AI_POLICY.md`](./AI_POLICY.md).
+The [Instructor Course Setup and Launch Checklist](./docs/instructor-course-setup-checklist.md)
+walks through the complete process and the checks to run before students begin.
 
-### Deploy locally with Floci
+## Guides for professors and researchers
 
-Deploy the AWS-shaped stack locally without accessing an AWS account:
+Use these guides when setting up a course or updating it during the term.
+LLTeacher calls its assignments **homework** and its configurable AI tutors
+**tutor configurations** in the teaching console.
 
-```sh
-npm run aws:local:up
-npm run aws:local:verify
-npm run aws:local:down
-```
+| I want to… | Guide |
+| --- | --- |
+| Have a course created or join an existing course | [Course creation and instructor onboarding](./docs/superadmin-instructor-onboarding.md#choose-the-correct-workflow) — administrator steps, coordinated through SSEC |
+| Link my Canvas course and import students | [Connect Canvas and sync the roster](./docs/instructor-course-setup-checklist.md#connect-canvas-and-sync-the-roster) |
+| Import students without Canvas | [Import students from CSV](./docs/instructor-course-setup-checklist.md#import-students-from-csv) |
+| Add TAs and set their permissions | [Add teaching assistants](./docs/instructor-course-setup-checklist.md#add-teaching-assistants) |
+| Upload or update course materials | [Build and maintain the knowledge base](./docs/instructor-course-setup-checklist.md#build-and-maintain-the-knowledge-base) |
+| Configure AI tutors and agents | [Create tutor configurations](./docs/instructor-course-setup-checklist.md#create-tutor-configurations) |
+| Create assignments and publish homework | [Create and publish homework](./docs/instructor-course-setup-checklist.md#create-and-publish-homework) |
+| Check that my course is ready | [Test the course before launch](./docs/instructor-course-setup-checklist.md#test-the-course-before-launch) |
+| Update my course throughout the term | [Ongoing course maintenance](./docs/instructor-course-setup-checklist.md#ongoing-course-maintenance) |
 
-Open LLTeacher at [http://localhost:8080](http://localhost:8080). Floci creates
-the app and PostgreSQL containers through the same Pulumi program used for AWS.
-See [`infra/README.md`](./infra/README.md) for local limitations, encrypted
-development credentials, resource inventory and the AWS-only GitHub release
-workflow. No Floci deployment runs in GitHub Actions; production provisioning
-requires separate explicit approval.
+## Using Canvas with LLTeacher
 
-The Django stack still uses its own commands (`uv run python run_tests.py`, `python manage.py runserver`) and is unaffected by Turborepo.
+Canvas is optional: you can use LLTeacher with a CSV-managed roster. When you
+connect Canvas, use your own Canvas account token and select the course you
+want to link.
 
-## 🚀 Project Status
+Canvas integration imports and updates **course enrollments**. It does not
+import assignments, files, course materials, or grades. Create homework and
+upload teaching materials in LLTeacher using the guides above.
 
-**Phase 1 Complete**: Data Models & Testing Infrastructure ✅
+Roster synchronization is manual. Run **Sync from Canvas** when enrollments
+change, then review the results. See
+[Canvas setup and roster sync](./docs/instructor-course-setup-checklist.md#connect-canvas-and-sync-the-roster)
+for the steps.
 
-- ✅ **Models**: All Django models implemented according to design specifications
-- ✅ **Testing**: 149 comprehensive test cases with 350x performance optimization
-- ✅ **Architecture**: Clean, modular structure with proper separation of concerns
-- ✅ **Documentation**: Comprehensive testing guide and setup instructions
+## For developers and contributors
 
-**Next Phase**: Service Layer & API Development 🔄
-
-## Project Structure
-
-This project uses [uv workspaces](https://docs.astral.sh/uv/concepts/projects/workspaces/) for dependency management.
-
-### Workspace Members
-
-- **`apps/accounts`** - User management and authentication
-- **`apps/conversations`** - AI conversation handling and submissions
-- **`apps/homeworks`** - Homework and section management
-- **`apps/llm`** - LLM configuration and services
-- **`core`** - Shared utilities and base classes
-- **`permissions`** - Permission decorators and utilities
-- **`services`** - Business logic service layer
-- **`src/llteacher`** - Main Django project
-
-## Setup
-
-1. Install uv: `pip install uv`
-2. Install dependencies: `uv sync`
-3. Run migrations: `python manage.py migrate`
-4. Create superuser: `python manage.py createsuperuser`
-5. **Configure API Key** (see Configuration section below)
-6. Populate test data: `python manage.py populate_test_database`
-7. Run development server: `python manage.py runserver`
-
-## Configuration
-
-### API Key Setup
-
-The AI tutoring functionality requires an OpenAI API key. You have two options:
-
-#### Option 1: Through Admin Interface (Recommended)
-
-1. Start the development server: `python manage.py runserver`
-2. Go to the admin interface: `http://localhost:8000/admin/`
-3. Navigate to **LLM > LLM Configs**
-4. Edit the "Test GPT-4 Config" entry
-5. Replace `test-api-key-placeholder` with your actual OpenAI API key
-6. Save the configuration
-
-#### Option 2: Update Test Database Population
-
-If you want to set the API key during initial setup:
-
-1. Edit `src/llteacher/management/commands/populate_test_database.py`
-2. Find the line with `api_key='test-api-key-placeholder'`
-3. Replace the placeholder with your actual OpenAI API key
-4. Run: `python manage.py populate_test_database --reset`
-
-### Getting an OpenAI API Key
-
-1. Go to [OpenAI's website](https://platform.openai.com/)
-2. Sign up or log in to your account
-3. Navigate to the API section
-4. Generate a new API key
-5. Copy the key (it starts with `sk-`)
-
-### Testing Your Configuration
-
-1. Go to the admin interface: `http://localhost:8000/admin/`
-2. Navigate to **LLM > LLM Configs**
-3. Click on your configuration
-4. Use the "Test Configuration" feature (if available)
-5. Or create a conversation as a student to test the AI responses
-
-### Important Notes
-
-- **Never commit real API keys to version control**
-- The test database includes a placeholder API key that won't work
-- You must replace it with a real key for AI functionality to work
-- API keys should be kept secure and not shared
-
-### Troubleshooting
-
-**"No valid LLM configuration available"**
-- Check that you have a default LLM config marked as active
-- Verify your API key is correctly set (not the placeholder)
-
-**"Technical issue" errors in conversations**
-- Check the Django logs for specific API errors
-- Verify your OpenAI API key has sufficient credits
-- Ensure the API key has the correct permissions
-
-**AI responses not generating**
-- Confirm the LLM config is set as default (`is_default=True`)
-- Check that the configuration is active (`is_active=True`)
-- Verify the model name (e.g., 'gpt-4', 'gpt-3.5-turbo') is correct
-
-## Development
-
-- Each app is a separate workspace member with its own `pyproject.toml`
-- Use `uv add <package>` to add dependencies to specific workspaces
-- Use `uv sync` to install all workspace dependencies
-
-## Testing
-
-The project includes comprehensive testing with **149 test cases** covering all models and their functionality.
-
-### Quick Start
-
-```bash
-# Run all tests (fastest - uses in-memory database)
-uv run python run_tests.py
-
-# Run with verbose output
-uv run python run_tests.py --verbosity=2
-
-# Run specific app tests
-uv run python run_tests.py apps.accounts.tests
-```
-
-### Performance
-
-- **Standard Django tests**: ~21.348 seconds
-- **Optimized tests**: ~0.061 seconds
-- **Speed improvement**: **350x faster!** 🚀
-
-### Test Coverage
-
-- ✅ **Models**: Complete coverage of all Django models
-- ✅ **Relationships**: Foreign keys, one-to-one, cascade deletes
-- ✅ **Validation**: Custom validation methods and business logic
-- ✅ **Edge Cases**: Special characters, long content, boundaries
-- ✅ **Properties**: Custom properties and computed fields
-
-For detailed testing information, see [TESTING.md](TESTING.md).
+For local setup, architecture, testing, and infrastructure, see the
+[Developer README](./docs/developer-readme.md). Contribution guidance is in
+[CONTRIBUTING.md](./CONTRIBUTING.md), and the
+[documentation index](./docs/README.md) links to additional technical references.
