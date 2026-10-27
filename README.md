@@ -1,6 +1,6 @@
 # LLTeacher 0.4
 
-LLTeacher is an AI tutoring platform for professors, researchers, and students
+LLTeacher is an AI tutoring platform for professors and students
 at the University of Washington (UW). It brings course materials, homework, and
 AI tutor conversations into one learning environment. Professors configure tutors
 to support their teaching goals, give students guided help with course content,
@@ -29,7 +29,7 @@ the [Instructor Course Setup and Launch Checklist](./docs/instructor-course-setu
 
 ## Getting access
 
-UW professors and researchers interested in using LLTeacher should email the
+UW professors interested in using LLTeacher should email the
 **Scientific Software Engineering Center (SSEC)** at
 [ssec@uw.edu](mailto:ssec@uw.edu) to request access and be added to the platform.
 Include your UW email address and the course or teaching use case you would
@@ -61,7 +61,7 @@ If your course does not appear, contact SSEC to check your course assignment.
 The [Instructor Course Setup and Launch Checklist](./docs/instructor-course-setup-checklist.md)
 walks through the complete process and the checks to run before students begin.
 
-## Guides for professors and researchers
+## Guides for professors
 
 Use these guides when setting up a course or updating it during the term.
 LLTeacher calls its assignments **homework** and its configurable AI tutors
