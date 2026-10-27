@@ -277,7 +277,7 @@ test('OIDC belongs exclusively to protected tag-only production job', () => {
 });
 test('production consumes tested saved image with no second Docker build', () => {
   const tests=workflow.jobs.test.steps, production=workflow.jobs.production.steps;
-  assert.equal([...tests,...production].filter(s => s.uses?.startsWith('docker/build-push-action')).length,1);
+  assert.equal([...tests,...production].filter(s => s.uses?.startsWith('useblacksmith/build-push-action')).length,1);
   assert(tests.some(s => s.run?.includes('docker save')));
   assert(tests.some(s => s.uses?.startsWith('actions/upload-artifact')));
   assert(production.some(s => s.uses?.startsWith('actions/download-artifact')));
