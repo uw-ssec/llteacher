@@ -20,6 +20,11 @@ Documentation for the LLTeacher v2 port and platform-generalization work. Source
 - [Superadmin Guide to Onboarding Instructors](./superadmin-instructor-onboarding.md)
 - [Instructor Course Setup and Launch Checklist](./instructor-course-setup-checklist.md)
 
+## Developer documentation
+
+- [Developer README](./developer-readme.md) — TypeScript architecture, local development,
+  verification, and the shared styling and design-system workflow.
+
 ## Where things live in code
 
 ```
