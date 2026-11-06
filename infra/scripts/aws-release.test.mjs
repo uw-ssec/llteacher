@@ -28,7 +28,11 @@ if(tool==='pulumi') {
  if(s.ecrError){ console.error('An error occurred ('+s.ecrError+') when calling DescribeRepositories'); process.exit(254); }
  out({repositories:[{repositoryUri:s.outputs.ecrRepositoryUrl}]});
 } else if(cmd.includes('ecs list-services')) out({serviceArns:s.liveService?['arn:aws:ecs:us-west-2:123456789012:service/live']:[]});
-else if(cmd.includes('ecs describe-services')) out({services:[{status:'ACTIVE',taskDefinition:s.arn}],failures:[]});
+else if(cmd.includes('ecs describe-services')) {
+ if(s.ecsError){ console.error(s.ecsError); process.exit(254); }
+ if(process.env.AWS_RETRY_MODE!=='standard'||process.env.AWS_MAX_ATTEMPTS!=='6') process.exit(92);
+ out({services:[{status:'ACTIVE',taskDefinition:s.arn}],failures:[]});
+}
 else if(cmd.includes('ecs describe-task-definition')) out({taskDefinition:{containerDefinitions:[{name:'app',image:s.outputs.ecrRepositoryUrl+'@'+s.digest}]}});
 else if(cmd.includes('ecs run-task')) out({tasks:[{taskArn:'arn:aws:ecs:us-west-2:123456789012:task/production-cluster/0123456789abcdef0123456789abcdef'}],failures:[]});
 else if(cmd.includes('ecs wait tasks-stopped')) {if(s.waitError) process.exit(255);}
@@ -77,6 +81,27 @@ test('repository authentication errors cannot trigger bootstrap', t => {
 test('only repository-not-found permits base bootstrap', t => {
   const f = fixture(t, { ecrError: 'RepositoryNotFoundException' }); success(f.run('prepare-aws-release.sh', [stack, 'repository']));
   assert(f.calls().some(c => c.includes('up')));
+});
+test('ECS preflight checks the active service without modifying production', t => {
+  const f = fixture(t, { outputs: { clusterName: 'production-cluster', serviceName: 'production-service' } });
+  const result = f.run('prepare-aws-release.sh', [stack, 'preflight']);
+  success(result);
+  assert.match(result.stdout, /production-cluster.*production-service/);
+  assert(f.calls().some(c => c.includes('describe-services')));
+  noMutation(f);
+});
+test('ECS preflight surfaces lookup failures without modifying production', t => {
+  const f = fixture(t, { outputs: { clusterName: 'production-cluster', serviceName: 'production-service' }, ecsError: '503 Service Unavailable' });
+  const result = f.run('prepare-aws-release.sh', [stack, 'preflight']);
+  failure(result);
+  assert.match(result.stderr, /503 Service Unavailable/);
+  noMutation(f);
+});
+test('ECS preflight permits a stack with no service yet', t => {
+  const f = fixture(t);
+  success(f.run('prepare-aws-release.sh', [stack, 'preflight']));
+  assert(f.calls().some(c => c.includes('list-services')));
+  noMutation(f);
 });
 test('candidate preserves actual active image rollback before failing up and previews configured candidate', t => {
   const f = fixture(t, { outputs: { clusterName:'production-cluster', serviceName:'production-service', serviceTaskDefinition:arn, imageDigest:`sha256:${'d'.repeat(64)}`, ecrRepositoryUrl:'123456789012.dkr.ecr.us-west-2.amazonaws.com/llteacher-production/app' }, upError:true });

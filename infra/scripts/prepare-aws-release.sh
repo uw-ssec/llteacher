@@ -3,8 +3,33 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/aws-release-common.sh"
 stack="${1:-}"
 validate_release_target "$stack"
-[[ $# -eq 2 ]] || die "Usage: $0 production repository|candidate"
+[[ $# -eq 2 ]] || die "Usage: $0 production repository|preflight|candidate"
+describe_active_task() {
+  local cluster="$1" service="$2" current task
+  validate_name "$cluster"
+  validate_name "$service"
+  printf 'Checking ECS service %s/%s in %s\n' "$cluster" "$service" "$AWS_REGION" >&2
+  current=$(AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=6 aws ecs describe-services \
+    --cluster "$cluster" --services "$service" --output json) || return $?
+  task=$(jq -er 'select((.failures | length) == 0) | .services | select(length == 1) | .[0] | select(.status == "ACTIVE") | .taskDefinition' <<<"$current") ||
+    die 'ECS did not return an active service with a task definition.'
+  validate_task_definition "$task"
+  printf '%s\n' "$task"
+}
+
 case "$2" in
+  preflight)
+    read_outputs
+    service=$(jq -r '.serviceName // empty' <<<"$outputs")
+    if [[ -n "$service" ]]; then
+      cluster=$(jq -er '.clusterName' <<<"$outputs")
+      task=$(describe_active_task "$cluster" "$service")
+      echo "Active ECS service $cluster/$service uses $task."
+    else
+      assert_no_service
+      echo 'No existing ECS service to check.'
+    fi
+    ;;
   repository)
     read_outputs
     error_file=$(mktemp)
@@ -29,11 +54,7 @@ case "$2" in
     service=$(jq -r '.serviceName // empty' <<<"$outputs")
     if [[ -n "$service" ]]; then
       cluster=$(jq -er '.clusterName' <<<"$outputs")
-      validate_name "$cluster"
-      validate_name "$service"
-      current=$(aws ecs describe-services --cluster "$cluster" --services "$service" --output json)
-      previous=$(jq -er 'select((.failures | length) == 0) | .services | select(length == 1) | .[0] | select(.status == "ACTIVE") | .taskDefinition' <<<"$current")
-      validate_task_definition "$previous"
+      previous=$(describe_active_task "$cluster" "$service")
       definition=$(aws ecs describe-task-definition --task-definition "$previous" --output json)
       image=$(jq -er '[.taskDefinition.containerDefinitions[] | select(.name == "app")] | select(length == 1) | .[0].image' <<<"$definition")
       previous_digest="${image##*@}"

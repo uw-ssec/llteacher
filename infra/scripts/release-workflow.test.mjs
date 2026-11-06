@@ -297,12 +297,14 @@ test('production release remains tag-only and does not restore staging auto-depl
   assert.equal(workflow.on.push.branches, undefined);
   assert.equal(workflow.jobs.production.environment, 'production');
 });
-test('refreshed stack is validated before the first AWS mutation', () => {
+test('refreshed stack is validated and ECS checked before the first AWS mutation', () => {
   const steps=workflow.jobs.production.steps;
   const refresh=steps.findIndex(s=>s.name==='Refresh encrypted stack configuration');
   const validate=steps.findIndex(s=>s.name==='Validate refreshed production configuration');
   const mutate=steps.findIndex(s=>s.name==='Bootstrap base infrastructure only when ECR is absent');
-  assert(refresh >= 0 && validate > refresh && mutate > validate);
+  const preflight=steps.findIndex(s=>s.name==='Check production ECS service before publishing');
+  assert(refresh >= 0 && validate > refresh && preflight > validate && mutate > preflight);
+  assert.equal(steps[preflight].run.trim(), 'bash infra/scripts/prepare-aws-release.sh "$STACK" preflight');
   assert.match(steps[validate].run,/validate_refreshed_stack_config/);
 });
 test('configuration refresh skips a stack without deployment history and refreshes an established stack', t => {
