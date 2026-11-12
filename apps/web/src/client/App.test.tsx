@@ -2449,6 +2449,64 @@ describe("App main landmark + skip link (#299)", () => {
 describe("App section chat resumes with hydrated history (#252)", () => {
   const SEC1_IN_PROGRESS = [{ id: "s1", title: "Sec 1", order: 1, status: "in_progress", conversationId: "sec-conv-1" }];
 
+  it("renders repeated feedback once below the section completion card in live and hydrated replies", async () => {
+    const priorFeedback = "Your earlier calculation was correct.";
+    const feedback = "You found the right mean.";
+    const followUp = "How would an outlier affect it?";
+    const chunks = [
+      { type: "start" },
+      { type: "start-step" },
+      { type: "text-start", id: "before" },
+      { type: "text-delta", id: "before", delta: feedback },
+      { type: "text-end", id: "before" },
+      { type: "tool-input-available", toolCallId: "complete", toolName: "markSectionComplete", input: {} },
+      { type: "tool-output-available", toolCallId: "complete", output: { status: "suggested" } },
+      { type: "finish-step" },
+      { type: "start-step" },
+      { type: "text-start", id: "repeat" },
+      { type: "text-delta", id: "repeat", delta: feedback },
+      { type: "text-end", id: "repeat" },
+      { type: "text-start", id: "follow-up" },
+      { type: "text-delta", id: "follow-up", delta: followUp },
+      { type: "text-end", id: "follow-up" },
+      { type: "finish-step" },
+      { type: "finish" },
+    ];
+
+    await renderApp({
+      homeworks: homeworkFixture({ sections: SEC1_IN_PROGRESS }),
+      routes: (url) => {
+        if (url.startsWith("/api/conversations/sec-conv-1/messages")) {
+          return Response.json([{
+            id: "prior-reply",
+            role: "assistant",
+            parts: [
+              { type: "text", text: priorFeedback },
+              { type: "tool-markSectionComplete", state: "output-available", input: {} },
+              { type: "step-start" },
+              { type: "text", text: priorFeedback },
+            ],
+          }]);
+        }
+        if (url === "/api/chat") {
+          return new Response(chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n", {
+            headers: { "content-type": "text/event-stream", "x-conversation-id": "sec-conv-1" },
+          });
+        }
+        return undefined;
+      },
+    });
+
+    await screen.findAllByText(priorFeedback);
+    const composer = await screen.findByLabelText("Message input");
+    await userEvent.setup().type(composer, "The mean is 4.{Enter}");
+    await screen.findByText(followUp);
+
+    const [priorCard, liveCard] = screen.getAllByText("Looks like you've got this");
+    expect(priorCard!.compareDocumentPosition(screen.getByText(priorFeedback))).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(liveCard!.compareDocumentPosition(screen.getByText(feedback))).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
   it("hydrates the section chat's transcript on mount AND includes the prior turns in the next /api/chat request", async () => {
     const chatCalls: Array<{ conversationId?: string; messages: Array<{ role: string }> }> = [];
 

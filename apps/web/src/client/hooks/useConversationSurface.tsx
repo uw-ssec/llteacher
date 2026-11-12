@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import { MessageMarkdown, renderToolPart, isToolPart, SourcesList, collectKnowledgeCheckAnswers, knowledgeCheckAnswerText, KNOWLEDGE_CHECK_PART_TYPE } from "@llteacher/ui";
@@ -188,23 +188,44 @@ function buildMessageData(
     const isStopped = m.id === stoppedMessageId;
 
     if (m.role === "assistant") {
+      const renderedParts: ReactNode[] = [];
+      let previousText: { text: string; index: number } | undefined;
+      let completionAfterText = false;
+      for (const [i, part] of m.parts.entries()) {
+        if (part.type === "text") {
+          const text = part.text.trim();
+          if (!text) continue;
+          if (completionAfterText && previousText) {
+            // Hold a possible repeat until the text part finishes. Once
+            // confirmed, keep the copy below the completion card.
+            if (isStreaming && !isStopped && part.state === "streaming" && previousText.text.startsWith(text)) {
+              continue;
+            }
+            if (text === previousText.text) renderedParts[previousText.index] = null;
+          }
+          previousText = { text, index: renderedParts.length };
+          completionAfterText = false;
+          renderedParts.push(
+            <MessageMarkdown key={`text-${m.id}-${i}`} onRun={onRunRCode}>
+              {part.text}
+            </MessageMarkdown>,
+          );
+          continue;
+        }
+        if (!isToolPart(part)) continue;
+        const tool = renderToolPart(part, `tool-${m.id}-${i}`, { onRunRCode, knowledgeCheck, canSubmitSections });
+        if (tool === null) continue;
+        if (part.type === "tool-markSectionComplete") {
+          completionAfterText = true;
+        } else {
+          previousText = undefined;
+          completionAfterText = false;
+        }
+        renderedParts.push(tool);
+      }
       const content = (
         <>
-          {m.parts.map((part, i) => {
-            if (part.type === "text") {
-              return (
-                <MessageMarkdown key={`text-${m.id}-${i}`} onRun={onRunRCode}>
-                  {part.text}
-                </MessageMarkdown>
-              );
-            }
-            /* #144: no `part as ToolPart` cast -- useChat isn't given the
-               server's tool-input generics, so the AI SDK's UIMessagePart
-               union can't statically prove a `tool-*` part carries
-               `input`/`state`. */
-            if (!isToolPart(part)) return null;
-            return renderToolPart(part, `tool-${m.id}-${i}`, { onRunRCode, knowledgeCheck, canSubmitSections });
-          })}
+          {renderedParts}
           {/* #41: every concept the tutor opened this turn, once the reply is complete. */}
           {!isStreaming && <SourcesList sources={sourcesFromParts(m.parts)} />}
           {isStopped && (
